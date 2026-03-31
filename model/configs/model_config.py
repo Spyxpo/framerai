@@ -56,6 +56,13 @@ class FramerConfig:
     device: str = "auto"
     mixed_precision: bool = True
 
+    # Distillation
+    distill_temperature: float = 2.0
+    distill_alpha_hard: float = 0.5
+    distill_alpha_soft: float = 0.5
+    rope_scaling_factor: float = 1.0
+    rope_scaling_type: str = "linear"
+
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
