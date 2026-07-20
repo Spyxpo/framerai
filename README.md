@@ -1,6 +1,22 @@
 # FramerAI
 
+[![CI](https://github.com/Spyxpo/framerai/actions/workflows/ci.yml/badge.svg)](https://github.com/Spyxpo/framerai/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Spyxpo/framerai/actions/workflows/codeql.yml/badge.svg)](https://github.com/Spyxpo/framerai/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
+[![Node 18+](https://img.shields.io/badge/node-18%2B-green.svg)](backend/package.json)
+
 A multimodal open-source AI model that can understand and generate text, code, images, and videos. Built with a transformer backbone, diffusion-based image generation, and temporal video synthesis.
+
+## Documentation
+
+- [Guide](GUIDE.md) - full walkthrough of the model, backend, and website.
+- [Contributing](CONTRIBUTING.md) - development setup, branching model, and pull request flow.
+- [Roadmap and TODOs](TODOS.md) - planned work and open tasks.
+- [Changelog](CHANGELOG.md) - notable changes per release.
+- [Code of Conduct](CODE_OF_CONDUCT.md) - community expectations.
+- [Security Policy](SECURITY.md) - how to report vulnerabilities.
 
 ## Architecture
 
@@ -98,7 +114,6 @@ The web app opens at `http://localhost:5173`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-
 | GET | `/api/health` | Health check & capabilities |
 | POST | `/api/chat/conversations` | Create conversation |
 | GET | `/api/chat/conversations` | List conversations |

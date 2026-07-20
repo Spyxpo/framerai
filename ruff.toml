@@ -1,0 +1,22 @@
+# Ruff configuration for the FramerAI model and training code.
+# Run `ruff check .` locally. CI enforces the error-class subset (E9, F63, F7, F82)
+# as a blocking gate and reports the full rule set as informational.
+
+line-length = 100
+target-version = "py310"
+
+extend-exclude = ["venv", ".venv", "build", "dist", "**/__pycache__"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",  # line length is handled by the formatter, not enforced hard
+  "B008",  # allow function calls in argument defaults where intentional
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

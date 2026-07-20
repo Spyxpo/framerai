@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a defect or unexpected behavior
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill out the sections below so the issue can be reproduced and fixed.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am running the latest version of the affected branch.
+          required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - Model (Python)
+        - Backend (Node)
+        - Website (React)
+        - Distillation / training
+        - Documentation
+        - Other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions that trigger the bug.
+      placeholder: |
+        1. Run `python build.py --mode build --size tiny`
+        2. Start the backend
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and error output
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, Node version, GPU / VRAM, and relevant package versions.
+      placeholder: |
+        OS: Ubuntu 22.04
+        Python: 3.11
+        Node: 20
+        GPU: RTX 4090 24GB
+    validations:
+      required: true
