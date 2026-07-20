@@ -1,5 +1,4 @@
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -36,6 +35,20 @@ class FramerConfig:
     video_resolution: int = 256
     temporal_layers: int = 8
 
+    # Audio encoder config (speech / audio understanding)
+    audio_sample_rate: int = 16000
+    audio_n_mels: int = 80
+    audio_n_fft: int = 400
+    audio_hop_length: int = 160
+    audio_max_frames: int = 1024
+    audio_d_model: int = 1024
+    audio_n_heads: int = 16
+    audio_n_layers: int = 12
+
+    # Audio generation config (text-to-audio / speech)
+    audio_gen_frames: int = 128
+    audio_gen_channels: int = 128
+
     # Code generation
     code_vocab_size: int = 50304  # shared vocab
 
@@ -56,10 +69,7 @@ class FramerConfig:
     device: str = "auto"
     mixed_precision: bool = True
 
-    # Distillation
-    distill_temperature: float = 2.0
-    distill_alpha_hard: float = 0.5
-    distill_alpha_soft: float = 0.5
+    # Context extension (RoPE scaling)
     rope_scaling_factor: float = 1.0
     rope_scaling_type: str = "linear"
 

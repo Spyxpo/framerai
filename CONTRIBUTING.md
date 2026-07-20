@@ -32,8 +32,8 @@ discussed before you invest time.
 
 | Path | Description |
 |------|-------------|
-| `model/` | Model architecture, tokenizer, configs, and distillation pipeline. |
-| `build.py` | Command line entry point to build, train, distill, and export models. |
+| `model/` | Model architecture, tokenizer, configs, data loader, and inference worker. |
+| `build.py` | Command line entry point to build, train, and export models. |
 | `train.sh` | Convenience wrapper around common training runs. |
 | `backend/` | Express API server and WebSocket streaming. |
 | `website/` | React frontend built with Vite. |

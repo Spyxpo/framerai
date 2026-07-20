@@ -15,12 +15,16 @@ venv/
 # Model artifacts
 checkpoints/
 logs/
-data/
 *.pt
 *.pth
 *.onnx
 fine_tuned_bert/
 results/
+
+# Training data (bulk ignored, docs and examples kept)
+data/*
+!data/README.md
+!data/examples/
 
 # Node
 node_modules/
@@ -31,8 +35,12 @@ node_modules/
 website/dist/
 backend/uploads/images/*
 backend/uploads/videos/*
+backend/uploads/audio/*
+backend/uploads/generated/*
 !backend/uploads/images/.gitkeep
 !backend/uploads/videos/.gitkeep
+!backend/uploads/audio/.gitkeep
+!backend/uploads/generated/.gitkeep
 
 # IDE
 .vscode/

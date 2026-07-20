@@ -1,11 +1,16 @@
 /**
- * Model service - interfaces with the FramerAI Python model.
+ * Model service.
  *
- * In production, this would spawn a Python process or call a model server.
- * For development, it provides intelligent placeholder responses.
+ * Routes each request to the FramerAI Python inference worker when a trained
+ * checkpoint is available (see pythonBridge). When the model is disabled or the
+ * worker is unavailable, it returns placeholder responses so the backend still
+ * runs end to end without trained weights.
  */
 
 const { v4: uuidv4 } = require("uuid");
+const bridge = require("./pythonBridge");
+
+const GENERATED_URL = "/uploads/generated";
 
 /**
  * Detect the intent/type of a user message.
@@ -27,6 +32,16 @@ function detectIntent(content) {
     lower.includes("video of")
   ) {
     return "video";
+  }
+  if (
+    lower.includes("generate audio") ||
+    lower.includes("text to speech") ||
+    lower.includes("speak") ||
+    lower.includes("say ") ||
+    lower.includes("voice") ||
+    lower.includes("sound of")
+  ) {
+    return "audio";
   }
   if (
     lower.includes("write code") ||
@@ -129,47 +144,76 @@ if __name__ == "__main__":
 }
 
 /**
- * Process a chat message and return a response.
+ * Process a chat message and return a response, using the model when available.
  */
 async function processMessage(messages, requestType = "text") {
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
 
+  if (bridge.available()) {
+    try {
+      return await modelChat(intent, content);
+    } catch (err) {
+      console.warn(`[model] falling back to placeholder: ${err.message}`);
+    }
+  }
+
+  return mockChat(intent, content, messages);
+}
+
+async function modelChat(intent, content) {
+  if (intent === "image" || intent === "video" || intent === "audio") {
+    const result = await bridge.request(intent, { prompt: content });
+    return {
+      type: intent,
+      content: `Here is the ${intent} generated for: "${content}"`,
+      metadata: { prompt: content, url: `${GENERATED_URL}/${result.file}`, model: `framerai-${intent}` },
+    };
+  }
+
+  const op = intent === "code" ? "code" : "chat";
+  const result = await bridge.request(op, { prompt: content });
+  return {
+    type: intent === "code" ? "code" : "text",
+    content: result.content,
+    metadata: { model: `framerai-${intent === "code" ? "code" : "text"}` },
+  };
+}
+
+async function mockChat(intent, content, messages) {
   // Simulate processing delay
   await new Promise((r) => setTimeout(r, 300 + Math.random() * 700));
+
+  const hint = "[Requires a trained model. Run `python build.py --mode all --size tiny` first, then set MODEL_ENABLED=true.]";
 
   switch (intent) {
     case "image":
       return {
         type: "image",
-        content: `I've generated an image based on your prompt: "${content}"\n\n[Image generation requires a trained model. Run \`python build.py --mode all --size tiny\` to train the model first.]`,
-        metadata: {
-          prompt: content,
-          resolution: 256,
-          model: "framerai-diffusion",
-        },
+        content: `I've generated an image based on your prompt: "${content}"\n\n${hint}`,
+        metadata: { prompt: content, resolution: 256, model: "framerai-diffusion" },
       };
 
     case "video":
       return {
         type: "video",
-        content: `I've started generating a video for: "${content}"\n\n[Video generation requires a trained model. Run \`python build.py --mode all --size tiny\` to train the model first.]`,
-        metadata: {
-          prompt: content,
-          frames: 16,
-          model: "framerai-video",
-        },
+        content: `I've started generating a video for: "${content}"\n\n${hint}`,
+        metadata: { prompt: content, frames: 16, model: "framerai-video" },
+      };
+
+    case "audio":
+      return {
+        type: "audio",
+        content: `I've generated audio for: "${content}"\n\n${hint}`,
+        metadata: { prompt: content, model: "framerai-audio" },
       };
 
     case "code":
       return {
         type: "code",
         content: generateCodeResponse(content),
-        metadata: {
-          language: "python",
-          model: "framerai-code",
-        },
+        metadata: { language: "python", model: "framerai-code" },
       };
 
     default:
@@ -182,31 +226,44 @@ async function processMessage(messages, requestType = "text") {
 }
 
 /**
- * Generate a text response.
+ * Generate a text response (placeholder).
  */
 function generateTextResponse(content, messages) {
   const lower = content.toLowerCase();
 
   if (lower.includes("hello") || lower.includes("hi") || lower.includes("hey")) {
-    return "Hello! I'm FramerAI, a multimodal AI assistant. I can help you with:\n\n- **Text Generation** - Ask me anything\n- **Code Generation** - Write code in any language\n- **Image Generation** - Create images from descriptions\n- **Video Generation** - Generate short video clips\n\nHow can I help you today?";
+    return "Hello! I'm FramerAI, a multimodal AI assistant. I can help you with:\n\n- **Text Generation** - Ask me anything\n- **Code Generation** - Write code in any language\n- **Image Generation** - Create images from descriptions\n- **Video Generation** - Generate short video clips\n- **Audio Generation** - Synthesize speech and audio\n\nHow can I help you today?";
   }
 
   if (lower.includes("what can you do") || lower.includes("capabilities") || lower.includes("help")) {
-    return "I'm FramerAI, and here's what I can do:\n\n1. **Chat & Answer Questions** - General knowledge and conversation\n2. **Write Code** - Generate code in Python, JavaScript, and more\n3. **Generate Images** - Create images from text descriptions\n4. **Generate Videos** - Create short video clips from prompts\n5. **Understand Images** - Analyze and describe uploaded images\n\nJust describe what you need!";
+    return "I'm FramerAI, and here's what I can do:\n\n1. **Chat & Answer Questions** - General knowledge and conversation\n2. **Write Code** - Generate code in Python, JavaScript, and more\n3. **Generate Images** - Create images from text descriptions\n4. **Generate Videos** - Create short video clips from prompts\n5. **Generate Audio** - Synthesize speech and audio from text\n6. **Understand Images & Audio** - Analyze uploaded media\n\nJust describe what you need!";
   }
 
   if (lower.includes("who are you") || lower.includes("what are you")) {
-    return "I'm **FramerAI**, an open-source multimodal AI model. I'm built with a transformer backbone for text and code, a diffusion model for images, and a temporal diffusion model for video generation. I was created to be a versatile AI assistant that can understand and generate across multiple modalities.";
+    return "I'm **FramerAI**, an open-source multimodal AI model. I'm built with a transformer backbone for text and code, a diffusion model for images, temporal diffusion for video, and a mel-diffusion module for audio. I'm trained from scratch on local data - no external teacher models.";
   }
 
-  return `I understand your message: "${content}"\n\nAs FramerAI, I can help with text, code, images, and video generation. To unlock full capabilities, train the model using:\n\n\`\`\`bash\npython build.py --mode all --size tiny\n\`\`\`\n\nThen restart the backend to load the trained model.`;
+  return `I understand your message: "${content}"\n\nAs FramerAI, I can help with text, code, image, video, and audio generation. To unlock full capabilities, train the model:\n\n\`\`\`bash\npython build.py --mode all --size tiny\n\`\`\`\n\nThen set MODEL_ENABLED=true and restart the backend.`;
 }
 
 async function generateImage(prompt, numImages = 1, resolution = 256) {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("image", { prompt, resolution });
+      return {
+        id: uuidv4(),
+        prompt,
+        images: [{ id: uuidv4(), url: `${GENERATED_URL}/${result.file}`, placeholder: false }],
+        metadata: { resolution, model: "framerai-diffusion" },
+      };
+    } catch (err) {
+      console.warn(`[model] image fallback: ${err.message}`);
+    }
+  }
   return {
     id: uuidv4(),
     prompt,
-    images: Array.from({ length: numImages }, (_, i) => ({
+    images: Array.from({ length: numImages }, () => ({
       id: uuidv4(),
       url: null,
       placeholder: true,
@@ -217,20 +274,58 @@ async function generateImage(prompt, numImages = 1, resolution = 256) {
 }
 
 async function generateVideo(prompt, numFrames = 16) {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("video", { prompt, num_frames: numFrames });
+      return {
+        id: uuidv4(),
+        prompt,
+        video: { url: `${GENERATED_URL}/${result.file}`, frames: numFrames, placeholder: false },
+        metadata: { frames: numFrames, model: "framerai-video" },
+      };
+    } catch (err) {
+      console.warn(`[model] video fallback: ${err.message}`);
+    }
+  }
   return {
     id: uuidv4(),
     prompt,
-    video: {
-      url: null,
-      frames: numFrames,
-      placeholder: true,
-      message: "Train the model to generate actual videos",
-    },
+    video: { url: null, frames: numFrames, placeholder: true, message: "Train the model to generate actual videos" },
     metadata: { frames: numFrames, model: "framerai-video" },
   };
 }
 
+async function generateAudio(prompt) {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("audio", { prompt });
+      return {
+        id: uuidv4(),
+        prompt,
+        audio: { url: `${GENERATED_URL}/${result.file}`, placeholder: false },
+        metadata: { model: "framerai-audio" },
+      };
+    } catch (err) {
+      console.warn(`[model] audio fallback: ${err.message}`);
+    }
+  }
+  return {
+    id: uuidv4(),
+    prompt,
+    audio: { url: null, placeholder: true, message: "Train the model to generate actual audio" },
+    metadata: { model: "framerai-audio" },
+  };
+}
+
 async function generateCode(prompt, language = "python") {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("code", { prompt, language });
+      return { id: uuidv4(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
+    } catch (err) {
+      console.warn(`[model] code fallback: ${err.message}`);
+    }
+  }
   return {
     id: uuidv4(),
     prompt,
@@ -240,4 +335,41 @@ async function generateCode(prompt, language = "python") {
   };
 }
 
-module.exports = { processMessage, generateImage, generateVideo, generateCode };
+async function transcribeAudio(audioPath, prompt = "Transcribe the audio:") {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("transcribe", { audio_path: audioPath, prompt });
+      return { text: result.content, metadata: { model: "framerai-audio" } };
+    } catch (err) {
+      console.warn(`[model] transcribe fallback: ${err.message}`);
+    }
+  }
+  return {
+    text: "[FramerAI Audio Analysis]\nThis is a placeholder transcription. Train the model and set MODEL_ENABLED=true for real transcription.",
+    metadata: { model: "framerai-audio" },
+  };
+}
+
+async function understandImage(imagePath, prompt = "Describe this image") {
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("understand", { image_path: imagePath, prompt });
+      return { description: result.content };
+    } catch (err) {
+      console.warn(`[model] understand fallback: ${err.message}`);
+    }
+  }
+  return {
+    description: `[FramerAI Vision Analysis]\nPrompt: ${prompt}\n\nThis is a placeholder response. Train a FramerAI model and set MODEL_ENABLED=true for real vision analysis.`,
+  };
+}
+
+module.exports = {
+  processMessage,
+  generateImage,
+  generateVideo,
+  generateAudio,
+  generateCode,
+  transcribeAudio,
+  understandImage,
+};

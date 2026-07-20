@@ -24,13 +24,22 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [ ] Add ONNX and safetensors export validation with a round-trip test.
 - [ ] Document and validate multi-GPU and distributed training paths.
 
+## Multimodal and audio
+
+- [ ] Replace Griffin-Lim with a neural vocoder for higher-fidelity audio output.
+- [ ] Add streaming audio generation and playback over the WebSocket.
+- [ ] Add in-browser microphone capture (MediaRecorder) for audio input.
+- [ ] Add a mel-spectrogram cache to speed up audio training.
+- [ ] Add example image and audio caption datasets with real media.
+- [ ] Benchmark and tune the audio encoder and generator dimensions per size.
+
 ## Backend
 
 - [ ] Add request validation and consistent error responses across all routes.
 - [ ] Add rate limiting and payload size limits to generation endpoints.
 - [ ] Add structured logging and a request id for traceability.
-- [ ] Add a Dockerfile and a docker-compose file for local backend plus model serving.
 - [ ] Add OpenAPI or a documented schema for the REST API.
+- [ ] Pool or reuse the inference worker under concurrent load.
 
 ## Frontend
 
@@ -43,7 +52,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 ## Documentation
 
 - [ ] Expand GUIDE.md with architecture diagrams for each module.
-- [ ] Add a distillation tutorial that walks through a full run on a single GPU.
+- [ ] Add a from-scratch training tutorial that walks through a full run on a single GPU.
 - [ ] Add a troubleshooting page for common CUDA, VRAM, and dependency issues.
 - [ ] Add API reference documentation generated from source.
 
@@ -62,6 +71,11 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## Done
 
+- [x] Make FramerAI self-contained: remove teacher-model distillation and its dependencies.
+- [x] Add the audio modality (understanding and generation) across model, backend, and website.
+- [x] Add a local-corpus data loader for from-scratch training.
+- [x] Add a Python inference bridge with placeholder fallback.
+- [x] Add a Dockerfile and docker-compose for the model and full stack.
 - [x] Add continuous integration for model, backend, and website.
 - [x] Add CodeQL analysis and stale issue automation.
 - [x] Add Dependabot for pip, npm, and GitHub Actions.

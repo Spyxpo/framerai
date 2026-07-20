@@ -6,7 +6,7 @@ router.get("/", (req, res) => {
     status: "ok",
     model: "FramerAI",
     version: "1.0.0",
-    capabilities: ["text", "code", "image", "video"],
+    capabilities: ["text", "code", "image", "video", "audio"],
     timestamp: new Date().toISOString(),
   });
 });

@@ -25,6 +25,8 @@ class FramerTokenizer:
         "<user>": 10,
         "<assistant>": 11,
         "<system>": 12,
+        "<audio>": 13,
+        "<audio_end>": 14,
     }
 
     def __init__(self, vocab_size: int = 50304):

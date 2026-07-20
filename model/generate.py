@@ -45,19 +45,23 @@ class FramerGenerator:
         top_k: int = 50,
         top_p: float = 0.9,
         image: torch.Tensor = None,
+        audio: torch.Tensor = None,
     ) -> str:
-        """Generate text given a prompt, optionally conditioned on an image."""
+        """Generate text given a prompt, optionally conditioned on an image or audio."""
         tokens = self.tokenizer.encode(prompt, add_special=True)
         input_ids = torch.tensor([tokens], device=self.device)
 
-        image_embeds = None
+        prefix_parts = []
         if image is not None:
-            image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
+            prefix_parts.append(self.model.forward_vision(image.unsqueeze(0).to(self.device)))
+        if audio is not None:
+            prefix_parts.append(self.model.forward_audio(audio.unsqueeze(0).to(self.device)))
+        prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
         generated = list(tokens)
         for _ in range(max_new_tokens):
             seq = torch.tensor([generated[-self.model.config.max_seq_len:]], device=self.device)
-            logits = self.model.forward_text(seq, image_embeds=image_embeds)
+            logits = self.model.forward_text(seq, prefix_embeds=prefix_embeds)
             logits = logits[:, -1, :] / temperature
 
             # Top-k filtering
@@ -159,4 +163,41 @@ class FramerGenerator:
             temperature=temperature,
             top_k=40,
             top_p=0.95,
+        )
+
+    @torch.no_grad()
+    def generate_audio(self, prompt: str) -> tuple:
+        """Generate an audio waveform from a text prompt.
+
+        Returns a tuple of (waveform numpy array, sample_rate).
+        """
+        tokens = self.tokenizer.encode(prompt, add_special=True)
+        input_ids = torch.tensor([tokens], device=self.device)
+
+        # Get text context
+        text_embeds = self.model.token_embed(input_ids)
+        for layer in self.model.layers:
+            text_embeds = layer(text_embeds)
+        context = self.model.norm(text_embeds)
+
+        # Generate a mel spectrogram, then reconstruct a waveform
+        mel = self.model.audio_gen.sample(context, self.device)
+        waveform = self.model.audio_gen.mel_to_waveform(mel)
+        return waveform.cpu().numpy(), self.model.audio_gen.sample_rate
+
+    @torch.no_grad()
+    def transcribe(
+        self,
+        audio: torch.Tensor,
+        prompt: str = "<audio><audio_end>Transcribe the audio:",
+        max_new_tokens: int = 256,
+    ) -> str:
+        """Transcribe or describe audio (audio understanding -> text)."""
+        return self.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=0.3,
+            top_k=40,
+            top_p=0.95,
+            audio=audio,
         )

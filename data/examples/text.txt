@@ -1,0 +1,7 @@
+FramerAI is an open-source multimodal model trained from scratch.
+
+It understands and generates text, code, images, video, and audio using a single
+transformer backbone with modality-specific encoders and diffusion decoders.
+
+The model learns from a local corpus. Add your own documents to the data
+directory and the tokenizer and language model will train on them directly.

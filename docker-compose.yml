@@ -1,0 +1,48 @@
+# FramerAI stack.
+#
+# 1. Build the model (writes into the shared checkpoints volume):
+#      docker compose run --rm trainer
+# 2. Start the backend and website:
+#      docker compose up backend website
+#    Website: http://localhost:8080   Backend: http://localhost:3001
+#
+# The backend runs real inference when a checkpoint exists in the volume, and
+# falls back to placeholder responses otherwise.
+
+services:
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: framerai-model
+    profiles: ["train"]
+    volumes:
+      - checkpoints:/app/checkpoints
+      - ./data:/app/data
+    command: ["--mode", "all", "--size", "tiny", "--data-dir", "data"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: framerai-backend
+    environment:
+      - CORS_ORIGIN=http://localhost:8080
+      - MODEL_ENABLED=true
+    volumes:
+      - checkpoints:/app/checkpoints
+    ports:
+      - "3001:3001"
+
+  website:
+    build:
+      context: .
+      dockerfile: website/Dockerfile
+    image: framerai-website
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  checkpoints:

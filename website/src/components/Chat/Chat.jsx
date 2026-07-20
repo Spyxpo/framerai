@@ -1,12 +1,31 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, PanelLeft, Image, Video, Code, Loader2 } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2 } from "lucide-react";
 import MessageBubble from "./MessageBubble";
+import { api } from "../../services/api";
 
 export default function Chat({ messages, loading, streaming, sidebarOpen, onSend, onToggleSidebar }) {
   const [input, setInput] = useState("");
   const [messageType, setMessageType] = useState("text");
+  const [transcribing, setTranscribing] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const audioInputRef = useRef(null);
+
+  const handleAudioUpload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setTranscribing(true);
+    try {
+      const result = await api.transcribe(file);
+      setInput((prev) => (prev ? `${prev} ${result.text}` : result.text));
+      textareaRef.current?.focus();
+    } catch (err) {
+      setInput(`Could not transcribe audio: ${err.message}`);
+    } finally {
+      setTranscribing(false);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -47,7 +66,7 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
           </button>
         )}
         <h1 className="chat-title">FramerAI</h1>
-        <div className="chat-subtitle">Multimodal AI Assistant</div>
+        <div className="chat-subtitle">Text, code, image, video, and audio</div>
       </header>
 
       {/* Messages */}
@@ -56,7 +75,7 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
           <div className="welcome-screen">
             <img src="/logo.svg" alt="FramerAI" className="welcome-logo" />
             <h2>Welcome to FramerAI</h2>
-            <p>A multimodal AI that can generate text, code, images, and videos.</p>
+            <p>A multimodal AI that can generate text, code, images, video, and audio.</p>
             <div className="suggestions">
               <button className="suggestion" onClick={() => onSend("Hello! What can you do?")}>
                 What can you do?
@@ -67,8 +86,8 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
               <button className="suggestion" onClick={() => onSend("Generate an image of a sunset over mountains")}>
                 Generate a sunset image
               </button>
-              <button className="suggestion" onClick={() => onSend("Create a video of ocean waves")}>
-                Create an ocean video
+              <button className="suggestion" onClick={() => onSend("Generate audio that says hello and welcome")}>
+                Generate a voice clip
               </button>
             </div>
           </div>
@@ -127,6 +146,30 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
             >
               <Video size={16} />
             </button>
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "audio" ? "active" : ""}`}
+              onClick={() => setMessageType("audio")}
+              title="Audio"
+            >
+              <AudioLines size={16} />
+            </button>
+            <button
+              type="button"
+              className="mode-btn"
+              onClick={() => audioInputRef.current?.click()}
+              title="Upload audio to transcribe"
+              disabled={transcribing}
+            >
+              {transcribing ? <Loader2 size={16} className="spin" /> : <Mic size={16} />}
+            </button>
+            <input
+              ref={audioInputRef}
+              type="file"
+              accept="audio/*"
+              onChange={handleAudioUpload}
+              style={{ display: "none" }}
+            />
           </div>
           <textarea
             ref={textareaRef}

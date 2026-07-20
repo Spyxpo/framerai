@@ -1,4 +1,4 @@
-"""FramerAI: Unified multimodal model for text, code, image, and video generation."""
+"""FramerAI: Unified multimodal model for text, code, image, video, and audio."""
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,8 @@ from .modules.transformer import TransformerBlock, RMSNorm
 from .modules.vision_encoder import VisionEncoder
 from .modules.diffusion import DiffusionModule
 from .modules.video_generator import VideoGenerator
+from .modules.audio_encoder import AudioEncoder
+from .modules.audio_generator import AudioGenerator
 from .modules.multimodal_projector import MultimodalProjector
 
 
@@ -21,6 +23,8 @@ class FramerModel(nn.Module):
     - Vision encoder for image understanding
     - Diffusion module for image generation
     - Video diffusion for video generation
+    - Audio encoder for audio/speech understanding
+    - Mel diffusion for audio/speech generation
     """
 
     def __init__(self, config: FramerConfig):
@@ -73,6 +77,32 @@ class FramerModel(nn.Module):
             num_steps=config.diffusion_steps,
         )
 
+        # Audio encoder (audio/speech understanding)
+        self.audio_encoder = AudioEncoder(
+            sample_rate=config.audio_sample_rate,
+            n_fft=config.audio_n_fft,
+            hop_length=config.audio_hop_length,
+            n_mels=config.audio_n_mels,
+            d_model=config.audio_d_model,
+            n_heads=config.audio_n_heads,
+            n_layers=config.audio_n_layers,
+            max_frames=config.audio_max_frames,
+            dropout=config.dropout,
+        )
+        self.audio_projector = MultimodalProjector(config.audio_d_model, config.d_model)
+
+        # Audio generator (text-to-audio / speech)
+        self.audio_gen = AudioGenerator(
+            n_mels=config.audio_n_mels,
+            n_frames=config.audio_gen_frames,
+            base_channels=config.audio_gen_channels,
+            context_dim=config.d_model,
+            num_steps=config.diffusion_steps,
+            sample_rate=config.audio_sample_rate,
+            n_fft=config.audio_n_fft,
+            hop_length=config.audio_hop_length,
+        )
+
         self._init_weights()
 
     def _init_weights(self):
@@ -88,26 +118,35 @@ class FramerModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor = None,
+        prefix_embeds: torch.Tensor = None,
         image_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        """Forward pass for text/code generation."""
+        """Forward pass for text/code generation.
+
+        ``prefix_embeds`` are modality embeddings (image and/or audio) prepended
+        to the token sequence. ``image_embeds`` is kept as an alias for backward
+        compatibility.
+        """
+        if prefix_embeds is None:
+            prefix_embeds = image_embeds
+
         B, T = input_ids.shape
         x = self.token_embed(input_ids)
 
-        # Prepend image embeddings if provided
-        if image_embeds is not None:
-            x = torch.cat([image_embeds, x], dim=1)
+        # Prepend modality embeddings if provided
+        if prefix_embeds is not None:
+            x = torch.cat([prefix_embeds, x], dim=1)
             if attention_mask is not None:
-                img_mask = torch.ones(B, image_embeds.shape[1], device=attention_mask.device)
-                attention_mask = torch.cat([img_mask, attention_mask], dim=1)
+                prefix_mask = torch.ones(B, prefix_embeds.shape[1], device=attention_mask.device)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
 
         x = self.embed_dropout(x)
         for layer in self.layers:
             x = layer(x, attention_mask)
         x = self.norm(x)
 
-        if image_embeds is not None:
-            x = x[:, image_embeds.shape[1]:]
+        if prefix_embeds is not None:
+            x = x[:, prefix_embeds.shape[1]:]
 
         logits = self.lm_head(x)
         return logits
@@ -117,6 +156,11 @@ class FramerModel(nn.Module):
         vis_features = self.vision_encoder(images)
         return self.vision_projector(vis_features)
 
+    def forward_audio(self, audio: torch.Tensor) -> torch.Tensor:
+        """Encode audio (waveform or log-mel) to language-space embeddings."""
+        audio_features = self.audio_encoder(audio)
+        return self.audio_projector(audio_features)
+
     def forward_diffusion(self, images: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         """Training forward for image generation (returns loss)."""
         return self.diffusion(images, context)
@@ -125,13 +169,23 @@ class FramerModel(nn.Module):
         """Training forward for video generation (returns loss)."""
         return self.video_gen(video, context)
 
+    def forward_audio_gen(self, target_audio: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
+        """Training forward for audio generation (returns loss).
+
+        ``target_audio`` is a normalized mel spectrogram of shape
+        ``(B, 1, n_mels, n_frames)``.
+        """
+        return self.audio_gen(target_audio, context)
+
     def forward(
         self,
         input_ids: torch.Tensor = None,
         attention_mask: torch.Tensor = None,
         images: torch.Tensor = None,
+        audio: torch.Tensor = None,
         target_images: torch.Tensor = None,
         target_video: torch.Tensor = None,
+        target_audio: torch.Tensor = None,
         labels: torch.Tensor = None,
     ) -> dict:
         """
@@ -141,14 +195,17 @@ class FramerModel(nn.Module):
         """
         results = {}
 
-        # Encode images if provided
-        image_embeds = None
+        # Encode input modalities and build the prefix prepended to the tokens
+        prefix_parts = []
         if images is not None:
-            image_embeds = self.forward_vision(images)
+            prefix_parts.append(self.forward_vision(images))
+        if audio is not None:
+            prefix_parts.append(self.forward_audio(audio))
+        prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
         # Text/code generation
         if input_ids is not None:
-            logits = self.forward_text(input_ids, attention_mask, image_embeds)
+            logits = self.forward_text(input_ids, attention_mask, prefix_embeds)
             results["logits"] = logits
             if labels is not None:
                 loss = F.cross_entropy(
@@ -176,6 +233,11 @@ class FramerModel(nn.Module):
         if target_video is not None:
             vid_loss = self.forward_video(target_video, text_context)
             results["video_loss"] = vid_loss
+
+        # Audio generation
+        if target_audio is not None:
+            aud_loss = self.forward_audio_gen(target_audio, text_context)
+            results["audio_loss"] = aud_loss
 
         # Total loss
         total_loss = sum(v for k, v in results.items() if k.endswith("_loss"))

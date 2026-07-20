@@ -24,7 +24,7 @@ body:
         - Model (Python)
         - Backend (Node)
         - Website (React)
-        - Distillation / training
+        - Training / data pipeline
         - Documentation
         - Other / unsure
     validations:

@@ -43,6 +43,22 @@ export default function MessageBubble({ message, isStreaming }) {
     });
   };
 
+  const renderMedia = () => {
+    const url = message.metadata?.url;
+    if (!url) return null;
+    if (message.type === "image") {
+      return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated image"} />;
+    }
+    if (message.type === "video") {
+      // Generated video is served as an animated GIF.
+      return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated video"} />;
+    }
+    if (message.type === "audio") {
+      return <audio className="message-audio" src={url} controls />;
+    }
+    return null;
+  };
+
   return (
     <div className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""}`}>
       <div className="message-avatar">
@@ -50,6 +66,7 @@ export default function MessageBubble({ message, isStreaming }) {
       </div>
       <div className="message-body">
         <div className="message-content">{renderContent(message.content)}</div>
+        {renderMedia()}
         {!isUser && message.content && (
           <div className="message-actions">
             <button className="action-btn" onClick={handleCopy} title="Copy">

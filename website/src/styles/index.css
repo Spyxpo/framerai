@@ -440,6 +440,21 @@ body {
   border-radius: var(--radius-full);
 }
 
+/* Generated media */
+.message-media {
+  display: block;
+  max-width: min(420px, 100%);
+  margin-top: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.message-audio {
+  display: block;
+  width: min(420px, 100%);
+  margin-top: 10px;
+}
+
 /* Streaming cursor */
 .message.streaming .message-content::after {
   content: "";

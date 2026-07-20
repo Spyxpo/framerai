@@ -11,10 +11,12 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [Prerequisites](#prerequisites)
 - [End-to-end setup](#end-to-end-setup)
 - [The model](#the-model)
+- [Modalities](#modalities)
 - [The training pipeline](#the-training-pipeline)
-- [Knowledge distillation](#knowledge-distillation)
-- [The backend](#the-backend)
+- [Training on your own data](#training-on-your-own-data)
+- [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
+- [Running with Docker](#running-with-docker)
 - [Configuration and environment](#configuration-and-environment)
 - [Common workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
@@ -25,14 +27,17 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 FramerAI is a single multimodal model served through a small stack:
 
 ```txt
-+-----------+        HTTP / WebSocket        +-----------+        in-process        +-----------+
-|  Website  |  <------------------------->   |  Backend  |  <------------------->   |   Model   |
-| (React)   |                                | (Express) |                          | (Python)  |
-+-----------+                                +-----------+                          +-----------+
++-----------+     HTTP / WebSocket     +-----------+     JSON over stdio      +-----------+
+|  Website  | <--------------------->  |  Backend  | <--------------------->  |  Worker   |
+| (React)   |                          | (Express) |                          | (Python)  |
++-----------+                          +-----------+                          +-----------+
+                                                                                    |
+                                                                              FramerModel
 ```
 
 - The model defines the architecture, tokenizer, and training and inference code.
-- The backend exposes REST endpoints and a WebSocket stream for token streaming.
+- The backend exposes REST endpoints and a WebSocket stream, and drives the model
+  through a Python inference worker.
 - The website is the chat and generation interface.
 
 Each layer can be developed independently. During development you typically run
@@ -43,27 +48,27 @@ all three at once.
 | Path | Purpose |
 |------|---------|
 | `model/framer.py` | The unified `FramerModel` that ties the modules together. |
-| `model/modules/` | Transformer, vision encoder, diffusion, video generator, and projector. |
+| `model/modules/` | Transformer, vision/audio encoders, and image/video/audio generators. |
 | `model/tokenizer/` | Byte-level BPE tokenizer with multimodal special tokens. |
-| `model/configs/` | Model size and training configuration definitions. |
-| `model/distillation/` | Provider clients, data generation, and the distillation trainer. |
+| `model/configs/` | Model size and hyperparameter configuration. |
+| `model/data.py` | Local-corpus datasets (text, image-caption, audio-caption). |
 | `model/generate.py` | Inference and sampling utilities. |
-| `build.py` | Command line entry point for build, train, distill, and export. |
-| `train.sh` | Convenience wrapper around common training runs. |
-| `backend/src/` | Express server, routes, services, and middleware. |
+| `model/serve.py` | Inference worker driven by the backend over stdin/stdout. |
+| `build.py` | Command line entry point to build, train, and export models. |
+| `train.sh` | Convenience wrapper around the full pipeline. |
+| `backend/src/` | Express server, routes, services, and the Python bridge. |
 | `website/src/` | React components, hooks, services, and styles. |
-| `.github/` | CI workflows and issue and pull request templates. |
+| `data/` | Your local training data. |
+| `Dockerfile`, `docker-compose.yml` | Container build for the model and stack. |
 
 ## Prerequisites
 
 - Python 3.10 or newer.
 - Node.js 18 or newer and npm.
 - A CUDA-capable GPU is recommended for training. CPU works for small models and inference but is slow.
-- For gated teacher models such as Llama, a HuggingFace account and token.
+- Optional: `soundfile` or `torchaudio` for reading and writing audio files (installed by `requirements.txt`).
 
 ## End-to-end setup
-
-Clone the repository and set up each layer.
 
 ```bash
 git clone https://github.com/Spyxpo/framerai.git
@@ -76,7 +81,7 @@ cd framerai
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python build.py --mode build --size tiny
+python build.py --mode all --size tiny
 ```
 
 ### 2. Backend
@@ -98,7 +103,7 @@ npm install
 npm run dev
 ```
 
-The web app opens at `http://localhost:5173` and talks to the backend.
+The web app opens at `http://localhost:5173`.
 
 ## The model
 
@@ -106,11 +111,13 @@ The web app opens at `http://localhost:5173` and talks to the backend.
 
 - Transformer backbone: an autoregressive decoder using RoPE, SwiGLU, and RMSNorm.
 - Vision encoder: a ViT-style encoder that turns images into patch embeddings.
+- Audio encoder: a mel-spectrogram front-end and transformer that turns audio into embeddings.
 - Diffusion module: a U-Net with cross-attention for text-conditioned images.
 - Video generator: spatial-temporal diffusion with a 3D U-Net.
-- Multimodal projector: aligns vision embeddings with the language model space.
+- Audio generator: text-conditioned mel diffusion with Griffin-Lim reconstruction.
+- Multimodal projector: aligns vision and audio embeddings with the language model space.
 
-Model sizes are defined in `model/configs/`:
+Model sizes are defined in `build.py`:
 
 | Size | d_model | Layers | Heads | Parameters |
 |------|---------|--------|-------|------------|
@@ -119,94 +126,110 @@ Model sizes are defined in `model/configs/`:
 | Medium | 1024 | 24 | 16 | ~600M |
 | Large | 2048 | 32 | 32 | ~2.5B |
 
-To experiment with a custom shape, pass overrides to `build.py`:
+To experiment with a custom shape, pass overrides:
 
 ```bash
-python build.py --mode build \
-  --d-model 512 --n-layers 12 --n-heads 8
+python build.py --mode build --d-model 512 --n-layers 12 --n-heads 8
 ```
+
+## Modalities
+
+Modality routing is implicit. In `FramerModel.forward`, an argument being present
+selects the path:
+
+- `images` / `audio` (inputs) are encoded and prepended to the token sequence.
+- `input_ids` runs the transformer and, with `labels`, computes the text loss.
+- `target_images` / `target_video` / `target_audio` (outputs) run the matching
+  text-conditioned diffusion decoder and add a loss.
+
+At inference time, `FramerGenerator` (`model/generate.py`) exposes explicit
+methods: `generate_text` (optionally conditioned on an image or audio),
+`generate_image`, `generate_video`, `generate_audio`, `generate_code`, and
+`transcribe` (audio to text).
+
+The tokenizer adds `<audio>` and `<audio_end>` alongside the existing image,
+video, and code special tokens.
 
 ## The training pipeline
 
-`build.py` is the single entry point. It has four modes:
+`build.py` is the single entry point with four modes:
 
 | Mode | Action |
 |------|--------|
-| `build` | Initialize weights and save a fresh model. |
-| `train` | Train from scratch on generated or provided data. |
-| `distill` | Train the student using teacher logits. |
+| `build` | Initialize weights and train the tokenizer. |
+| `train` | Train from scratch on the local corpus. |
 | `export` | Export the model for serving. |
 | `all` | Run build, train, and export in sequence. |
 
-Example full run for a tiny model:
+Example:
 
 ```bash
-python build.py --mode all --size tiny --max-steps 10000
+python build.py --mode all --size tiny --data-dir data --max-steps 10000
 ```
 
-`train.sh` wraps the most common invocations so you do not have to remember every
-flag. Read it to see the recommended defaults.
+`train.sh` wraps install, build/train/export, and serving. Run `./train.sh --help`
+for options.
 
-## Knowledge distillation
+## Training on your own data
 
-Distillation trains FramerAI using open-source teacher models pulled from
-HuggingFace. Everything runs locally.
+FramerAI trains from scratch on a local corpus - there are no teacher models.
+Put files under `data/` (scanned recursively):
 
-The workflow is two steps:
+- `*.txt` - plain text, split on blank lines.
+- `*.jsonl` - `{"text": ...}`, `{"prompt": ..., "response": ...}`, or `{"instruction": ..., "output": ...}`.
+- image-caption `*.jsonl` - `{"image": path, "caption": ...}`.
+- audio-caption `*.jsonl` - `{"audio": path, "text": ...}`.
 
-1. Generate training data from one or more teachers.
-2. Distill that knowledge into the student using soft labels.
+The tokenizer and language model train on all text sources. To also train the
+image and audio generators on caption pairs:
 
 ```bash
-# Generate data from every recommended teacher, loaded one at a time
-python build.py --mode generate-data \
-  --teacher-model all --quantize 4bit --num-samples 10000 --conversations
-
-# Distill into a small student
-python build.py --mode build --size small
-python build.py --mode distill --size small \
-  --teacher-model all --quantize 4bit --max-steps 100000
+python build.py --mode all --size small --data-dir data --train-modalities
 ```
 
-Teacher shorthands, VRAM requirements, multi-teacher grouping, and RoPE context
-extension are documented in the [README](README.md#knowledge-distillation). Use
-`--quantize 4bit` to fit large teachers on consumer GPUs, or `--teacher-device cpu`
-to trade speed for memory.
+The loaders live in `model/data.py`; the data layout is documented in
+[data/README.md](data/README.md).
 
-## The backend
+## The backend and the inference bridge
 
 The backend is an Express server under `backend/src/`:
 
-- `routes/` defines the REST endpoints for chat, generation, and health.
-- `services/model.js` is the interface to the model.
+- `routes/` defines REST endpoints for chat, generation, and health.
+- `services/model.js` routes each request to the model or a placeholder.
+- `services/pythonBridge.js` spawns and talks to the Python inference worker.
 - `services/websocket.js` handles real-time token streaming.
-- `index.js` wires everything together and starts the server.
+
+The bridge lazily spawns `python -m model.serve` when `MODEL_ENABLED=true` and a
+checkpoint exists at `MODEL_PATH`. Requests are sent as JSON lines and answered by
+`FramerGenerator`. If the worker is unavailable, the backend returns placeholder
+responses, so the stack always runs. Generated media is written to
+`backend/uploads/generated` and served under `/uploads/generated`.
 
 Key endpoints:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Health check and capabilities. |
-| POST | `/api/chat/conversations` | Create a conversation. |
-| GET | `/api/chat/conversations` | List conversations. |
 | POST | `/api/chat/conversations/:id/messages` | Send a message. |
 | POST | `/api/generate/image` | Generate an image from text. |
 | POST | `/api/generate/video` | Generate a video from text. |
+| POST | `/api/generate/audio` | Generate audio/speech from text. |
 | POST | `/api/generate/code` | Generate code. |
 | POST | `/api/generate/understand` | Analyze an uploaded image. |
+| POST | `/api/generate/transcribe` | Transcribe an uploaded audio file. |
 | WS | `/ws` | Real-time streaming. |
-
-Run the server in watch mode with `npm run dev`, or in production mode with
-`npm start`.
 
 ## The website
 
 The website is a React app built with Vite under `website/src/`:
 
-- `components/` holds the chat, sidebar, and code block views.
-- `hooks/useChat.js` manages conversation state.
-- `services/` contains the REST and WebSocket clients.
-- `styles/` holds the CSS.
+- `components/Chat/` holds the chat view, message bubbles, and the modality mode
+  buttons (text, code, image, video, audio) plus an audio-upload control that
+  transcribes to text.
+- `components/Chat/MessageBubble.jsx` renders text, code blocks, and image, video,
+  and audio players for generated media.
+- `services/api.js` and `services/websocket.js` are the REST and WebSocket clients.
+- `hooks/useChat.js` manages conversation state and streaming.
 
 Development commands:
 
@@ -216,29 +239,44 @@ npm run build    # produce a production build in website/dist
 npm run preview  # preview the production build locally
 ```
 
+## Running with Docker
+
+```bash
+# Build the model into the shared checkpoints volume
+docker compose run --rm trainer
+
+# Start the backend and website
+docker compose up backend website
+```
+
+- Website: `http://localhost:8080`
+- Backend: `http://localhost:3001`
+
+The `trainer` service (root `Dockerfile`) builds the model. The `backend` image
+includes Python and torch so the inference worker runs inside the container; it
+reads the checkpoint from the shared volume. The `website` image builds the React
+app and serves it with nginx, proxying `/api`, `/uploads`, and `/ws` to the backend.
+
+Build the model image directly:
+
+```bash
+docker build -t framerai-model .
+docker run --rm -v $(pwd)/data:/app/data -v framerai_checkpoints:/app/checkpoints \
+  framerai-model --mode all --size tiny --data-dir data
+```
+
 ## Configuration and environment
 
-- The backend reads configuration from `backend/.env`. Copy `backend/.env.example`
-  and adjust values such as the port and model settings.
-- Gated teacher downloads need a token: `export HF_TOKEN=hf_...`.
-- The root `.env` is ignored by git. Never commit secrets.
+- The backend reads configuration from `backend/.env` (copy `backend/.env.example`).
+  Notable keys: `MODEL_ENABLED`, `MODEL_PATH`, `TOKENIZER_PATH`, `PYTHON_BIN`, `DEVICE`.
+- The root `.env` is git-ignored. Never commit secrets.
 
 ## Common workflows
 
-Build, distill, and serve a small model end to end:
+Build, train, and serve a small model end to end:
 
 ```bash
-# 1. Build the student
-python build.py --mode build --size small
-
-# 2. Generate data and distill
-python build.py --mode generate-data --teacher-model all --quantize 4bit --num-samples 20000 --conversations
-python build.py --mode distill --size small --teacher-model all --quantize 4bit --max-steps 100000
-
-# 3. Export for serving
-python build.py --mode export --size small
-
-# 4. Start backend and website
+python build.py --mode all --size small --data-dir data --max-steps 20000
 cd backend && npm run dev
 cd website && npm run dev
 ```
@@ -254,10 +292,9 @@ cd website && npm ci && npm run build
 
 ## Troubleshooting
 
-- Out of memory during distillation: lower `--num-samples`, add `--quantize 4bit`,
-  or move the teacher to CPU with `--teacher-device cpu`.
-- Gated model download fails: confirm `HF_TOKEN` is set and the model license is accepted.
-- Backend cannot reach the model: confirm a built model exists and `backend/.env` is configured.
+- Out of memory during training: lower `--batch-size`, use a smaller `--size`, or train on CPU with `--device cpu`.
+- Audio file loading fails: install `soundfile` or `torchaudio` (both are in `requirements.txt`).
+- Backend returns placeholders: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
 - Website shows connection errors: confirm the backend is running on the expected port.
 
 ## Where to go next

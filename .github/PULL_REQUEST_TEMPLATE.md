@@ -19,7 +19,7 @@
 - [ ] Model (Python)
 - [ ] Backend (Node)
 - [ ] Website (React)
-- [ ] Distillation / training
+- [ ] Training / data pipeline
 - [ ] CI / tooling / docs
 
 ## Checklist
