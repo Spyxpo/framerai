@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Scale-capable LLM core: **grouped-query attention (GQA)**, fused
+  scaled-dot-product (flash / memory-efficient) attention, an incremental **KV
+  cache** for O(n) decoding, RoPE **context-extension scaling** (linear / NTK),
+  and optional QK-normalization + depth-scaled init.
+- **Mixture-of-Experts** FFN (`model/modules/moe.py`): top-k routing, optional
+  shared experts, and a load-balancing + router z-loss folded into the model's
+  total loss.
+- Named **preset registry** (`model/configs/presets.py`) from `framer-tiny`
+  (~19M) to `framer-1t-a32b` (~1T total / ~32B active), a `FramerConfig.from_preset`
+  constructor, `--preset` / `--list-presets` CLI, and a parameter **estimator**
+  (`estimate_params`) that sizes even the 1T preset without instantiating it.
+- Training stack (`model/training/`): warmup→cosine LR, precision-aware autocast
+  (bf16/fp16 on GPU, fp32 on CPU), activation checkpointing, weight-decay
+  parameter groups, and a guarded torch-native **FSDP2** multi-GPU path.
+- Streaming, packed token data: `scripts/prepare_data.py` writes memory-mapped
+  shards; `PackedTokenDataset` yields padding-free, rank-sharded next-token blocks.
+- `--text-only` build scope for training the LLM core without the multimodal
+  submodules; optional **safetensors** export; a `tests/` pytest suite.
 - Audio modality end to end: an audio encoder for understanding and a
   text-conditioned mel-diffusion generator with Griffin-Lim reconstruction.
 - `<audio>` and `<audio_end>` tokenizer special tokens.

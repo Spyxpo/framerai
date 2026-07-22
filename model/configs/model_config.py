@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass
@@ -10,11 +10,24 @@ class FramerConfig:
     max_seq_len: int = 2048
     d_model: int = 1024
     n_heads: int = 16
+    n_kv_heads: int = None  # Grouped-query attention. None -> == n_heads (plain MHA).
     n_layers: int = 24
     d_ff: int = 4096
     dropout: float = 0.1
     activation: str = "gelu"
     layer_norm_eps: float = 1e-5
+    use_qk_norm: bool = False  # RMSNorm on q/k per head (stability at scale)
+
+    # Mixture-of-Experts (sparse FFN). use_moe=False keeps the dense SwiGLU FFN.
+    use_moe: bool = False
+    n_experts: int = 0  # number of routed experts per MoE layer
+    n_experts_per_tok: int = 2  # top-k routing
+    n_shared_experts: int = 0  # always-on experts (DeepSeek-style), 0 disables
+    expert_d_ff: int = None  # per-expert FFN width. None -> falls back to d_ff
+    moe_layer_freq: int = 1  # 1 = every layer is MoE; 2 = every other; etc.
+    first_dense_layers: int = 0  # keep the first N layers dense (routing warmup)
+    aux_loss_coef: float = 0.01  # load-balancing auxiliary loss weight
+    router_z_loss_coef: float = 0.001  # router logit z-loss weight
 
     # Vision encoder config
     image_size: int = 256
@@ -52,31 +65,70 @@ class FramerConfig:
     # Code generation
     code_vocab_size: int = 50304  # shared vocab
 
+    # Build scope. text_only skips the multimodal understanding + generation
+    # submodules (vision/audio encoders, image/video/audio diffusion) so the LLM
+    # core can be built, trained, and tested on its own — the focus of this pass.
+    text_only: bool = False
+
     # Training
     learning_rate: float = 3e-4
+    min_learning_rate: float = 1e-6
     weight_decay: float = 0.01
     warmup_steps: int = 2000
     max_steps: int = 100000
     batch_size: int = 8
     gradient_accumulation_steps: int = 4
+    grad_clip: float = 1.0
 
     # Paths
     checkpoint_dir: str = "checkpoints"
     data_dir: str = "data"
     log_dir: str = "logs"
 
-    # Device
+    # Device / precision
     device: str = "auto"
     mixed_precision: bool = True
+    precision: str = "bf16"  # "bf16" | "fp16" | "fp32". Chosen dtype for autocast.
+    use_gradient_checkpointing: bool = False
 
     # Context extension (RoPE scaling)
+    rope_theta: float = 10000.0
     rope_scaling_factor: float = 1.0
-    rope_scaling_type: str = "linear"
+    rope_scaling_type: str = "linear"  # "linear" | "ntk" | "yarn" | "none"
+
+    # Identity
+    preset: str = None
 
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
 
     @property
+    def kv_heads(self) -> int:
+        """Resolved number of key/value heads (GQA)."""
+        return self.n_kv_heads if self.n_kv_heads else self.n_heads
+
+    @property
     def num_patches(self) -> int:
         return (self.image_size // self.patch_size) ** 2
+
+    def is_moe_layer(self, layer_idx: int) -> bool:
+        """Whether the transformer layer at ``layer_idx`` uses a MoE FFN."""
+        if not self.use_moe or self.n_experts <= 0:
+            return False
+        if layer_idx < self.first_dense_layers:
+            return False
+        return (layer_idx - self.first_dense_layers) % max(1, self.moe_layer_freq) == 0
+
+    @classmethod
+    def from_preset(cls, name: str, **overrides) -> "FramerConfig":
+        """Build a config from a named preset (see ``model.configs.presets``)."""
+        from .presets import build_preset_config
+
+        return build_preset_config(name, **overrides)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FramerConfig":
+        """Build a config from a dict, ignoring unknown keys (forward-compat)."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
