@@ -11,28 +11,37 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
-import time
-import logging
-from pathlib import Path
 from dataclasses import asdict
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
-from model.configs import FramerConfig
-from model.framer import FramerModel
-from model.tokenizer import FramerTokenizer
+from model.configs import FramerConfig, list_presets, resolve_preset_name
 from model.data import (
+    AudioCaptionDataset,
+    ImageCaptionDataset,
     TextCorpusDataset,
+    build_packed_dataset,
     build_text_dataset,
     iter_text_records,
-    ImageCaptionDataset,
-    AudioCaptionDataset,
 )
-from model.utils import get_device, count_parameters, save_checkpoint, load_checkpoint
+from model.framer import FramerModel
+from model.tokenizer import FramerTokenizer
+from model.training import (
+    cleanup_distributed,
+    get_rank,
+    get_world_size,
+    init_distributed,
+    is_main_process,
+    maybe_wrap_fsdp,
+    train_language_model,
+)
+from model.utils import count_parameters, estimate_params, get_device, load_checkpoint
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,126 +116,74 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data"):
 
 
 def train_model(config: FramerConfig, output_dir: str, resume: str = None,
-                data_dir: str = "data", train_modalities: bool = False):
-    """Train the model from scratch on a local corpus."""
+                data_dir: str = "data", train_modalities: bool = False,
+                shard_dir: str = None):
+    """Train the LM core from scratch on a local corpus.
+
+    Uses the modern training stack (bf16/fp16 autocast, warmup-cosine LR, MoE
+    aux loss, activation checkpointing, optional FSDP2 under torchrun). Streams
+    packed token shards when ``shard_dir`` is provided, else falls back to the
+    in-memory corpus loader.
+    """
     device = get_device(config.device)
-    logger.info(f"Training on device: {device}")
+    distributed = init_distributed(device)
+    rank, world = get_rank(), get_world_size()
+    if is_main_process():
+        est = estimate_params(config)
+        logger.info(f"Training on {device} | world_size={world} | {est['summary']}")
 
     # Load or build model
     model = FramerModel(config).to(device)
-    tokenizer_path = os.path.join(output_dir, "tokenizer")
 
+    start_step = 0
     if resume:
         logger.info(f"Resuming from {resume}")
-        step, prev_loss = load_checkpoint(resume, model)
-        logger.info(f"Resumed at step {step}, loss={prev_loss:.4f}")
+        start_step, prev_loss = load_checkpoint(resume, model)
+        logger.info(f"Resumed at step {start_step}")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
-            step, _ = load_checkpoint(init_path, model)
-        else:
-            step = 0
+            start_step, _ = load_checkpoint(init_path, model)
 
+    tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
 
-    # Load the text corpus from the local data directory
-    max_len = min(config.max_seq_len, 512)
-    text_dataset = build_text_dataset(data_dir, tokenizer, max_len=max_len)
-    if text_dataset is None:
-        logger.warning(
-            f"No text data found in '{data_dir}'. Using the built-in sample corpus. "
-            f"Add .txt or .jsonl files under '{data_dir}' to train on real data."
-        )
-        text_dataset = TextCorpusDataset(BUILTIN_SAMPLE_TEXTS, tokenizer, max_len=128)
-    logger.info(f"Loaded {len(text_dataset)} text samples from '{data_dir}'")
-    text_loader = DataLoader(text_dataset, batch_size=config.batch_size, shuffle=True)
+    # Shard the model across ranks when distributed (no-op single-device).
+    model = maybe_wrap_fsdp(model, config, device)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-        betas=(0.9, 0.95),
+    seq_len = min(config.max_seq_len, 1024)
+
+    # Prefer streaming packed shards; fall back to the in-memory corpus loader.
+    packed = build_packed_dataset(shard_dir, seq_len, rank=rank, world_size=world) if shard_dir else None
+    if packed is not None:
+        logger.info(f"Streaming packed shards from '{shard_dir}' (seq_len={seq_len})")
+        loader = DataLoader(packed, batch_size=config.batch_size, num_workers=2, pin_memory=(device.type == "cuda"))
+    else:
+        text_dataset = build_text_dataset(data_dir, tokenizer, max_len=seq_len)
+        if text_dataset is None:
+            logger.warning(
+                f"No text data found in '{data_dir}'. Using the built-in sample corpus. "
+                f"Add .txt/.jsonl under '{data_dir}', or prepare shards with scripts/prepare_data.py."
+            )
+            text_dataset = TextCorpusDataset(BUILTIN_SAMPLE_TEXTS, tokenizer, max_len=128)
+        logger.info(f"Loaded {len(text_dataset)} text samples from '{data_dir}'")
+        sampler = DistributedSampler(text_dataset) if distributed else None
+        loader = DataLoader(
+            text_dataset, batch_size=config.batch_size,
+            shuffle=(sampler is None), sampler=sampler,
+            pin_memory=(device.type == "cuda"),
+        )
+
+    train_language_model(
+        config, model, loader, device, output_dir,
+        start_step=start_step, logger=logger,
     )
 
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.max_steps, eta_min=1e-6)
-
-    # Mixed precision
-    scaler = torch.amp.GradScaler("cuda") if config.mixed_precision and device.type == "cuda" else None
-
-    logger.info(f"Starting training from step {step}")
-    logger.info(f"Parameters: {count_parameters(model):,}")
-    model.train()
-
-    total_loss = 0
-    log_interval = 10
-    save_interval = 500
-    start_time = time.time()
-
-    while step < config.max_steps:
-        for batch in text_loader:
-            if step >= config.max_steps:
-                break
-
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-
-            if scaler:
-                with torch.amp.autocast("cuda"):
-                    results = model(input_ids=input_ids, labels=labels)
-                    loss = results["text_loss"] / config.gradient_accumulation_steps
-                scaler.scale(loss).backward()
-            else:
-                results = model(input_ids=input_ids, labels=labels)
-                loss = results["text_loss"] / config.gradient_accumulation_steps
-                loss.backward()
-
-            total_loss += loss.item()
-
-            if (step + 1) % config.gradient_accumulation_steps == 0:
-                if scaler:
-                    scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-
-                optimizer.zero_grad()
-                scheduler.step()
-
-            step += 1
-
-            if step % log_interval == 0:
-                avg_loss = total_loss / log_interval
-                elapsed = time.time() - start_time
-                steps_per_sec = step / elapsed if elapsed > 0 else 0
-                lr = scheduler.get_last_lr()[0]
-                logger.info(
-                    f"Step {step}/{config.max_steps} | Loss: {avg_loss:.4f} | "
-                    f"LR: {lr:.2e} | Speed: {steps_per_sec:.1f} steps/s"
-                )
-                total_loss = 0
-
-            if step % save_interval == 0:
-                ckpt_path = os.path.join(output_dir, f"checkpoint_{step}.pt")
-                save_checkpoint(model, optimizer, step, loss.item() * config.gradient_accumulation_steps, ckpt_path)
-                logger.info(f"Checkpoint saved: {ckpt_path}")
-
-    # Optional image/audio generation training on local caption pairs
-    if train_modalities:
+    # Optional image/audio generation training (single-device, full multimodal).
+    if train_modalities and not config.text_only and not distributed and is_main_process():
         train_modality_generators(model, tokenizer, config, data_dir, device)
 
-    # Final save
-    final_path = os.path.join(output_dir, "model_final.pt")
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": asdict(config),
-        "step": step,
-    }, final_path)
-    logger.info(f"Training complete. Final model saved to {final_path}")
+    cleanup_distributed()
     return model
 
 
@@ -293,6 +250,20 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
         "config": asdict(config),
     }, export_path)
 
+    # Optional safetensors export (secure, framework-portable weights).
+    try:
+        from safetensors.torch import save_file
+
+        st_path = os.path.join(export_dir, "framerai_model.safetensors")
+        tensors = {k: v.contiguous() for k, v in model.state_dict().items()}
+        # Weight tying makes lm_head share storage with token_embed; drop the
+        # duplicate so safetensors (which forbids shared storage) accepts it.
+        tensors.pop("lm_head.weight", None)
+        save_file(tensors, st_path, metadata={"format": "pt", "framer_preset": str(config.preset)})
+        logger.info(f"  Safetensors: {st_path}")
+    except ImportError:
+        logger.info("  (install 'safetensors' to also export a .safetensors file)")
+
     # Copy tokenizer
     tokenizer_src = os.path.join(output_dir, "tokenizer")
     tokenizer_dst = os.path.join(export_dir, "tokenizer")
@@ -338,8 +309,20 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--device", type=str, default=None, help="Device (auto, cpu, cuda, mps)")
 
-    # Size presets
-    parser.add_argument("--size", choices=["tiny", "small", "medium", "large"], default=None, help="Model size preset")
+    # Size presets (named registry, scaling from ~15M to 1T-MoE)
+    parser.add_argument("--preset", default=None,
+                        help="Named preset, e.g. framer-small / framer-8b / framer-1t-a32b")
+    parser.add_argument("--size", choices=["tiny", "small", "medium", "large"], default=None,
+                        help="Legacy size alias for framer-{tiny,small,medium,large}")
+    parser.add_argument("--list-presets", action="store_true", help="List presets and exit")
+    parser.add_argument("--text-only", action="store_true",
+                        help="Build only the LLM core (skip multimodal encoders/decoders)")
+    parser.add_argument("--shard-dir", default=None,
+                        help="Directory of packed token shards (see scripts/prepare_data.py)")
+    parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default=None,
+                        help="Autocast precision (default bf16)")
+    parser.add_argument("--grad-checkpointing", action="store_true",
+                        help="Enable activation checkpointing to save memory")
 
     # Context extension
     parser.add_argument("--rope-scaling", type=float, default=None,
@@ -347,54 +330,27 @@ def main():
 
     args = parser.parse_args()
 
-    # Create config
-    config = FramerConfig()
+    if args.list_presets:
+        from model.utils import estimate_params
+        print("Available presets (total / active params):")
+        for name in list_presets():
+            est = estimate_params(FramerConfig.from_preset(name))
+            print(f"  {name:20s} {est['total_h']:>9s} / {est['active_h']:>9s}")
+        return
 
-    # Apply size presets
-    if args.size == "tiny":
-        config.d_model = 256
-        config.n_heads = 4
-        config.n_layers = 6
-        config.d_ff = 1024
-        config.vision_d_model = 256
-        config.vision_n_heads = 4
-        config.vision_n_layers = 4
-        config.diffusion_channels = 64
-        config.audio_d_model = 256
-        config.audio_n_heads = 4
-        config.audio_n_layers = 4
-        config.audio_gen_channels = 32
-        config.max_steps = 1000
-    elif args.size == "small":
-        config.d_model = 512
-        config.n_heads = 8
-        config.n_layers = 12
-        config.d_ff = 2048
-        config.vision_d_model = 512
-        config.vision_n_heads = 8
-        config.vision_n_layers = 6
-        config.diffusion_channels = 128
-        config.audio_d_model = 512
-        config.audio_n_heads = 8
-        config.audio_n_layers = 6
-        config.audio_gen_channels = 64
-    elif args.size == "medium":
-        pass  # defaults
-    elif args.size == "large":
-        config.d_model = 2048
-        config.n_heads = 32
-        config.n_layers = 32
-        config.d_ff = 8192
-        config.vision_d_model = 2048
-        config.vision_n_heads = 32
-        config.vision_n_layers = 16
-        config.diffusion_channels = 512
-        config.audio_d_model = 2048
-        config.audio_n_heads = 32
-        config.audio_n_layers = 16
-        config.audio_gen_channels = 256
+    # Build config from a preset (default framer-medium), then apply CLI overrides.
+    preset_name = args.preset or args.size or "framer-medium"
+    config = FramerConfig.from_preset(preset_name)
 
     # Apply CLI overrides
+    if args.text_only:
+        config.text_only = True
+    if args.shard_dir:
+        config.data_dir = args.shard_dir
+    if args.precision:
+        config.precision = args.precision
+    if args.grad_checkpointing:
+        config.use_gradient_checkpointing = True
     if args.d_model:
         config.d_model = args.d_model
     if args.n_layers:
@@ -413,14 +369,15 @@ def main():
         config.rope_scaling_factor = args.rope_scaling
 
     logger.info("=" * 60)
-    logger.info("FramerAI Model Builder")
+    logger.info(f"FramerAI Model Builder | preset={resolve_preset_name(preset_name)}")
     logger.info("=" * 60)
 
     if args.mode in ("build", "all"):
         build_model(config, args.output_dir, args.data_dir)
 
     if args.mode in ("train", "all"):
-        train_model(config, args.output_dir, args.resume, args.data_dir, args.train_modalities)
+        train_model(config, args.output_dir, args.resume, args.data_dir,
+                    args.train_modalities, shard_dir=args.shard_dir)
 
     if args.mode in ("export", "all"):
         export_model(config, args.output_dir, args.export_dir)

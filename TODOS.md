@@ -17,12 +17,26 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## Model and training
 
-- [ ] Publish reproducible training configs for tiny, small, medium, and large sizes.
+- [x] Publish reproducible size presets (registry in `model/configs/presets.py`,
+      `framer-tiny` … `framer-1t-a32b`) with a parameter estimator.
+- [x] Grouped-query attention, fused SDPA/flash attention, and an incremental KV cache.
+- [x] Mixture-of-Experts FFN with load-balancing + router z-loss for trillion-scale totals.
+- [x] Support gradient checkpointing and mixed precision (bf16/fp16/fp32) flags end to end.
+- [x] Warmup→cosine LR schedule wired through `config.warmup_steps`.
+- [x] Streaming, packed token-shard data pipeline (`scripts/prepare_data.py`).
+- [x] Optional safetensors export.
+- [~] Multi-GPU / distributed training via torch-native FSDP2 (guarded; validated single-device).
+      Tensor / expert / pipeline parallelism for the 1T preset remain to be built.
+- [ ] Add a full state-dict gather for FSDP checkpoint save/load.
 - [ ] Add evaluation harness with standard benchmarks and a results table in the docs.
-- [ ] Add checkpoint resume and safe interruption to `build.py` training.
-- [ ] Support gradient checkpointing and mixed precision flags end to end.
-- [ ] Add ONNX and safetensors export validation with a round-trip test.
-- [ ] Document and validate multi-GPU and distributed training paths.
+- [ ] Add ONNX export and a safetensors round-trip validation test.
+
+## Phase 2 — generation quality (image / video / audio)
+
+- [ ] Latent diffusion for image generation (VAE + DiT), DALL·E-3-style.
+- [ ] Spacetime-latent-patch diffusion transformer for video, Sora-style.
+- [ ] Neural vocoder to replace Griffin-Lim (also tracked below).
+- [ ] Interleaved multimodal token placement (LLaVA/Qwen-VL-style) beyond prefix concat.
 
 ## Multimodal and audio
 
