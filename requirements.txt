@@ -5,3 +5,10 @@ numpy>=2.5.1
 Pillow>=10.0.0
 soundfile>=0.12.0
 tqdm>=4.69.0
+
+# Optional extras (the core runs without them):
+#   safetensors  - secure, portable weight export (build.py --mode export)
+#   pytest       - run the test suite in tests/
+#   flash-attn   - faster attention on supported CUDA GPUs (SDPA already uses
+#                  flash/mem-efficient kernels where available without it)
+# pip install safetensors pytest

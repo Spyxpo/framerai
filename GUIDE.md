@@ -117,14 +117,23 @@ The web app opens at `http://localhost:5173`.
 - Audio generator: text-conditioned mel diffusion with Griffin-Lim reconstruction.
 - Multimodal projector: aligns vision and audio embeddings with the language model space.
 
-Model sizes are defined in `build.py`:
+Model sizes are named presets in `model/configs/presets.py` (run
+`python build.py --list-presets` to print total/active parameter counts). LLM-core
+counts (total vs. active per token):
 
-| Size | d_model | Layers | Heads | Parameters |
-|------|---------|--------|-------|------------|
-| Tiny | 256 | 6 | 4 | ~25M |
-| Small | 512 | 12 | 8 | ~150M |
-| Medium | 1024 | 24 | 16 | ~600M |
-| Large | 2048 | 32 | 32 | ~2.5B |
+| Preset | d_model | Layers | Heads (Q/KV) | Total | Active |
+|--------|---------|--------|--------------|-------|--------|
+| `framer-tiny` | 256 | 6 | 8 / 4 | ~19M | ~19M |
+| `framer-small` | 768 | 12 | 12 / 4 | ~142M | ~142M |
+| `framer-medium` | 1024 | 24 | 16 / 8 | ~429M | ~429M |
+| `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B |
+| `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B |
+| `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B |
+| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~999B | ~32B |
+
+Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
+scale total parameters via sparse experts and need multi-GPU hardware to train.
+`--size tiny|small|medium|large` remains as a legacy alias.
 
 To experiment with a custom shape, pass overrides:
 

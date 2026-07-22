@@ -17,11 +17,11 @@ import glob
 import json
 import os
 
+import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from .modules.audio_encoder import AudioFrontEnd
-
 
 # ---------------------------------------------------------------------------
 # Text records
@@ -98,6 +98,131 @@ def build_text_dataset(data_dir: str, tokenizer, max_len: int = 512):
     if not texts:
         return None
     return TextCorpusDataset(texts, tokenizer, max_len=max_len)
+
+
+# ---------------------------------------------------------------------------
+# Streaming, packed token shards (scales past in-memory tokenization)
+# ---------------------------------------------------------------------------
+
+SHARD_META = "meta.json"
+
+
+def _shard_dtype(vocab_size: int):
+    """uint16 fits vocabularies up to 65536; uint32 otherwise."""
+    return np.uint16 if vocab_size <= 65536 else np.uint32
+
+
+def prepare_shards(data_dir: str, tokenizer, out_dir: str, shard_tokens: int = 1_000_000):
+    """Tokenize a corpus into memory-mappable ``.bin`` shards + a meta.json.
+
+    Streams text records (no full-corpus buffering), separating documents with
+    the EOS token so packed blocks respect document boundaries. Returns the meta
+    dict. Run once offline, then train from the shard directory via
+    :class:`PackedTokenDataset`.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    dtype = _shard_dtype(tokenizer.vocab_size)
+    shards, buf, total = [], [], 0
+
+    def flush():
+        if not buf:
+            return
+        idx = len(shards)
+        path = os.path.join(out_dir, f"shard_{idx:05d}.bin")
+        np.asarray(buf, dtype=dtype).tofile(path)
+        shards.append(os.path.basename(path))
+        buf.clear()
+
+    for text in iter_text_records(data_dir):
+        ids = tokenizer.encode(text, add_special=True)  # wraps with sos/eos
+        buf.extend(ids)
+        total += len(ids)
+        while len(buf) >= shard_tokens:
+            carry = buf[shard_tokens:]
+            del buf[shard_tokens:]
+            flush()
+            buf.extend(carry)
+    flush()
+
+    meta = {
+        "dtype": np.dtype(dtype).name,
+        "shards": shards,
+        "total_tokens": total,
+        "vocab_size": tokenizer.vocab_size,
+    }
+    with open(os.path.join(out_dir, SHARD_META), "w") as f:
+        json.dump(meta, f, indent=2)
+    return meta
+
+
+class PackedTokenDataset(IterableDataset):
+    """Stream fixed-length next-token blocks from memory-mapped token shards.
+
+    Blocks are non-overlapping windows of ``seq_len`` tokens (label shifted by
+    one), packed with no padding. Work is split deterministically across
+    distributed ranks and DataLoader workers, so every (rank, worker) sees a
+    disjoint slice of blocks. An optional shuffle buffer adds ordering noise.
+    """
+
+    def __init__(self, shard_dir: str, seq_len: int, rank: int = 0, world_size: int = 1,
+                 shuffle_buffer: int = 0, seed: int = 0):
+        with open(os.path.join(shard_dir, SHARD_META)) as f:
+            self.meta = json.load(f)
+        self.shard_dir = shard_dir
+        self.seq_len = seq_len
+        self.rank = rank
+        self.world_size = max(1, world_size)
+        self.shuffle_buffer = shuffle_buffer
+        self.seed = seed
+        self.dtype = np.dtype(self.meta["dtype"])
+
+    def _blocks(self, consumer_id: int, total_consumers: int):
+        step = self.seq_len
+        gid = 0
+        for shard in self.meta["shards"]:
+            arr = np.memmap(os.path.join(self.shard_dir, shard), dtype=self.dtype, mode="r")
+            n_blocks = (len(arr) - 1) // step
+            for b in range(n_blocks):
+                if gid % total_consumers == consumer_id:
+                    start = b * step
+                    chunk = np.asarray(arr[start:start + step + 1], dtype=np.int64)
+                    yield {
+                        "input_ids": torch.from_numpy(chunk[:-1]),
+                        "labels": torch.from_numpy(chunk[1:]),
+                    }
+                gid += 1
+
+    def __iter__(self):
+        worker = get_worker_info()
+        num_workers = worker.num_workers if worker else 1
+        worker_id = worker.id if worker else 0
+        consumer_id = self.rank * num_workers + worker_id
+        total_consumers = self.world_size * num_workers
+
+        stream = self._blocks(consumer_id, total_consumers)
+        if self.shuffle_buffer <= 1:
+            yield from stream
+            return
+
+        import random
+
+        rng = random.Random(self.seed + consumer_id)
+        buffer = []
+        for item in stream:
+            buffer.append(item)
+            if len(buffer) >= self.shuffle_buffer:
+                yield buffer.pop(rng.randrange(len(buffer)))
+        rng.shuffle(buffer)
+        yield from buffer
+
+
+def build_packed_dataset(shard_dir: str, seq_len: int, rank: int = 0, world_size: int = 1,
+                         shuffle_buffer: int = 1024):
+    """Return a PackedTokenDataset if a prepared shard dir exists, else None."""
+    if not os.path.isfile(os.path.join(shard_dir, SHARD_META)):
+        return None
+    return PackedTokenDataset(shard_dir, seq_len, rank=rank, world_size=world_size,
+                              shuffle_buffer=shuffle_buffer)
 
 
 # ---------------------------------------------------------------------------
