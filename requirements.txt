@@ -4,7 +4,7 @@ torchaudio>=2.11.0
 numpy>=2.5.1
 Pillow>=12.3.0
 soundfile>=0.14.0
-tqdm>=4.69.0
+tqdm>=4.70.0
 
 # Optional extras (the core runs without them):
 #   safetensors  - secure, portable weight export (build.py --mode export)
