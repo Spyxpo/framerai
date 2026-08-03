@@ -723,3 +723,225 @@ body {
     padding: 12px 16px;
   }
 }
+
+/* ============================================
+   Error Banner
+   ============================================ */
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 24px;
+  background: rgba(239, 68, 68, 0.12);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  font-size: 13px;
+  animation: fadeIn 0.2s ease;
+}
+
+.error-banner-icon {
+  flex-shrink: 0;
+  color: var(--error);
+}
+
+.error-banner span {
+  flex: 1;
+}
+
+.error-banner-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: none;
+  border: none;
+  color: #fca5a5;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.error-banner-dismiss:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* ============================================
+   Error Message Bubble
+   ============================================ */
+
+.message.error .message-avatar {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.message.error .message-content {
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.07);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+
+.error-message-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #fca5a5;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.error-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--error);
+}
+
+.retry-btn {
+  color: var(--error) !important;
+  gap: 5px;
+}
+
+.retry-btn:hover {
+  background: rgba(239, 68, 68, 0.12) !important;
+  color: #fca5a5 !important;
+}
+
+/* ============================================
+   Messages Loading Skeleton
+   ============================================ */
+
+.messages-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 8px 0;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.message-skeleton {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.message-skeleton.user {
+  justify-content: flex-end;
+}
+
+.skeleton-avatar {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  animation: shimmer 1.6s infinite;
+}
+
+.skeleton-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 480px;
+}
+
+.skeleton-body.right {
+  align-items: flex-end;
+}
+
+.skeleton-line {
+  height: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: shimmer 1.6s infinite;
+}
+
+.skeleton-line.long  { width: 85%; }
+.skeleton-line.medium { width: 60%; }
+.skeleton-line.short  { width: 35%; }
+
+@keyframes shimmer {
+  0%   { opacity: 0.4; }
+  50%  { opacity: 0.8; }
+  100% { opacity: 0.4; }
+}
+
+/* ============================================
+   Input busy state
+   ============================================ */
+
+.input-wrapper.busy {
+  border-color: var(--border-light);
+  opacity: 0.75;
+}
+
+/* ============================================
+   Sidebar Loading Skeleton
+   ============================================ */
+
+.conversation-list-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.conversation-skeleton {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-icon {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: shimmer 1.6s infinite;
+}
+
+.conversation-skeleton .skeleton-line {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: shimmer 1.6s infinite;
+}
+
+/* ============================================
+   Sidebar Empty State (improved)
+   ============================================ */
+
+.empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-state-icon {
+  color: var(--bg-hover);
+  margin-bottom: 4px;
+}
+
+.empty-state p {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.empty-state span {
+  color: var(--text-muted);
+  font-size: 12px;
+}

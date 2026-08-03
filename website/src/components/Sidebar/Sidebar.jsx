@@ -1,7 +1,16 @@
 import React from "react";
 import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft } from "lucide-react";
 
-export default function Sidebar({ open, conversations, activeId, onToggle, onNew, onSelect, onDelete }) {
+export default function Sidebar({
+  open,
+  conversations,
+  activeId,
+  loadingConversations,
+  onToggle,
+  onNew,
+  onSelect,
+  onDelete,
+}) {
   if (!open) {
     return (
       <div className="sidebar-closed">
@@ -11,6 +20,55 @@ export default function Sidebar({ open, conversations, activeId, onToggle, onNew
       </div>
     );
   }
+
+  const renderList = () => {
+    // Loading state — show skeleton items
+    if (loadingConversations) {
+      return (
+        <div className="conversation-list-loading" aria-label="Loading conversations">
+          {[1, 2, 3].map((n) => (
+            <div key={n} className="conversation-skeleton">
+              <div className="skeleton-icon" />
+              <div className="skeleton-line" style={{ width: `${60 + n * 10}%` }} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // Empty state — truly no conversations
+    if (conversations.length === 0) {
+      return (
+        <div className="empty-state">
+          <MessageSquare size={24} className="empty-state-icon" />
+          <p>No conversations yet</p>
+          <span>Click &ldquo;New Chat&rdquo; to get started</span>
+        </div>
+      );
+    }
+
+    // Normal list
+    return conversations.map((conv) => (
+      <div
+        key={conv.id}
+        className={`conversation-item ${conv.id === activeId ? "active" : ""}`}
+        onClick={() => onSelect(conv.id)}
+      >
+        <MessageSquare size={16} />
+        <span className="conversation-title">{conv.title || "New Chat"}</span>
+        <button
+          className="delete-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(conv.id);
+          }}
+          title="Delete"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+    ));
+  };
 
   return (
     <aside className="sidebar">
@@ -30,32 +88,7 @@ export default function Sidebar({ open, conversations, activeId, onToggle, onNew
       </button>
 
       <div className="conversation-list">
-        {conversations.map((conv) => (
-          <div
-            key={conv.id}
-            className={`conversation-item ${conv.id === activeId ? "active" : ""}`}
-            onClick={() => onSelect(conv.id)}
-          >
-            <MessageSquare size={16} />
-            <span className="conversation-title">{conv.title || "New Chat"}</span>
-            <button
-              className="delete-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(conv.id);
-              }}
-              title="Delete"
-            >
-              <Trash2 size={14} />
-            </button>
-          </div>
-        ))}
-
-        {conversations.length === 0 && (
-          <div className="empty-state">
-            <p>No conversations yet</p>
-          </div>
-        )}
+        {renderList()}
       </div>
 
       <div className="sidebar-footer">
