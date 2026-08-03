@@ -1,12 +1,23 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2 } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, WifiOff, AlertTriangle } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
-export default function Chat({ messages, loading, streaming, sidebarOpen, onSend, onToggleSidebar }) {
+export default function Chat({
+  messages,
+  loading,
+  streaming,
+  loadingMessages,
+  error,
+  sidebarOpen,
+  onSend,
+  onToggleSidebar,
+  onDismissError,
+}) {
   const [input, setInput] = useState("");
   const [messageType, setMessageType] = useState("text");
   const [transcribing, setTranscribing] = useState(false);
+  const [transcribeError, setTranscribeError] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const audioInputRef = useRef(null);
@@ -16,12 +27,13 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
     e.target.value = "";
     if (!file) return;
     setTranscribing(true);
+    setTranscribeError(null);
     try {
       const result = await api.transcribe(file);
       setInput((prev) => (prev ? `${prev} ${result.text}` : result.text));
       textareaRef.current?.focus();
     } catch (err) {
-      setInput(`Could not transcribe audio: ${err.message}`);
+      setTranscribeError(`Transcription failed: ${err.message}`);
     } finally {
       setTranscribing(false);
     }
@@ -33,7 +45,7 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!input.trim() || loading || streaming) return;
+    if (!input.trim() || loading || streaming || loadingMessages) return;
     onSend(input, messageType);
     setInput("");
     setMessageType("text");
@@ -51,10 +63,17 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
 
   const handleInput = (e) => {
     setInput(e.target.value);
-    // Auto-resize textarea
     e.target.style.height = "auto";
     e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px";
   };
+
+  // Find the last user message so we can offer retry on the error below it
+  const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+  const handleRetry = lastUserMessage
+    ? () => onSend(lastUserMessage.content, lastUserMessage.type || "text")
+    : undefined;
+
+  const isBusy = loading || streaming || loadingMessages;
 
   return (
     <main className={`chat-container ${sidebarOpen ? "" : "full-width"}`}>
@@ -69,42 +88,104 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
         <div className="chat-subtitle">Text, code, image, video, and audio</div>
       </header>
 
+      {/* Global error banner */}
+      {error && (
+        <div className="error-banner" role="alert">
+          <AlertTriangle size={15} className="error-banner-icon" />
+          <span>{error}</span>
+          <button className="error-banner-dismiss" onClick={onDismissError} aria-label="Dismiss error">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {/* Transcription error banner */}
+      {transcribeError && (
+        <div className="error-banner" role="alert">
+          <AlertTriangle size={15} className="error-banner-icon" />
+          <span>{transcribeError}</span>
+          <button className="error-banner-dismiss" onClick={() => setTranscribeError(null)} aria-label="Dismiss error">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="messages-container">
-        {messages.length === 0 && (
-          <div className="welcome-screen">
-            <img src="/logo.svg" alt="FramerAI" className="welcome-logo" />
-            <h2>Welcome to FramerAI</h2>
-            <p>A multimodal AI that can generate text, code, images, video, and audio.</p>
-            <div className="suggestions">
-              <button className="suggestion" onClick={() => onSend("Hello! What can you do?")}>
-                What can you do?
-              </button>
-              <button className="suggestion" onClick={() => onSend("Write a fibonacci function in Python")}>
-                Write a fibonacci function
-              </button>
-              <button className="suggestion" onClick={() => onSend("Generate an image of a sunset over mountains")}>
-                Generate a sunset image
-              </button>
-              <button className="suggestion" onClick={() => onSend("Generate audio that says hello and welcome")}>
-                Generate a voice clip
-              </button>
+        {/* Loading skeleton — shown while fetching an existing conversation */}
+        {loadingMessages ? (
+          <div className="messages-loading" aria-label="Loading messages">
+            <div className="message-skeleton">
+              <div className="skeleton-avatar" />
+              <div className="skeleton-body">
+                <div className="skeleton-line long" />
+                <div className="skeleton-line medium" />
+              </div>
             </div>
-          </div>
-        )}
-
-        {messages.map((msg, i) => (
-          <MessageBubble key={msg.id || i} message={msg} isStreaming={streaming && i === messages.length - 1} />
-        ))}
-
-        {(loading || streaming) && messages[messages.length - 1]?.role !== "assistant" && (
-          <div className="message assistant">
-            <div className="message-content">
-              <div className="typing-indicator">
-                <span></span><span></span><span></span>
+            <div className="message-skeleton user">
+              <div className="skeleton-body right">
+                <div className="skeleton-line short" />
+              </div>
+              <div className="skeleton-avatar" />
+            </div>
+            <div className="message-skeleton">
+              <div className="skeleton-avatar" />
+              <div className="skeleton-body">
+                <div className="skeleton-line long" />
+                <div className="skeleton-line short" />
+                <div className="skeleton-line medium" />
               </div>
             </div>
           </div>
+        ) : (
+          <>
+            {/* Empty / welcome state — only when not loading */}
+            {messages.length === 0 && (
+              <div className="welcome-screen">
+                <img src="/logo.svg" alt="FramerAI" className="welcome-logo" />
+                <h2>Welcome to FramerAI</h2>
+                <p>A multimodal AI that can generate text, code, images, video, and audio.</p>
+                <div className="suggestions">
+                  <button className="suggestion" onClick={() => onSend("Hello! What can you do?")}>
+                    What can you do?
+                  </button>
+                  <button className="suggestion" onClick={() => onSend("Write a fibonacci function in Python")}>
+                    Write a fibonacci function
+                  </button>
+                  <button className="suggestion" onClick={() => onSend("Generate an image of a sunset over mountains")}>
+                    Generate a sunset image
+                  </button>
+                  <button className="suggestion" onClick={() => onSend("Generate audio that says hello and welcome")}>
+                    Generate a voice clip
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {messages.map((msg, i) => {
+              const isLastMsg = i === messages.length - 1;
+              const isErrorMsg = msg.type === "error";
+              return (
+                <MessageBubble
+                  key={msg.id || i}
+                  message={msg}
+                  isStreaming={streaming && isLastMsg}
+                  onRetry={isErrorMsg && isLastMsg ? handleRetry : undefined}
+                />
+              );
+            })}
+
+            {/* Typing indicator — only when the assistant hasn't replied yet */}
+            {(loading || streaming) && messages[messages.length - 1]?.role !== "assistant" && (
+              <div className="message assistant">
+                <div className="message-content">
+                  <div className="typing-indicator">
+                    <span></span><span></span><span></span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         <div ref={messagesEndRef} />
@@ -112,7 +193,7 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
 
       {/* Input */}
       <form className="input-container" onSubmit={handleSubmit}>
-        <div className="input-wrapper">
+        <div className={`input-wrapper ${isBusy ? "busy" : ""}`}>
           <div className="input-modes">
             <button
               type="button"
@@ -177,14 +258,14 @@ export default function Chat({ messages, loading, streaming, sidebarOpen, onSend
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder="Message FramerAI..."
+            placeholder={loadingMessages ? "Loading conversation…" : "Message FramerAI…"}
             rows={1}
-            disabled={loading || streaming}
+            disabled={isBusy}
           />
           <button
             type="submit"
             className="send-btn"
-            disabled={!input.trim() || loading || streaming}
+            disabled={!input.trim() || isBusy}
           >
             {loading || streaming ? <Loader2 size={20} className="spin" /> : <Send size={20} />}
           </button>

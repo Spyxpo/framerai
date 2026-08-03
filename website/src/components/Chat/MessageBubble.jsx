@@ -1,10 +1,11 @@
 import React from "react";
-import { User, Bot, Copy, Check } from "lucide-react";
+import { User, Bot, Copy, Check, AlertCircle, RefreshCw } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
 
-export default function MessageBubble({ message, isStreaming }) {
+export default function MessageBubble({ message, isStreaming, onRetry }) {
   const [copied, setCopied] = React.useState(false);
   const isUser = message.role === "user";
+  const isError = message.type === "error";
 
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content);
@@ -13,10 +14,21 @@ export default function MessageBubble({ message, isStreaming }) {
   };
 
   const renderContent = (content) => {
+    // Empty content during streaming = typing indicator
     if (!content) {
       return (
         <div className="typing-indicator">
           <span></span><span></span><span></span>
+        </div>
+      );
+    }
+
+    // Error messages get their own renderer
+    if (isError) {
+      return (
+        <div className="error-message-content">
+          <AlertCircle size={15} className="error-icon" />
+          <span>{content}</span>
         </div>
       );
     }
@@ -44,6 +56,7 @@ export default function MessageBubble({ message, isStreaming }) {
   };
 
   const renderMedia = () => {
+    if (isError) return null;
     const url = message.metadata?.url;
     if (!url) return null;
     if (message.type === "image") {
@@ -60,14 +73,14 @@ export default function MessageBubble({ message, isStreaming }) {
   };
 
   return (
-    <div className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""}`}>
+    <div className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""} ${isError ? "error" : ""}`}>
       <div className="message-avatar">
-        {isUser ? <User size={18} /> : <Bot size={18} />}
+        {isUser ? <User size={18} /> : isError ? <AlertCircle size={18} /> : <Bot size={18} />}
       </div>
       <div className="message-body">
         <div className="message-content">{renderContent(message.content)}</div>
         {renderMedia()}
-        {!isUser && message.content && (
+        {!isUser && message.content && !isError && (
           <div className="message-actions">
             <button className="action-btn" onClick={handleCopy} title="Copy">
               {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -75,6 +88,14 @@ export default function MessageBubble({ message, isStreaming }) {
             {message.metadata?.model && (
               <span className="model-tag">{message.metadata.model}</span>
             )}
+          </div>
+        )}
+        {isError && onRetry && (
+          <div className="message-actions">
+            <button className="action-btn retry-btn" onClick={onRetry} title="Retry">
+              <RefreshCw size={14} />
+              <span>Retry</span>
+            </button>
           </div>
         )}
       </div>

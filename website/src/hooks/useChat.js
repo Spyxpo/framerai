@@ -8,6 +8,9 @@ export function useChat() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [loadingConversations, setLoadingConversations] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [error, setError] = useState(null); // global banner error
   const wsRef = useRef(null);
 
   // Initialize WebSocket
@@ -15,11 +18,28 @@ export function useChat() {
     const ws = new WebSocketClient();
     wsRef.current = ws;
 
-    ws.connect().catch(() => {
-      console.warn("WebSocket connection failed, falling back to REST API");
-    });
+    ws.connect()
+      .then(() => {})
+      .catch(() => {
+        // Non-fatal: REST fallback will be used. No banner needed.
+      });
 
     ws.on("stream", (data) => {
+      if (data.type === "error") {
+        // Server sent an error event mid-stream
+        setStreaming(false);
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "assistant") {
+            last.content = data.message || "An error occurred while generating the response.";
+            last.type = "error";
+          }
+          return [...updated];
+        });
+        return;
+      }
+
       if (data.done) {
         setStreaming(false);
         setMessages((prev) => {
@@ -30,7 +50,7 @@ export function useChat() {
             last.type = data.responseType || "text";
             last.metadata = data.metadata;
           }
-          return updated;
+          return [...updated];
         });
       } else {
         setMessages((prev) => {
@@ -46,22 +66,34 @@ export function useChat() {
 
     ws.on("typing", () => setStreaming(true));
 
+    ws.on("error", () => {
+      setStreaming(false);
+    });
+
     return () => ws.disconnect();
   }, []);
 
   // Load conversations on mount
   useEffect(() => {
-    api.listConversations().then(setConversations).catch(() => {});
+    setLoadingConversations(true);
+    api
+      .listConversations()
+      .then(setConversations)
+      .catch(() => {
+        setError("Unable to load conversations. Make sure the backend is running.");
+      })
+      .finally(() => setLoadingConversations(false));
   }, []);
 
   const createConversation = useCallback(async () => {
+    setError(null);
     try {
       const conv = await api.createConversation();
       setConversations((prev) => [conv, ...prev]);
       setActiveConversation(conv.id);
       setMessages([]);
     } catch {
-      // Offline fallback
+      // Offline fallback — create locally and let the user keep working
       const id = crypto.randomUUID();
       const conv = { id, title: "New Chat", messages: [] };
       setConversations((prev) => [conv, ...prev]);
@@ -72,20 +104,26 @@ export function useChat() {
 
   const selectConversation = useCallback(async (id) => {
     setActiveConversation(id);
+    setError(null);
+    setLoadingMessages(true);
     try {
       const conv = await api.getConversation(id);
       setMessages(conv.messages || []);
-    } catch {
+    } catch (err) {
       setMessages([]);
+      setError(`Could not load conversation: ${err.message}`);
+    } finally {
+      setLoadingMessages(false);
     }
   }, []);
 
   const deleteConversation = useCallback(
     async (id) => {
+      setError(null);
       try {
         await api.deleteConversation(id);
       } catch {
-        // continue anyway
+        // Continue anyway — remove from local list regardless
       }
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (activeConversation === id) {
@@ -96,9 +134,12 @@ export function useChat() {
     [activeConversation]
   );
 
+  const dismissError = useCallback(() => setError(null), []);
+
   const sendMessage = useCallback(
     async (content, type = "text") => {
       if (!content.trim()) return;
+      setError(null);
 
       let convId = activeConversation;
       if (!convId) {
@@ -159,11 +200,12 @@ export function useChat() {
           return updated;
         });
       } catch (err) {
+        // Write the error into the assistant message bubble so context is preserved
         setMessages((prev) => {
           const updated = [...prev];
           updated[updated.length - 1] = {
             ...assistantMsg,
-            content: `Error: ${err.message}. Make sure the backend is running.`,
+            content: err.message || "Something went wrong. Please try again.",
             type: "error",
           };
           return updated;
@@ -181,9 +223,13 @@ export function useChat() {
     messages,
     loading,
     streaming,
+    loadingConversations,
+    loadingMessages,
+    error,
     createConversation,
     selectConversation,
     deleteConversation,
     sendMessage,
+    dismissError,
   };
 }

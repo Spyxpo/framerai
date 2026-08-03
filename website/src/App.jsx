@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState } from "react";
 import Sidebar from "./components/Sidebar/Sidebar";
 import Chat from "./components/Chat/Chat";
 import { useChat } from "./hooks/useChat";
@@ -11,10 +11,14 @@ export default function App() {
     messages,
     loading,
     streaming,
+    loadingConversations,
+    loadingMessages,
+    error,
     createConversation,
     selectConversation,
     deleteConversation,
     sendMessage,
+    dismissError,
   } = useChat();
 
   return (
@@ -23,6 +27,7 @@ export default function App() {
         open={sidebarOpen}
         conversations={conversations}
         activeId={activeConversation}
+        loadingConversations={loadingConversations}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNew={createConversation}
         onSelect={selectConversation}
@@ -32,9 +37,12 @@ export default function App() {
         messages={messages}
         loading={loading}
         streaming={streaming}
+        loadingMessages={loadingMessages}
+        error={error}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        onDismissError={dismissError}
       />
     </div>
   );
