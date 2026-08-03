@@ -17,7 +17,7 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
     // Empty content during streaming = typing indicator
     if (!content) {
       return (
-        <div className="typing-indicator">
+        <div className="typing-indicator" aria-hidden="true">
           <span></span><span></span><span></span>
         </div>
       );
@@ -27,7 +27,7 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
     if (isError) {
       return (
         <div className="error-message-content">
-          <AlertCircle size={15} className="error-icon" />
+          <AlertCircle size={15} className="error-icon" aria-hidden="true" />
           <span>{content}</span>
         </div>
       );
@@ -42,8 +42,6 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
           return <CodeBlock key={i} language={match[1] || "text"} code={match[2].trim()} />;
         }
       }
-
-      // Parse inline formatting
       return (
         <div key={i} className="text-content" dangerouslySetInnerHTML={{
           __html: part
@@ -63,27 +61,41 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
       return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated image"} />;
     }
     if (message.type === "video") {
-      // Generated video is served as an animated GIF.
       return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated video"} />;
     }
     if (message.type === "audio") {
-      return <audio className="message-audio" src={url} controls />;
+      return <audio className="message-audio" src={url} controls aria-label="Generated audio" />;
     }
     return null;
   };
 
+  const roleLabel = isUser ? "Your message" : isError ? "Error from FramerAI" : "FramerAI response";
+
   return (
-    <div className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""} ${isError ? "error" : ""}`}>
-      <div className="message-avatar">
+    <article
+      className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""} ${isError ? "error" : ""}`}
+      aria-label={roleLabel}
+    >
+      <div className="message-avatar" aria-hidden="true">
         {isUser ? <User size={18} /> : isError ? <AlertCircle size={18} /> : <Bot size={18} />}
       </div>
       <div className="message-body">
-        <div className="message-content">{renderContent(message.content)}</div>
+        <div
+          className="message-content"
+          role={isError ? "alert" : undefined}
+          aria-live={isError ? "assertive" : undefined}
+        >
+          {renderContent(message.content)}
+        </div>
         {renderMedia()}
         {!isUser && message.content && !isError && (
           <div className="message-actions">
-            <button className="action-btn" onClick={handleCopy} title="Copy">
-              {copied ? <Check size={14} /> : <Copy size={14} />}
+            <button
+              className="action-btn"
+              onClick={handleCopy}
+              aria-label={copied ? "Copied" : "Copy message"}
+            >
+              {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
             </button>
             {message.metadata?.model && (
               <span className="model-tag">{message.metadata.model}</span>
@@ -92,13 +104,13 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
         )}
         {isError && onRetry && (
           <div className="message-actions">
-            <button className="action-btn retry-btn" onClick={onRetry} title="Retry">
-              <RefreshCw size={14} />
+            <button className="action-btn retry-btn" onClick={onRetry} aria-label="Retry sending message">
+              <RefreshCw size={14} aria-hidden="true" />
               <span>Retry</span>
             </button>
           </div>
         )}
       </div>
-    </div>
+    </article>
   );
 }

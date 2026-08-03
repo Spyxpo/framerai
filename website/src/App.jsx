@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import Sidebar from "./components/Sidebar/Sidebar";
 import Chat from "./components/Chat/Chat";
 import SettingsPanel from "./components/Settings/SettingsPanel";
@@ -10,6 +10,10 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [model, setModel] = useState(null);
+  const chatFocusRef = useRef(null);     // Chat: focus first suggestion or textarea
+  const textareaFocusRef = useRef(null); // Chat: focus textarea directly
+  const sidebarFocusRef = useRef(null);  // Sidebar: focus New Chat button
+
   const { settings, updateSetting, resetSettings } = useSettings();
   const {
     conversations,
@@ -35,8 +39,31 @@ export default function App() {
       .catch(() => setModel(null));
   }, []);
 
+  // Select conversation → focus textarea when done
+  const handleSelectConversation = useCallback(async (id) => {
+    await selectConversation(id);
+    textareaFocusRef.current?.();
+  }, [selectConversation]);
+
+  // Sidebar → → Chat area
+  const focusChatArea = useCallback(() => {
+    chatFocusRef.current?.();
+  }, []);
+
+  // Chat ← → Sidebar New Chat button
+  const focusSidebar = useCallback(() => {
+    sidebarFocusRef.current?.();
+  }, []);
+
+  // Dismiss error and return focus to textarea (improvement a)
+  const handleDismissError = useCallback(() => {
+    dismissError();
+    textareaFocusRef.current?.();
+  }, [dismissError]);
+
   return (
     <div className="app">
+      <a href="#chat-input" className="skip-link">Skip to chat input</a>
       <Sidebar
         open={sidebarOpen}
         conversations={conversations}
@@ -44,9 +71,11 @@ export default function App() {
         loadingConversations={loadingConversations}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNew={createConversation}
-        onSelect={selectConversation}
+        onSelect={handleSelectConversation}
         onDelete={deleteConversation}
         onOpenSettings={() => setSettingsOpen(true)}
+        onFocusChat={focusChatArea}
+        focusRef={sidebarFocusRef}
       />
       <Chat
         messages={messages}
@@ -57,8 +86,11 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
-        onDismissError={dismissError}
+        onDismissError={handleDismissError}
         onOpenSettings={() => setSettingsOpen(true)}
+        focusRef={chatFocusRef}
+        textareaFocusRef={textareaFocusRef}
+        onFocusSidebar={focusSidebar}
       />
       <SettingsPanel
         open={settingsOpen}
