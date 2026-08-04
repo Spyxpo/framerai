@@ -10,13 +10,30 @@
 const { ApiError } = require("./errors");
 
 class Validator {
-  constructor(source) {
+  constructor(source, { prefix = "", errors = [] } = {}) {
     this.source = source || {};
-    this.errors = [];
+    this.prefix = prefix;
+    this.errors = errors;
   }
 
   fail(field, message) {
-    this.errors.push({ field, message });
+    this.errors.push({ field: this.prefix + field, message });
+  }
+
+  /**
+   * A validator over a nested object. It shares this one's error list, so
+   * `done()` on the parent still reports everything, with dotted field names.
+   */
+  nested(field) {
+    const raw = this.source[field];
+    const options = { prefix: `${this.prefix}${field}.`, errors: this.errors };
+
+    if (raw === undefined || raw === null) return new Validator({}, options);
+    if (typeof raw !== "object" || Array.isArray(raw)) {
+      this.fail(field, "must be an object");
+      return new Validator({}, options);
+    }
+    return new Validator(raw, options);
   }
 
   /**
@@ -61,6 +78,34 @@ class Validator {
     const value = typeof raw === "string" ? Number(raw) : raw;
     if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
       this.fail(field, "must be an integer");
+      return fallback;
+    }
+    if (min !== undefined && value < min) {
+      this.fail(field, `must be at least ${min}`);
+      return fallback;
+    }
+    if (max !== undefined && value > max) {
+      this.fail(field, `must be at most ${max}`);
+      return fallback;
+    }
+    return value;
+  }
+
+  /**
+   * A finite number, optionally bounded. Used for the sampling controls, which
+   * are fractional.
+   */
+  number(field, { required = false, min, max, fallback = undefined } = {}) {
+    const raw = this.source[field];
+
+    if (raw === undefined || raw === null || raw === "") {
+      if (required) this.fail(field, "is required");
+      return fallback;
+    }
+
+    const value = typeof raw === "string" ? Number(raw) : raw;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      this.fail(field, "must be a number");
       return fallback;
     }
     if (min !== undefined && value < min) {

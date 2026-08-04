@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, WifiOff, AlertTriangle } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, WifiOff, AlertTriangle, SlidersHorizontal } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -13,6 +13,7 @@ export default function Chat({
   onSend,
   onToggleSidebar,
   onDismissError,
+  onOpenSettings,
 }) {
   const [input, setInput] = useState("");
   const [messageType, setMessageType] = useState("text");
@@ -86,6 +87,9 @@ export default function Chat({
         )}
         <h1 className="chat-title">FramerAI</h1>
         <div className="chat-subtitle">Text, code, image, video, and audio</div>
+        <button className="icon-btn chat-settings-btn" onClick={onOpenSettings} title="Generation settings">
+          <SlidersHorizontal size={18} />
+        </button>
       </header>
 
       {/* Global error banner */}
