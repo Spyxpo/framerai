@@ -7,7 +7,7 @@
  * runs end to end without trained weights.
  */
 
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("node:crypto");
 const bridge = require("./pythonBridge");
 
 const GENERATED_URL = "/uploads/generated";
@@ -251,9 +251,9 @@ async function generateImage(prompt, numImages = 1, resolution = 256) {
     try {
       const result = await bridge.request("image", { prompt, resolution });
       return {
-        id: uuidv4(),
+        id: randomUUID(),
         prompt,
-        images: [{ id: uuidv4(), url: `${GENERATED_URL}/${result.file}`, placeholder: false }],
+        images: [{ id: randomUUID(), url: `${GENERATED_URL}/${result.file}`, placeholder: false }],
         metadata: { resolution, model: "framerai-diffusion" },
       };
     } catch (err) {
@@ -261,10 +261,10 @@ async function generateImage(prompt, numImages = 1, resolution = 256) {
     }
   }
   return {
-    id: uuidv4(),
+    id: randomUUID(),
     prompt,
     images: Array.from({ length: numImages }, () => ({
-      id: uuidv4(),
+      id: randomUUID(),
       url: null,
       placeholder: true,
       message: "Train the model to generate actual images",
@@ -278,7 +278,7 @@ async function generateVideo(prompt, numFrames = 16) {
     try {
       const result = await bridge.request("video", { prompt, num_frames: numFrames });
       return {
-        id: uuidv4(),
+        id: randomUUID(),
         prompt,
         video: { url: `${GENERATED_URL}/${result.file}`, frames: numFrames, placeholder: false },
         metadata: { frames: numFrames, model: "framerai-video" },
@@ -288,7 +288,7 @@ async function generateVideo(prompt, numFrames = 16) {
     }
   }
   return {
-    id: uuidv4(),
+    id: randomUUID(),
     prompt,
     video: { url: null, frames: numFrames, placeholder: true, message: "Train the model to generate actual videos" },
     metadata: { frames: numFrames, model: "framerai-video" },
@@ -300,7 +300,7 @@ async function generateAudio(prompt) {
     try {
       const result = await bridge.request("audio", { prompt });
       return {
-        id: uuidv4(),
+        id: randomUUID(),
         prompt,
         audio: { url: `${GENERATED_URL}/${result.file}`, placeholder: false },
         metadata: { model: "framerai-audio" },
@@ -310,7 +310,7 @@ async function generateAudio(prompt) {
     }
   }
   return {
-    id: uuidv4(),
+    id: randomUUID(),
     prompt,
     audio: { url: null, placeholder: true, message: "Train the model to generate actual audio" },
     metadata: { model: "framerai-audio" },
@@ -321,13 +321,13 @@ async function generateCode(prompt, language = "python") {
   if (bridge.available()) {
     try {
       const result = await bridge.request("code", { prompt, language });
-      return { id: uuidv4(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
+      return { id: randomUUID(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
     } catch (err) {
       console.warn(`[model] code fallback: ${err.message}`);
     }
   }
   return {
-    id: uuidv4(),
+    id: randomUUID(),
     prompt,
     code: generateCodeResponse(prompt),
     language,
