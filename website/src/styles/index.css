@@ -11,7 +11,8 @@
 
   --text-primary: #fafafa;
   --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
+  /* Lightened from #71717a, which fell below the 4.5:1 contrast minimum. */
+  --text-muted: #8b8b95;
 
   --border: #27272a;
   --border-light: #333333;
@@ -50,6 +51,60 @@ body {
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================
+   Accessibility
+   ============================================ */
+
+/* One visible focus ring for everything reachable by keyboard. */
+:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Available to screen readers, out of the way visually. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* First tab stop: jump straight to the message input. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -60px;
+  z-index: 100;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  transition: top 0.15s;
+}
+
+.skip-link:focus {
+  top: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ============================================
@@ -158,19 +213,22 @@ body {
   padding: 4px 8px;
 }
 
+.conversation-items {
+  list-style: none;
+}
+
 .conversation-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  padding-right: 8px;
   border-radius: var(--radius-md);
-  cursor: pointer;
   transition: all 0.15s;
   color: var(--text-secondary);
   font-size: 14px;
 }
 
-.conversation-item:hover {
+.conversation-item:hover,
+.conversation-item:focus-within {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
@@ -178,6 +236,22 @@ body {
 .conversation-item.active {
   background: var(--bg-active);
   color: var(--text-primary);
+}
+
+.conversation-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .conversation-title {
@@ -200,7 +274,9 @@ body {
   border-radius: var(--radius-sm);
 }
 
-.conversation-item:hover .delete-btn {
+/* Keep the delete action reachable for keyboard users, not hover only. */
+.conversation-item:hover .delete-btn,
+.conversation-item:focus-within .delete-btn {
   display: flex;
 }
 
