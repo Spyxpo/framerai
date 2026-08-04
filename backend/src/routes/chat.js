@@ -2,9 +2,27 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const { processMessage } = require("../services/model");
+const { ApiError, asyncHandler } = require("../middleware/errors");
+const { validator } = require("../middleware/validate");
 
 // In-memory conversation store
 const conversations = new Map();
+
+const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
+const MAX_MESSAGE_LENGTH = 8000;
+
+function getConversation(id) {
+  const conv = conversations.get(id);
+  if (!conv) throw ApiError.notFound("Conversation not found");
+  return conv;
+}
+
+function conversationId(req) {
+  const v = validator(req.params);
+  const id = v.uuid("id");
+  v.done();
+  return id;
+}
 
 // Create new conversation
 router.post("/conversations", (req, res) => {
@@ -33,40 +51,42 @@ router.get("/conversations", (req, res) => {
 
 // Get conversation
 router.get("/conversations/:id", (req, res) => {
-  const conv = conversations.get(req.params.id);
-  if (!conv) return res.status(404).json({ error: "Conversation not found" });
-  res.json(conv);
+  res.json(getConversation(conversationId(req)));
 });
 
 // Delete conversation
 router.delete("/conversations/:id", (req, res) => {
-  conversations.delete(req.params.id);
+  conversations.delete(conversationId(req));
   res.json({ success: true });
 });
 
 // Send message
-router.post("/conversations/:id/messages", async (req, res) => {
-  const conv = conversations.get(req.params.id);
-  if (!conv) return res.status(404).json({ error: "Conversation not found" });
+router.post(
+  "/conversations/:id/messages",
+  asyncHandler(async (req, res) => {
+    const conv = getConversation(conversationId(req));
 
-  const { content, type = "text", attachments = [] } = req.body;
+    const v = validator(req.body);
+    const content = v.string("content", { required: true, max: MAX_MESSAGE_LENGTH });
+    const type = v.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
+    const attachments = v.array("attachments", { max: 10 });
+    v.done();
 
-  const userMessage = {
-    id: uuidv4(),
-    role: "user",
-    content,
-    type,
-    attachments,
-    timestamp: new Date().toISOString(),
-  };
-  conv.messages.push(userMessage);
+    const userMessage = {
+      id: uuidv4(),
+      role: "user",
+      content,
+      type,
+      attachments,
+      timestamp: new Date().toISOString(),
+    };
+    conv.messages.push(userMessage);
 
-  // Update title from first message
-  if (conv.messages.length === 1) {
-    conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
-  }
+    // Update title from first message
+    if (conv.messages.length === 1) {
+      conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
+    }
 
-  try {
     const response = await processMessage(conv.messages, type);
     const assistantMessage = {
       id: uuidv4(),
@@ -78,9 +98,7 @@ router.post("/conversations/:id/messages", async (req, res) => {
     };
     conv.messages.push(assistantMessage);
     res.json(assistantMessage);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  })
+);
 
 module.exports = router;
