@@ -41,6 +41,7 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - [Inference bridge](#inference-bridge)
 - [build.py usage](#buildpy-usage)
 - [Project structure](#project-structure)
+- [Tests](#tests)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
 - [License](#license)
@@ -322,10 +323,13 @@ framerai/
 │   ├── generate.py             # Inference & generation utilities
 │   └── serve.py                # Inference worker for the backend
 ├── backend/                    # Express API server
-│   └── src/
-│       ├── routes/             # REST API endpoints
-│       ├── services/           # Model bridge & WebSocket
-│       └── index.js            # Server entry point
+│   ├── src/
+│   │   ├── routes/             # REST API endpoints
+│   │   ├── middleware/         # Validation, errors, rate limiting
+│   │   ├── services/           # Model bridge & WebSocket
+│   │   ├── app.js              # App and WebSocket wiring
+│   │   └── index.js            # Server entry point
+│   └── tests/                  # Route and WebSocket tests
 ├── website/                    # React frontend
 │   └── src/
 ├── data/                       # Local training data (yours)
@@ -333,6 +337,18 @@ framerai/
 ├── Dockerfile                  # Model image
 └── docker-compose.yml          # Full stack
 ```
+
+## Tests
+
+The backend has route and WebSocket tests, run by CI on every change:
+
+```bash
+cd backend
+npm test
+```
+
+They use the built-in Node test runner with supertest, and stub the model
+service, so no checkpoint or Python worker is needed.
 
 ## Documentation
 
