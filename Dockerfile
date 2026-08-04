@@ -7,7 +7,7 @@
 # Train on your own data:
 #   docker run --rm -v $(pwd)/data:/app/data -v framerai_checkpoints:/app/checkpoints \
 #     framerai-model --mode all --size small --data-dir data
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
