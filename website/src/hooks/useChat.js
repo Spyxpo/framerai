@@ -66,8 +66,19 @@ export function useChat() {
 
     ws.on("typing", () => setStreaming(true));
 
-    ws.on("error", () => {
+    // Server-side error frame, for example a rate limit rejection. Without
+    // this the placeholder bubble would sit there empty with no explanation.
+    ws.on("error", (data) => {
       setStreaming(false);
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last?.role === "assistant" && !last.content) {
+          last.content = data?.message || "Something went wrong. Please try again.";
+          last.type = "error";
+        }
+        return [...updated];
+      });
     });
 
     return () => ws.disconnect();

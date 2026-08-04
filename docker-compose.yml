@@ -29,6 +29,8 @@ services:
     environment:
       - CORS_ORIGIN=http://localhost:8080
       - MODEL_ENABLED=true
+      # The website's nginx is the only hop in front of the backend.
+      - TRUST_PROXY=1
     volumes:
       - checkpoints:/app/checkpoints
     ports:
