@@ -230,8 +230,35 @@ the model. Every failure returns the same shape:
 
 `error` is a readable message, `code` is stable enough to branch on
 (`VALIDATION_ERROR`, `NOT_FOUND`, `INVALID_JSON`, `PAYLOAD_TOO_LARGE`,
-`UPLOAD_ERROR`, `INTERNAL_ERROR`), and `details` is only present when one or
-more fields failed validation.
+`UPLOAD_ERROR`, `RATE_LIMITED`, `INTERNAL_ERROR`), and `details` is only
+present when one or more fields failed validation.
+
+### Limits
+
+Requests are rate limited per client address and payloads are capped. Every
+limit is configurable in `backend/.env`:
+
+| Setting | Default | Applies to |
+|---------|---------|------------|
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Window both limiters count within |
+| `RATE_LIMIT_MAX` | `300` | All `/api` traffic |
+| `GENERATE_RATE_LIMIT_MAX` | `20` | Generation routes, chat messages, and WebSocket chat frames |
+| `JSON_BODY_LIMIT` | `1mb` | Parsed JSON bodies |
+| `MAX_FILE_SIZE` | `52428800` | A single upload |
+| `MAX_WS_PAYLOAD` | `1048576` | A single WebSocket frame |
+| `TRUST_PROXY` | `false` | Proxy hops in front of the backend |
+
+Set a max to `0` to turn that limiter off. Over the limit, REST returns `429`
+with `Retry-After` and `RateLimit-*` headers, and the WebSocket replies with an
+error frame carrying `code: "RATE_LIMITED"`.
+
+Generation shares one set of buckets across REST and WebSocket, so the limit
+cannot be sidestepped by switching transport.
+
+`TRUST_PROXY` matters when the backend sits behind a reverse proxy: without it
+every request looks like it comes from the proxy and shares a single bucket.
+The bundled compose stack sets `TRUST_PROXY=1`, since the website's nginx is
+the only hop.
 
 ## Inference bridge
 

@@ -4,6 +4,8 @@
 
 const { v4: uuidv4 } = require("uuid");
 const { processMessage } = require("./model");
+const { generationCounter } = require("../middleware/limiters");
+const config = require("../config");
 
 const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
 const MAX_MESSAGE_LENGTH = 8000;
@@ -28,8 +30,15 @@ function parseChatFrame(message) {
 }
 
 function setupWebSocket(wss) {
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
     const clientId = uuidv4();
+    // Rate limit key. There is no Express request here, so read the socket
+    // directly. The forwarded header is only honoured when a proxy is trusted,
+    // otherwise a client could set it and get a fresh bucket per frame.
+    const forwarded = config.trustProxy
+      ? (req?.headers["x-forwarded-for"] || "").split(",")[0].trim()
+      : "";
+    const clientKey = forwarded || req?.socket?.remoteAddress || clientId;
     console.log(`WebSocket client connected: ${clientId}`);
 
     ws.on("message", async (data) => {
@@ -38,6 +47,23 @@ function setupWebSocket(wss) {
 
         if (message.type === "chat") {
           const { content, conversationId, messageType } = parseChatFrame(message);
+
+          // Shares buckets with the REST generation routes, so the limit
+          // cannot be sidestepped by switching transport.
+          if (generationCounter.enabled) {
+            const { allowed, retryAfter } = generationCounter.hit(clientKey);
+            if (!allowed) {
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  conversationId,
+                  code: "RATE_LIMITED",
+                  message: `Too many generation requests. Try again in ${retryAfter}s.`,
+                })
+              );
+              return;
+            }
+          }
 
           // Send acknowledgment
           ws.send(

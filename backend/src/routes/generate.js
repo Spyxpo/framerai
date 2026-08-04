@@ -14,6 +14,7 @@ const {
 } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
+const config = require("../config");
 
 const MAX_PROMPT_LENGTH = 4000;
 const RESOLUTIONS = [64, 128, 256, 512];
@@ -59,12 +60,12 @@ function mimeFilter(prefix) {
 
 const uploadImage = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1 },
   fileFilter: mimeFilter("image/"),
 });
 const uploadAudio = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1 },
   fileFilter: mimeFilter("audio/"),
 });
 

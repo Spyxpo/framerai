@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require("uuid");
 const { processMessage } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
+const { generationLimiter } = require("../middleware/limiters");
 
 // In-memory conversation store
 const conversations = new Map();
@@ -60,9 +61,10 @@ router.delete("/conversations/:id", (req, res) => {
   res.json({ success: true });
 });
 
-// Send message
+// Send message. This runs the model, so it shares the generation rate limit.
 router.post(
   "/conversations/:id/messages",
+  generationLimiter,
   asyncHandler(async (req, res) => {
     const conv = getConversation(conversationId(req));
 
