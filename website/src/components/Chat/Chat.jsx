@@ -1,15 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, AlertTriangle } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, WifiOff, AlertTriangle } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
-
-const MODES = [
-  { id: "text", label: "Text", Icon: MessageIcon },
-  { id: "code", label: "Code", Icon: Code },
-  { id: "image", label: "Image", Icon: Image },
-  { id: "video", label: "Video", Icon: Video },
-  { id: "audio", label: "Audio", Icon: AudioLines },
-];
 
 export default function Chat({
   messages,
@@ -29,9 +21,6 @@ export default function Chat({
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const audioInputRef = useRef(null);
-
-  const isBusy = loading || streaming || loadingMessages;
-  const wasBusy = useRef(isBusy);
 
   const handleAudioUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -54,16 +43,9 @@ export default function Chat({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // The composer is disabled while a response is in flight, which drops focus.
-  // Put it back once the app is idle again so typing can continue uninterrupted.
-  useEffect(() => {
-    if (wasBusy.current && !isBusy) textareaRef.current?.focus();
-    wasBusy.current = isBusy;
-  }, [isBusy]);
-
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!input.trim() || isBusy) return;
+    if (!input.trim() || loading || streaming || loadingMessages) return;
     onSend(input, messageType);
     setInput("");
     setMessageType("text");
@@ -91,32 +73,15 @@ export default function Chat({
     ? () => onSend(lastUserMessage.content, lastUserMessage.type || "text")
     : undefined;
 
-  // Single spoken description of what the app is doing right now.
-  const status = loadingMessages
-    ? "Loading conversation"
-    : transcribing
-      ? "Transcribing audio"
-      : loading || streaming
-        ? "FramerAI is responding"
-        : "";
+  const isBusy = loading || streaming || loadingMessages;
 
   return (
     <main className={`chat-container ${sidebarOpen ? "" : "full-width"}`}>
-      <a className="skip-link" href="#message-input">
-        Skip to message input
-      </a>
-
       {/* Header */}
       <header className="chat-header">
         {!sidebarOpen && (
-          <button
-            className="icon-btn"
-            onClick={onToggleSidebar}
-            aria-label="Open sidebar"
-            aria-expanded={false}
-            aria-controls="sidebar"
-          >
-            <PanelLeft size={20} aria-hidden="true" />
+          <button className="icon-btn" onClick={onToggleSidebar}>
+            <PanelLeft size={20} />
           </button>
         )}
         <h1 className="chat-title">FramerAI</h1>
@@ -126,10 +91,10 @@ export default function Chat({
       {/* Global error banner */}
       {error && (
         <div className="error-banner" role="alert">
-          <AlertTriangle size={15} className="error-banner-icon" aria-hidden="true" />
+          <AlertTriangle size={15} className="error-banner-icon" />
           <span>{error}</span>
           <button className="error-banner-dismiss" onClick={onDismissError} aria-label="Dismiss error">
-            <X size={14} aria-hidden="true" />
+            <X size={14} />
           </button>
         </div>
       )}
@@ -137,28 +102,19 @@ export default function Chat({
       {/* Transcription error banner */}
       {transcribeError && (
         <div className="error-banner" role="alert">
-          <AlertTriangle size={15} className="error-banner-icon" aria-hidden="true" />
+          <AlertTriangle size={15} className="error-banner-icon" />
           <span>{transcribeError}</span>
           <button className="error-banner-dismiss" onClick={() => setTranscribeError(null)} aria-label="Dismiss error">
-            <X size={14} aria-hidden="true" />
+            <X size={14} />
           </button>
         </div>
       )}
 
-      {/* Spoken status for anything that has no visible text of its own */}
-      <p className="sr-only" role="status">{status}</p>
-
       {/* Messages */}
-      <div
-        className="messages-container"
-        role="log"
-        aria-label="Conversation"
-        aria-busy={loadingMessages}
-        tabIndex={0}
-      >
+      <div className="messages-container">
         {/* Loading skeleton — shown while fetching an existing conversation */}
         {loadingMessages ? (
-          <div className="messages-loading">
+          <div className="messages-loading" aria-label="Loading messages">
             <div className="message-skeleton">
               <div className="skeleton-avatar" />
               <div className="skeleton-body">
@@ -186,7 +142,7 @@ export default function Chat({
             {/* Empty / welcome state — only when not loading */}
             {messages.length === 0 && (
               <div className="welcome-screen">
-                <img src="/logo.svg" alt="" className="welcome-logo" />
+                <img src="/logo.svg" alt="FramerAI" className="welcome-logo" />
                 <h2>Welcome to FramerAI</h2>
                 <p>A multimodal AI that can generate text, code, images, video, and audio.</p>
                 <div className="suggestions">
@@ -223,7 +179,7 @@ export default function Chat({
             {(loading || streaming) && messages[messages.length - 1]?.role !== "assistant" && (
               <div className="message assistant">
                 <div className="message-content">
-                  <div className="typing-indicator" aria-hidden="true">
+                  <div className="typing-indicator">
                     <span></span><span></span><span></span>
                   </div>
                 </div>
@@ -238,49 +194,65 @@ export default function Chat({
       {/* Input */}
       <form className="input-container" onSubmit={handleSubmit}>
         <div className={`input-wrapper ${isBusy ? "busy" : ""}`}>
-          <div className="input-modes" role="group" aria-label="Response type">
-            {MODES.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                className={`mode-btn ${messageType === id ? "active" : ""}`}
-                onClick={() => setMessageType(id)}
-                title={label}
-                aria-label={label}
-                aria-pressed={messageType === id}
-              >
-                <Icon size={16} aria-hidden="true" />
-              </button>
-            ))}
+          <div className="input-modes">
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "text" ? "active" : ""}`}
+              onClick={() => setMessageType("text")}
+              title="Text"
+            >
+              <MessageIcon size={16} />
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "code" ? "active" : ""}`}
+              onClick={() => setMessageType("code")}
+              title="Code"
+            >
+              <Code size={16} />
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "image" ? "active" : ""}`}
+              onClick={() => setMessageType("image")}
+              title="Image"
+            >
+              <Image size={16} />
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "video" ? "active" : ""}`}
+              onClick={() => setMessageType("video")}
+              title="Video"
+            >
+              <Video size={16} />
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${messageType === "audio" ? "active" : ""}`}
+              onClick={() => setMessageType("audio")}
+              title="Audio"
+            >
+              <AudioLines size={16} />
+            </button>
             <button
               type="button"
               className="mode-btn"
               onClick={() => audioInputRef.current?.click()}
               title="Upload audio to transcribe"
-              aria-label="Upload audio to transcribe"
               disabled={transcribing}
             >
-              {transcribing ? (
-                <Loader2 size={16} className="spin" aria-hidden="true" />
-              ) : (
-                <Mic size={16} aria-hidden="true" />
-              )}
+              {transcribing ? <Loader2 size={16} className="spin" /> : <Mic size={16} />}
             </button>
             <input
               ref={audioInputRef}
               type="file"
               accept="audio/*"
               onChange={handleAudioUpload}
-              className="sr-only"
-              tabIndex={-1}
-              aria-hidden="true"
+              style={{ display: "none" }}
             />
           </div>
-          <label className="sr-only" htmlFor="message-input">
-            Message FramerAI
-          </label>
           <textarea
-            id="message-input"
             ref={textareaRef}
             className="chat-input"
             value={input}
@@ -289,22 +261,16 @@ export default function Chat({
             placeholder={loadingMessages ? "Loading conversation…" : "Message FramerAI…"}
             rows={1}
             disabled={isBusy}
-            aria-describedby="input-hint"
           />
           <button
             type="submit"
             className="send-btn"
             disabled={!input.trim() || isBusy}
-            aria-label="Send message"
           >
-            {loading || streaming ? (
-              <Loader2 size={20} className="spin" aria-hidden="true" />
-            ) : (
-              <Send size={20} aria-hidden="true" />
-            )}
+            {loading || streaming ? <Loader2 size={20} className="spin" /> : <Send size={20} />}
           </button>
         </div>
-        <p className="input-hint" id="input-hint">
+        <p className="input-hint">
           FramerAI is an open-source multimodal model. Train it with <code>python build.py --mode all</code>
         </p>
       </form>
@@ -312,9 +278,9 @@ export default function Chat({
   );
 }
 
-function MessageIcon({ size, ...props }) {
+function MessageIcon({ size }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   );
