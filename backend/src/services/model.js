@@ -146,14 +146,14 @@ if __name__ == "__main__":
 /**
  * Process a chat message and return a response, using the model when available.
  */
-async function processMessage(messages, requestType = "text") {
+async function processMessage(messages, requestType = "text", settings = {}) {
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content);
+      return await modelChat(intent, content, settings);
     } catch (err) {
       console.warn(`[model] falling back to placeholder: ${err.message}`);
     }
@@ -162,9 +162,9 @@ async function processMessage(messages, requestType = "text") {
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content) {
+async function modelChat(intent, content, settings = {}) {
   if (intent === "image" || intent === "video" || intent === "audio") {
-    const result = await bridge.request(intent, { prompt: content });
+    const result = await bridge.request(intent, { prompt: content, ...settings });
     return {
       type: intent,
       content: `Here is the ${intent} generated for: "${content}"`,
@@ -173,7 +173,7 @@ async function modelChat(intent, content) {
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content });
+  const result = await bridge.request(op, { prompt: content, ...settings });
   return {
     type: intent === "code" ? "code" : "text",
     content: result.content,
@@ -295,10 +295,10 @@ async function generateVideo(prompt, numFrames = 16) {
   };
 }
 
-async function generateAudio(prompt) {
+async function generateAudio(prompt, settings = {}) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("audio", { prompt });
+      const result = await bridge.request("audio", { prompt, ...settings });
       return {
         id: randomUUID(),
         prompt,
@@ -317,10 +317,10 @@ async function generateAudio(prompt) {
   };
 }
 
-async function generateCode(prompt, language = "python") {
+async function generateCode(prompt, language = "python", settings = {}) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("code", { prompt, language });
+      const result = await bridge.request("code", { prompt, language, ...settings });
       return { id: randomUUID(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
     } catch (err) {
       console.warn(`[model] code fallback: ${err.message}`);

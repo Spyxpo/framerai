@@ -15,6 +15,7 @@ const {
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const config = require("../config");
+const { readSettings } = require("../generationSettings");
 
 const MAX_PROMPT_LENGTH = 4000;
 const RESOLUTIONS = [64, 128, 256, 512];
@@ -115,9 +116,10 @@ router.post(
     const v = validator(req.body);
     const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
     const language = v.oneOf("language", LANGUAGES, { fallback: "python" });
+    const settings = readSettings(v);
     v.done();
 
-    res.json(await generateCode(prompt, language));
+    res.json(await generateCode(prompt, language, settings));
   })
 );
 
