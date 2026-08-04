@@ -82,13 +82,44 @@ test("video frames are bounded", async () => {
 test("code generation defaults to python and rejects unknown languages", async () => {
   const ok = await request(app).post("/api/generate/code").send({ prompt: "sort a list" });
   assert.equal(ok.status, 200);
-  assert.deepEqual(lastCall("generateCode").args, ["sort a list", "python"]);
+  assert.deepEqual(lastCall("generateCode").args, ["sort a list", "python", {}]);
 
   const bad = await request(app)
     .post("/api/generate/code")
     .send({ prompt: "sort a list", language: "brainfuck" });
   assert.equal(bad.status, 400);
   assert.equal(bad.body.details[0].field, "language");
+});
+
+test("generation settings are forwarded, and only the ones that were set", async () => {
+  const res = await request(app)
+    .post("/api/generate/code")
+    .send({ prompt: "sort a list", settings: { temperature: 1.25, top_k: 20 } });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(lastCall("generateCode").args[2], { temperature: 1.25, top_k: 20 });
+});
+
+test("out of range settings are reported under their own field names", async () => {
+  const res = await request(app)
+    .post("/api/generate/code")
+    .send({ prompt: "x", settings: { temperature: 9, top_p: 5, top_k: "lots" } });
+
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body.details, [
+    { field: "settings.temperature", message: "must be at most 2" },
+    { field: "settings.top_p", message: "must be at most 1" },
+    { field: "settings.top_k", message: "must be an integer" },
+  ]);
+});
+
+test("settings that are not an object are rejected", async () => {
+  const res = await request(app)
+    .post("/api/generate/code")
+    .send({ prompt: "x", settings: "hot" });
+
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body.details, [{ field: "settings", message: "must be an object" }]);
 });
 
 test("transcribe accepts an audio upload and rejects a missing one", async () => {
