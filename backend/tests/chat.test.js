@@ -44,6 +44,7 @@ test("a message is answered and both turns are stored", async () => {
   const [call] = calls.slice(before);
   assert.equal(call.name, "processMessage");
   assert.equal(call.args[1], "text");
+  assert.deepEqual(call.args[2], {}, "no settings sent means none forwarded");
 
   const conv = await request(app).get(`/api/chat/conversations/${id}`);
   assert.equal(conv.body.messages.length, 2);
@@ -60,6 +61,19 @@ test("the conversation title comes from the first message", async () => {
   const list = await request(app).get("/api/chat/conversations");
   const conv = list.body.find((c) => c.id === id);
   assert.equal(conv.title, `${"x".repeat(50)}...`);
+});
+
+test("generation settings sent with a message reach the model", async () => {
+  const id = await newConversation(app);
+  const before = calls.length;
+
+  const res = await request(app)
+    .post(`/api/chat/conversations/${id}/messages`)
+    .send({ content: "hi", settings: { temperature: 1.4, max_new_tokens: 128 } });
+
+  assert.equal(res.status, 200);
+  const [call] = calls.slice(before);
+  assert.deepEqual(call.args[2], { temperature: 1.4, max_new_tokens: 128 });
 });
 
 test("a message with no content is rejected, not treated as a server error", async () => {

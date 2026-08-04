@@ -1,5 +1,5 @@
 import React from "react";
-import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings } from "lucide-react";
 
 export default function Sidebar({
   open,
@@ -10,6 +10,7 @@ export default function Sidebar({
   onNew,
   onSelect,
   onDelete,
+  onOpenSettings,
 }) {
   if (!open) {
     return (
@@ -95,6 +96,9 @@ export default function Sidebar({
         <div className="model-info">
           <div className="model-badge">FramerAI v1.0</div>
         </div>
+        <button className="icon-btn" onClick={onOpenSettings} title="Generation settings">
+          <Settings size={18} />
+        </button>
       </div>
     </aside>
   );

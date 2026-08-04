@@ -7,6 +7,9 @@ const { processMessage } = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
 
+const { validator } = require("../middleware/validate");
+const { readSettings } = require("../generationSettings");
+
 const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
 const MAX_MESSAGE_LENGTH = 8000;
 
@@ -26,7 +29,16 @@ function parseChatFrame(message) {
     throw new Error(`messageType must be one of: ${MESSAGE_TYPES.join(", ")}`);
   }
 
-  return { content, messageType, conversationId: message.conversationId };
+  // Same bounds as the REST routes. Out-of-range values are reported rather
+  // than quietly clamped, so a client cannot think a setting took effect.
+  const v = validator(message);
+  const settings = readSettings(v);
+  if (v.errors.length) {
+    const [first] = v.errors;
+    throw new Error(`${first.field} ${first.message}`);
+  }
+
+  return { content, messageType, settings, conversationId: message.conversationId };
 }
 
 function setupWebSocket(wss) {
@@ -46,7 +58,7 @@ function setupWebSocket(wss) {
         const message = JSON.parse(data);
 
         if (message.type === "chat") {
-          const { content, conversationId, messageType } = parseChatFrame(message);
+          const { content, conversationId, messageType, settings } = parseChatFrame(message);
 
           // Shares buckets with the REST generation routes, so the limit
           // cannot be sidestepped by switching transport.
@@ -79,7 +91,7 @@ function setupWebSocket(wss) {
 
           // Process and stream response
           const messages = [{ role: "user", content }];
-          const response = await processMessage(messages, messageType);
+          const response = await processMessage(messages, messageType, settings);
 
           // Simulate streaming by sending chunks
           const words = response.content.split(" ");
