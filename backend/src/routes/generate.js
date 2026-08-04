@@ -12,6 +12,28 @@ const {
   transcribeAudio,
   understandImage,
 } = require("../services/model");
+const { ApiError, asyncHandler } = require("../middleware/errors");
+const { validator } = require("../middleware/validate");
+
+const MAX_PROMPT_LENGTH = 4000;
+const RESOLUTIONS = [64, 128, 256, 512];
+const LANGUAGES = [
+  "python",
+  "javascript",
+  "typescript",
+  "java",
+  "go",
+  "rust",
+  "c",
+  "cpp",
+  "csharp",
+  "ruby",
+  "php",
+  "shell",
+  "sql",
+  "html",
+  "css",
+];
 
 // Route uploads to a subfolder chosen by the form field name (image / audio).
 const storage = multer.diskStorage({
@@ -25,88 +47,113 @@ const storage = multer.diskStorage({
     cb(null, `${uuidv4()}${path.extname(file.originalname)}`);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Only accept the media type the route actually understands, so a mislabelled
+// upload fails before it is written to disk.
+function mimeFilter(prefix) {
+  return (req, file, cb) => {
+    if (file.mimetype.startsWith(prefix)) return cb(null, true);
+    cb(ApiError.badRequest(`Expected ${prefix.replace("/", "")} upload, got ${file.mimetype}`));
+  };
+}
+
+const uploadImage = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  fileFilter: mimeFilter("image/"),
+});
+const uploadAudio = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  fileFilter: mimeFilter("audio/"),
+});
 
 // Generate image from text
-router.post("/image", async (req, res) => {
-  try {
-    const { prompt, num_images = 1, resolution = 256 } = req.body;
-    if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+router.post(
+  "/image",
+  asyncHandler(async (req, res) => {
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const numImages = v.integer("num_images", { min: 1, max: 4, fallback: 1 });
+    const resolution = v.oneOf("resolution", RESOLUTIONS, { fallback: 256 });
+    v.done();
 
-    const result = await generateImage(prompt, num_images, resolution);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    res.json(await generateImage(prompt, numImages, resolution));
+  })
+);
 
 // Generate video from text
-router.post("/video", async (req, res) => {
-  try {
-    const { prompt, num_frames = 16 } = req.body;
-    if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+router.post(
+  "/video",
+  asyncHandler(async (req, res) => {
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const numFrames = v.integer("num_frames", { min: 1, max: 64, fallback: 16 });
+    v.done();
 
-    const result = await generateVideo(prompt, num_frames);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    res.json(await generateVideo(prompt, numFrames));
+  })
+);
 
 // Generate audio / speech from text
-router.post("/audio", async (req, res) => {
-  try {
-    const { prompt } = req.body;
-    if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+router.post(
+  "/audio",
+  asyncHandler(async (req, res) => {
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    v.done();
 
-    const result = await generateAudio(prompt);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    res.json(await generateAudio(prompt));
+  })
+);
 
 // Generate code
-router.post("/code", async (req, res) => {
-  try {
-    const { prompt, language = "python" } = req.body;
-    if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+router.post(
+  "/code",
+  asyncHandler(async (req, res) => {
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const language = v.oneOf("language", LANGUAGES, { fallback: "python" });
+    v.done();
 
-    const result = await generateCode(prompt, language);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    res.json(await generateCode(prompt, language));
+  })
+);
 
 // Upload an image for vision understanding
-router.post("/understand", upload.single("image"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "Image file is required" });
+router.post(
+  "/understand",
+  uploadImage.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "image", message: "is required" }]);
 
-    const { prompt = "Describe this image" } = req.body;
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "Describe this image" });
+    v.done();
+
     const imagePath = `/uploads/images/${req.file.filename}`;
     const result = await understandImage(req.file.path, prompt);
 
     res.json({ description: result.description, imagePath });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  })
+);
 
 // Upload audio for transcription / understanding
-router.post("/transcribe", upload.single("audio"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "Audio file is required" });
+router.post(
+  "/transcribe",
+  uploadAudio.single("audio"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "audio", message: "is required" }]);
 
-    const { prompt = "Transcribe the audio:" } = req.body;
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "Transcribe the audio:" });
+    v.done();
+
     const audioPath = `/uploads/audio/${req.file.filename}`;
     const result = await transcribeAudio(req.file.path, prompt);
 
     res.json({ text: result.text, audioPath, metadata: result.metadata });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  })
+);
 
 module.exports = router;

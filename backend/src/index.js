@@ -10,6 +10,7 @@ const chatRoutes = require("./routes/chat");
 const generateRoutes = require("./routes/generate");
 const healthRoutes = require("./routes/health");
 const { setupWebSocket } = require("./services/websocket");
+const { notFoundHandler, errorHandler } = require("./middleware/errors");
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +26,10 @@ app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 app.use("/api/health", healthRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/generate", generateRoutes);
+
+// Unmatched routes and every thrown error share one response shape
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 // WebSocket for streaming
 const wss = new WebSocketServer({ server, path: "/ws" });

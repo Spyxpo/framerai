@@ -215,6 +215,24 @@ Legacy `--size tiny|small|medium|large` still works as an alias for the `framer-
 | POST | `/api/generate/transcribe` | Transcribe an uploaded audio file |
 | WS | `/ws` | Real-time streaming |
 
+### Errors
+
+Request bodies, path parameters, and uploads are validated before they reach
+the model. Every failure returns the same shape:
+
+```json
+{
+  "error": "Request validation failed",
+  "code": "VALIDATION_ERROR",
+  "details": [{ "field": "prompt", "message": "is required" }]
+}
+```
+
+`error` is a readable message, `code` is stable enough to branch on
+(`VALIDATION_ERROR`, `NOT_FOUND`, `INVALID_JSON`, `PAYLOAD_TOO_LARGE`,
+`UPLOAD_ERROR`, `INTERNAL_ERROR`), and `details` is only present when one or
+more fields failed validation.
+
 ## Inference bridge
 
 The backend talks to the Python model through a lightweight worker
