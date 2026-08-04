@@ -99,3 +99,51 @@ jobs:
       - name: Build
         working-directory: website
         run: npm run build
+
+  docker:
+    name: Docker (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: model
+            dockerfile: Dockerfile
+          - image: backend
+            dockerfile: backend/Dockerfile
+          - image: website
+            dockerfile: website/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The model and backend images install torch, which does not fit
+      # alongside the preinstalled toolchains on a default runner.
+      - name: Free disk space
+        if: matrix.image != 'website'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: framerai-${{ matrix.image }}:ci
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  compose:
+    name: Compose file
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
