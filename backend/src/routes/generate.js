@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("node:crypto");
 const {
   generateImage,
   generateVideo,
@@ -45,7 +45,7 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    cb(null, `${uuidv4()}${path.extname(file.originalname)}`);
+    cb(null, `${randomUUID()}${path.extname(file.originalname)}`);
   },
 });
 

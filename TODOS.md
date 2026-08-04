@@ -9,7 +9,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 ## Testing and quality
 
 - [ ] Add a `pytest` suite covering the tokenizer, transformer forward pass, and generation utilities.
-- [ ] Add unit tests for the backend routes and WebSocket service (Jest or Vitest with supertest).
+- [x] Add unit tests for the backend routes and WebSocket service (node:test with supertest).
 - [ ] Add component tests for the website chat flow (Vitest and Testing Library).
 - [ ] Add end-to-end smoke tests that boot the backend and exercise the core endpoints.
 - [ ] Add code coverage reporting to CI and publish a coverage badge.

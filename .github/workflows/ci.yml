@@ -74,6 +74,10 @@ jobs:
           done < <(find src -name '*.js')
           exit $status
 
+      - name: Test
+        working-directory: backend
+        run: npm test
+
   website:
     name: Website (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
