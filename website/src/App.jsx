@@ -58,7 +58,8 @@ export default function App() {
   // Dismiss error and return focus to textarea (improvement a)
   const handleDismissError = useCallback(() => {
     dismissError();
-    textareaFocusRef.current?.();
+    // setTimeout lets React re-render (remove the banner) before shifting focus
+    setTimeout(() => textareaFocusRef.current?.(), 0);
   }, [dismissError]);
 
   return (
