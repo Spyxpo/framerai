@@ -49,7 +49,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## Backend
 
-- [ ] Add request validation and consistent error responses across all routes.
+- [x] Add request validation and consistent error responses across all routes.
 - [ ] Add rate limiting and payload size limits to generation endpoints.
 - [ ] Add structured logging and a request id for traceability.
 - [ ] Add OpenAPI or a documented schema for the REST API.
