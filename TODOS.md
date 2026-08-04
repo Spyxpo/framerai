@@ -72,6 +72,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## DevOps and CI/CD
 
+- [x] Build the model, backend, and website images in CI on every change.
 - [ ] Add a release workflow that tags versions and drafts release notes.
 - [ ] Add container image publishing to a registry on release.
 - [ ] Add caching for Python dependencies to speed up CI.
