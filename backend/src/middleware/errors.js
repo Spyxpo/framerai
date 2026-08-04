@@ -56,7 +56,9 @@ function errorHandler(err, req, res, next) {
   const normalized = normalize(err);
 
   if (normalized.status >= 500) {
-    console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
+    // Keep the format string constant; the request values are arguments, not
+    // part of the format itself.
+    console.error("[error] %s %s:", req.method, req.originalUrl, err);
   }
 
   const body = { error: normalized.message, code: normalized.code };
