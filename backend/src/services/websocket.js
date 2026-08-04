@@ -2,7 +2,7 @@
  * WebSocket service for real-time streaming responses.
  */
 
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("node:crypto");
 const { processMessage } = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
@@ -31,7 +31,7 @@ function parseChatFrame(message) {
 
 function setupWebSocket(wss) {
   wss.on("connection", (ws, req) => {
-    const clientId = uuidv4();
+    const clientId = randomUUID();
     // Rate limit key. There is no Express request here, so read the socket
     // directly. The forwarded header is only honoured when a proxy is trusted,
     // otherwise a client could set it and get a fresh bucket per frame.
@@ -69,7 +69,7 @@ function setupWebSocket(wss) {
           ws.send(
             JSON.stringify({
               type: "ack",
-              messageId: uuidv4(),
+              messageId: randomUUID(),
               conversationId,
             })
           );

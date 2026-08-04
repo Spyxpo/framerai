@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("node:crypto");
 const { processMessage } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
@@ -27,7 +27,7 @@ function conversationId(req) {
 
 // Create new conversation
 router.post("/conversations", (req, res) => {
-  const id = uuidv4();
+  const id = randomUUID();
   conversations.set(id, {
     id,
     title: "New Chat",
@@ -75,7 +75,7 @@ router.post(
     v.done();
 
     const userMessage = {
-      id: uuidv4(),
+      id: randomUUID(),
       role: "user",
       content,
       type,
@@ -91,7 +91,7 @@ router.post(
 
     const response = await processMessage(conv.messages, type);
     const assistantMessage = {
-      id: uuidv4(),
+      id: randomUUID(),
       role: "assistant",
       content: response.content,
       type: response.type,
