@@ -64,6 +64,12 @@ def _save_audio(waveform, sample_rate, out_dir):
     return name
 
 
+def _sampling(params):
+    """Sampling controls the caller set, leaving the rest to the generator."""
+    keys = ("temperature", "top_k", "top_p")
+    return {k: params[k] for k in keys if params.get(k) is not None}
+
+
 def handle(gen, op, params):
     import torch
 
@@ -72,10 +78,22 @@ def handle(gen, op, params):
     prompt = params.get("prompt", "")
 
     if op in ("chat", "text"):
-        return {"content": gen.generate_text(prompt, max_new_tokens=params.get("max_new_tokens", 256))}
+        return {
+            "content": gen.generate_text(
+                prompt,
+                max_new_tokens=params.get("max_new_tokens", 256),
+                **_sampling(params),
+            )
+        }
 
     if op == "code":
-        return {"content": gen.generate_code(prompt, language=params.get("language", "python"))}
+        # generate_code fixes top_k / top_p itself; only temperature is exposed.
+        code_kwargs = {"language": params.get("language", "python")}
+        if params.get("max_new_tokens") is not None:
+            code_kwargs["max_new_tokens"] = params["max_new_tokens"]
+        if params.get("temperature") is not None:
+            code_kwargs["temperature"] = params["temperature"]
+        return {"content": gen.generate_code(prompt, **code_kwargs)}
 
     if op == "image":
         images = gen.generate_image(prompt, num_images=1, resolution=params.get("resolution", 256))

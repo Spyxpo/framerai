@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "../services/api";
 import { WebSocketClient } from "../services/websocket";
 
-export function useChat() {
+export function useChat(settings) {
   const [conversations, setConversations] = useState([]);
   const [activeConversation, setActiveConversation] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -12,6 +12,11 @@ export function useChat() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
   const wsRef = useRef(null);
+
+  // Read through a ref so sendMessage always sees the current settings without
+  // being rebuilt every time a slider moves.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   // Initialize WebSocket
   useEffect(() => {
@@ -192,6 +197,7 @@ export function useChat() {
           content,
           conversationId: convId,
           messageType: type,
+          settings: settingsRef.current,
         });
         return;
       }
@@ -199,7 +205,7 @@ export function useChat() {
       // Fallback to REST API
       setLoading(true);
       try {
-        const response = await api.sendMessage(convId, content, type);
+        const response = await api.sendMessage(convId, content, type, [], settingsRef.current);
         setMessages((prev) => {
           const updated = [...prev];
           updated[updated.length - 1] = {

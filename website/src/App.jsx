@@ -1,10 +1,16 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Sidebar from "./components/Sidebar/Sidebar";
 import Chat from "./components/Chat/Chat";
+import SettingsPanel from "./components/Settings/SettingsPanel";
 import { useChat } from "./hooks/useChat";
+import { useSettings } from "./hooks/useSettings";
+import { api } from "./services/api";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [model, setModel] = useState(null);
+  const { settings, updateSetting, resetSettings } = useSettings();
   const {
     conversations,
     activeConversation,
@@ -19,7 +25,15 @@ export default function App() {
     deleteConversation,
     sendMessage,
     dismissError,
-  } = useChat();
+  } = useChat(settings);
+
+  // The settings panel shows which checkpoint the backend is serving.
+  useEffect(() => {
+    api
+      .health()
+      .then((info) => setModel(info.model))
+      .catch(() => setModel(null));
+  }, []);
 
   return (
     <div className="app">
@@ -32,6 +46,7 @@ export default function App() {
         onNew={createConversation}
         onSelect={selectConversation}
         onDelete={deleteConversation}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <Chat
         messages={messages}
@@ -43,6 +58,15 @@ export default function App() {
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onDismissError={dismissError}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <SettingsPanel
+        open={settingsOpen}
+        settings={settings}
+        model={model}
+        onChange={updateSetting}
+        onReset={resetSettings}
+        onClose={() => setSettingsOpen(false)}
       />
     </div>
   );

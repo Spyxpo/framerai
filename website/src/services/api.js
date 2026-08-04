@@ -33,10 +33,10 @@ export const api = {
     request(`/chat/conversations/${id}`, { method: "DELETE" }),
 
   // Messages
-  sendMessage: (conversationId, content, type = "text", attachments = []) =>
+  sendMessage: (conversationId, content, type = "text", attachments = [], settings) =>
     request(`/chat/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, type, attachments }),
+      body: JSON.stringify({ content, type, attachments, settings }),
     }),
 
   // Generation

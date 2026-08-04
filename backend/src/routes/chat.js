@@ -5,6 +5,7 @@ const { processMessage } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const { generationLimiter } = require("../middleware/limiters");
+const { readSettings } = require("../generationSettings");
 
 // In-memory conversation store
 const conversations = new Map();
@@ -72,6 +73,7 @@ router.post(
     const content = v.string("content", { required: true, max: MAX_MESSAGE_LENGTH });
     const type = v.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
     const attachments = v.array("attachments", { max: 10 });
+    const settings = readSettings(v);
     v.done();
 
     const userMessage = {
@@ -89,7 +91,7 @@ router.post(
       conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
     }
 
-    const response = await processMessage(conv.messages, type);
+    const response = await processMessage(conv.messages, type, settings);
     const assistantMessage = {
       id: randomUUID(),
       role: "assistant",
