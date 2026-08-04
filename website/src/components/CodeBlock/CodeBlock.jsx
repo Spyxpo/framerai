@@ -14,24 +14,19 @@ export default function CodeBlock({ language, code }) {
     <div className="code-block">
       <div className="code-header">
         <span className="code-language">{language}</span>
-        <button
-          type="button"
-          className="copy-btn"
-          onClick={handleCopy}
-          aria-label={copied ? `${language} code copied` : `Copy ${language} code`}
-        >
+        <button className="copy-btn" onClick={handleCopy}>
           {copied ? (
             <>
-              <Check size={14} aria-hidden="true" /> Copied
+              <Check size={14} /> Copied
             </>
           ) : (
             <>
-              <Copy size={14} aria-hidden="true" /> Copy
+              <Copy size={14} /> Copy
             </>
           )}
         </button>
       </div>
-      <pre className="code-content" tabIndex={0}>
+      <pre className="code-content">
         <code>{code}</code>
       </pre>
     </div>
