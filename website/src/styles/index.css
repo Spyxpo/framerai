@@ -1094,3 +1094,30 @@ body {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* ============================================
+   prefers-reduced-motion — disable shimmer
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line,
+  .skeleton-avatar,
+  .skeleton-icon,
+  .conversation-skeleton .skeleton-line {
+    animation: none;
+    opacity: 0.5;
+  }
+
+  .typing-indicator span {
+    animation: none;
+    opacity: 0.5;
+  }
+
+  .message {
+    animation: none;
+  }
+
+  .spin {
+    animation: none;
+  }
+}
