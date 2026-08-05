@@ -200,11 +200,13 @@ body {
   border-radius: var(--radius-sm);
 }
 
-.conversation-item:hover .delete-btn {
+.conversation-item:hover .delete-btn,
+.conversation-item:focus-within .delete-btn {
   display: flex;
 }
 
-.delete-btn:hover {
+.delete-btn:hover,
+.delete-btn:focus-visible {
   color: var(--error);
 }
 

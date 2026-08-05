@@ -57,8 +57,8 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## Frontend
 
-- [ ] Add loading, empty, and error states to the chat and generation views.
-- [ ] Add accessibility passes for keyboard navigation and screen readers.
+- [x] Add loading, empty, and error states to the chat and generation views.
+- [x] Add accessibility passes for keyboard navigation and screen readers.
 - [x] Add a settings panel for model size, temperature, and sampling controls.
 - [ ] Add persistence of conversations to local storage.
 - [ ] Add a production build and static hosting guide.

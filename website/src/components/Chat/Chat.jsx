@@ -17,6 +17,8 @@ export default function Chat({
   focusRef,
   textareaFocusRef,
   onFocusSidebar,
+  onFocusSidebarSettings,
+  chatSettingsFocusRef,
 }) {
   const [input, setInput] = useState("");
   const [messageType, setMessageType] = useState("text");
@@ -28,6 +30,7 @@ export default function Chat({
   const suggestionsRef = useRef(null);
   const inputModesRef = useRef(null);
   const sendBtnRef = useRef(null);
+  const chatSettingsBtnRef = useRef(null);
 
   // Expose focus fns to App
   useEffect(() => {
@@ -41,7 +44,10 @@ export default function Chat({
     if (textareaFocusRef) {
       textareaFocusRef.current = () => textareaRef.current?.focus();
     }
-  }, [focusRef, textareaFocusRef]);
+    if (chatSettingsFocusRef) {
+      chatSettingsFocusRef.current = () => chatSettingsBtnRef.current?.focus();
+    }
+  }, [focusRef, textareaFocusRef, chatSettingsFocusRef]);
 
   // Auto-focus textarea when AI response finishes
   const prevStreaming = useRef(false);
@@ -56,7 +62,7 @@ export default function Chat({
     prevLoading.current = loading;
   }, [streaming, loading]);
 
-  // Suggestion buttons: ←→ between them, ↑↓ to input modes, ← at first → sidebar
+  // Suggestion buttons: ←→ between them, ↑↓ to input modes, ← at first → sidebar, ↑ → chat settings
   const handleSuggestionKeyDown = (e) => {
     if (!suggestionsRef.current) return;
     const btns = Array.from(suggestionsRef.current.querySelectorAll(".suggestion"));
@@ -71,13 +77,16 @@ export default function Chat({
       } else {
         btns[currentIndex - 1].focus();
       }
-    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      chatSettingsBtnRef.current?.focus();
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       inputModesRef.current?.querySelector(".mode-btn")?.focus();
     }
   };
 
-  // Mode buttons: ←→ between them, first ← → sidebar, last → → textarea, ↑↓ → suggestions/textarea
+  // Mode buttons: ←→ between them, first ← → sidebar, last → → textarea, ↑ → suggestions/chat settings, ↓ → textarea
   const handleInputModesKeyDown = (e) => {
     if (!inputModesRef.current) return;
     const btns = Array.from(inputModesRef.current.querySelectorAll(".mode-btn"));
@@ -100,6 +109,7 @@ export default function Chat({
       e.preventDefault();
       const lastSuggestion = suggestionsRef.current?.querySelector(".suggestion:last-child");
       if (lastSuggestion) lastSuggestion.focus();
+      else chatSettingsBtnRef.current?.focus();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       textareaRef.current?.focus();
@@ -184,7 +194,27 @@ export default function Chat({
         )}
         <h1 className="chat-title">FramerAI</h1>
         <div className="chat-subtitle" aria-hidden="true">Text, code, image, video, and audio</div>
-        <button className="icon-btn chat-settings-btn" onClick={onOpenSettings} title="Generation settings" aria-label="Generation settings">
+        <button
+          className="icon-btn chat-settings-btn"
+          ref={chatSettingsBtnRef}
+          onClick={onOpenSettings}
+          title="Generation settings"
+          aria-label="Generation settings"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              onFocusSidebarSettings?.();
+            } else if (e.key === "ArrowDown") {
+              e.preventDefault();
+              const firstSuggestion = suggestionsRef.current?.querySelector(".suggestion");
+              if (firstSuggestion) firstSuggestion.focus();
+              else inputModesRef.current?.querySelector(".mode-btn")?.focus();
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              sendBtnRef.current?.focus();
+            }
+          }}
+        >
           <SlidersHorizontal size={18} aria-hidden="true" />
         </button>
       </header>
@@ -368,9 +398,9 @@ export default function Chat({
               if (e.key === "ArrowLeft") {
                 e.preventDefault();
                 textareaRef.current?.focus();
-              } else if (e.key === "ArrowRight") {
+              } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
                 e.preventDefault();
-                inputModesRef.current?.querySelector(".mode-btn")?.focus();
+                chatSettingsBtnRef.current?.focus();
               }
             }}
           >
@@ -380,7 +410,7 @@ export default function Chat({
             }
           </button>
         </div>
-        <p className="input-hint" aria-hidden="true">
+        <p className="input-hint">
           FramerAI is an open-source multimodal model. Train it with <code>python build.py --mode all</code>
         </p>
       </form>
