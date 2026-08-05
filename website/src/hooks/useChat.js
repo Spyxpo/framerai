@@ -179,7 +179,6 @@ export function useChat(settings) {
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      // Add placeholder for assistant response
       const assistantMsg = {
         id: crypto.randomUUID(),
         role: "assistant",
