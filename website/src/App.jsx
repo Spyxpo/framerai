@@ -10,9 +10,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [model, setModel] = useState(null);
-  const chatFocusRef = useRef(null);     // Chat: focus first suggestion or textarea
-  const textareaFocusRef = useRef(null); // Chat: focus textarea directly
-  const sidebarFocusRef = useRef(null);  // Sidebar: focus New Chat button
+  const chatFocusRef = useRef(null);          // Chat: focus first suggestion or textarea
+  const textareaFocusRef = useRef(null);      // Chat: focus textarea directly
+  const chatSettingsFocusRef = useRef(null);  // Chat: focus header settings button
+  const sidebarFocusRef = useRef(null);       // Sidebar: focus New Chat button
+  const sidebarSettingsFocusRef = useRef(null); // Sidebar: focus footer settings button
 
   const { settings, updateSetting, resetSettings } = useSettings();
   const {
@@ -50,10 +52,27 @@ export default function App() {
     chatFocusRef.current?.();
   }, []);
 
+  // Sidebar → → Chat header settings button
+  const focusChatSettings = useCallback(() => {
+    chatSettingsFocusRef.current?.();
+  }, []);
+
   // Chat ← → Sidebar New Chat button
   const focusSidebar = useCallback(() => {
     sidebarFocusRef.current?.();
   }, []);
+
+  // Chat settings ← → Sidebar footer settings button
+  const focusSidebarSettings = useCallback(() => {
+    sidebarSettingsFocusRef.current?.();
+  }, []);
+
+  // Delete conversation → focus New Chat button after React re-renders
+  const handleDeleteConversation = useCallback(async (id) => {
+    await deleteConversation(id);
+    // Two frames: first lets React flush state, second lets DOM settle
+    setTimeout(() => requestAnimationFrame(() => sidebarFocusRef.current?.()), 0);
+  }, [deleteConversation]);
 
   // Dismiss error and return focus to textarea (improvement a)
   const handleDismissError = useCallback(() => {
@@ -73,10 +92,12 @@ export default function App() {
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onNew={createConversation}
         onSelect={handleSelectConversation}
-        onDelete={deleteConversation}
+        onDelete={handleDeleteConversation}
         onOpenSettings={() => setSettingsOpen(true)}
         onFocusChat={focusChatArea}
+        onFocusChatSettings={focusChatSettings}
         focusRef={sidebarFocusRef}
+        footerSettingsFocusRef={sidebarSettingsFocusRef}
       />
       <Chat
         messages={messages}
@@ -91,7 +112,9 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         focusRef={chatFocusRef}
         textareaFocusRef={textareaFocusRef}
+        chatSettingsFocusRef={chatSettingsFocusRef}
         onFocusSidebar={focusSidebar}
+        onFocusSidebarSettings={focusSidebarSettings}
       />
       <SettingsPanel
         open={settingsOpen}

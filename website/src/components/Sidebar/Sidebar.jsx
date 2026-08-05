@@ -12,17 +12,24 @@ export default function Sidebar({
   onDelete,
   onOpenSettings,
   onFocusChat,
+  onFocusChatSettings,
   focusRef,
+  footerSettingsFocusRef,
 }) {
   const listRef = useRef(null);
   const newChatBtnRef = useRef(null);
+  const toggleBtnRef = useRef(null);
+  const footerSettingsBtnRef = useRef(null);
 
-  // Expose focus fn to App — focuses New Chat button
+  // Expose focus fns to App
   useEffect(() => {
     if (focusRef) {
       focusRef.current = () => newChatBtnRef.current?.focus();
     }
-  }, [focusRef]);
+    if (footerSettingsFocusRef) {
+      footerSettingsFocusRef.current = () => footerSettingsBtnRef.current?.focus();
+    }
+  }, [focusRef, footerSettingsFocusRef]);
 
   if (!open) {
     return (
@@ -33,7 +40,6 @@ export default function Sidebar({
       </div>
     );
   }
-
   const getItems = () =>
     listRef.current
       ? Array.from(listRef.current.querySelectorAll(".conversation-item"))
@@ -50,13 +56,23 @@ export default function Sidebar({
         e.stopPropagation();
         onSelect(convId);
         break;
+      case "Delete":
+      case "Backspace":
+        e.preventDefault();
+        onDelete(convId);
+        break;
       case "ArrowRight":
         e.preventDefault();
-        onFocusChat?.();
+        // Focus the delete button inside this row
+        e.currentTarget.querySelector(".delete-btn")?.focus();
         break;
       case "ArrowDown":
         e.preventDefault();
-        (items[currentIndex + 1] || items[0]).focus();
+        if (currentIndex === items.length - 1) {
+          footerSettingsBtnRef.current?.focus();
+        } else {
+          (items[currentIndex + 1] || items[0]).focus();
+        }
         break;
       case "ArrowUp":
         e.preventDefault();
@@ -76,6 +92,18 @@ export default function Sidebar({
         break;
       default:
         break;
+    }
+  };
+
+  const handleDeleteKeyDown = (e, convId, itemEl) => {
+    // Stop bubbling so the parent div's onKeyDown doesn't also fire
+    e.stopPropagation();
+    if (e.key === "ArrowLeft" || e.key === "Escape") {
+      e.preventDefault();
+      itemEl?.focus();
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      onFocusChat?.();
     }
   };
 
@@ -123,11 +151,11 @@ export default function Sidebar({
         <span className="conversation-title">{conv.title || "New Chat"}</span>
         <button
           className="delete-btn"
-          tabIndex={-1}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(conv.id);
           }}
+          onKeyDown={(e) => handleDeleteKeyDown(e, conv.id, e.currentTarget.closest(".conversation-item"))}
           aria-label={`Delete conversation: ${conv.title || "New Chat"}`}
         >
           <Trash2 size={14} aria-hidden="true" />
@@ -143,7 +171,21 @@ export default function Sidebar({
           <img src="/logo.svg" alt="FramerAI logo" className="sidebar-logo" />
           <span className="sidebar-title" aria-hidden="true">FramerAI</span>
         </div>
-        <button className="icon-btn" onClick={onToggle} aria-label="Close sidebar">
+        <button
+          className="icon-btn"
+          ref={toggleBtnRef}
+          onClick={onToggle}
+          aria-label="Close sidebar"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              newChatBtnRef.current?.focus();
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              onFocusChatSettings?.();
+            }
+          }}
+        >
           <PanelLeftClose size={20} aria-hidden="true" />
         </button>
       </div>
@@ -157,7 +199,11 @@ export default function Sidebar({
           if (e.key === "ArrowDown") {
             e.preventDefault();
             const first = listRef.current?.querySelector(".conversation-item");
-            first?.focus();
+            if (first) first.focus();
+            else footerSettingsBtnRef.current?.focus();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            toggleBtnRef.current?.focus();
           } else if (e.key === "ArrowRight") {
             e.preventDefault();
             onFocusChat?.();
@@ -176,7 +222,27 @@ export default function Sidebar({
         <div className="model-info">
           <div className="model-badge">FramerAI v1.0</div>
         </div>
-        <button className="icon-btn" onClick={onOpenSettings} aria-label="Generation settings" title="Generation settings">
+        <button
+          className="icon-btn"
+          ref={footerSettingsBtnRef}
+          onClick={onOpenSettings}
+          aria-label="Generation settings"
+          title="Generation settings"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowUp") {
+              e.preventDefault();
+              const items = getItems();
+              if (items.length > 0) {
+                items[items.length - 1].focus();
+              } else {
+                newChatBtnRef.current?.focus();
+              }
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              onFocusChatSettings?.();
+            }
+          }}
+        >
           <Settings size={18} aria-hidden="true" />
         </button>
       </div>
