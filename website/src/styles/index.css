@@ -200,11 +200,13 @@ body {
   border-radius: var(--radius-sm);
 }
 
-.conversation-item:hover .delete-btn {
+.conversation-item:hover .delete-btn,
+.conversation-item:focus-within .delete-btn {
   display: flex;
 }
 
-.delete-btn:hover {
+.delete-btn:hover,
+.delete-btn:focus-visible {
   color: var(--error);
 }
 
@@ -216,6 +218,10 @@ body {
 }
 
 .sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
@@ -265,6 +271,10 @@ body {
 .chat-subtitle {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.chat-settings-btn {
+  margin-left: auto;
 }
 
 /* Messages */
@@ -862,7 +872,7 @@ body {
   animation: shimmer 1.6s infinite;
 }
 
-.skeleton-line.long  { width: 85%; }
+.skeleton-line.long   { width: 85%; }
 .skeleton-line.medium { width: 60%; }
 .skeleton-line.short  { width: 35%; }
 
@@ -949,17 +959,6 @@ body {
 /* ============================================
    Settings Panel
    ============================================ */
-
-.sidebar-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.chat-settings-btn {
-  margin-left: auto;
-}
 
 .settings-overlay {
   position: fixed;
@@ -1096,4 +1095,56 @@ body {
 .settings-saved {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* ============================================
+   prefers-reduced-motion — disable shimmer
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line,
+  .skeleton-avatar,
+  .skeleton-icon,
+  .conversation-skeleton .skeleton-line {
+    animation: none;
+    opacity: 0.5;
+  }
+
+  .typing-indicator span {
+    animation: none;
+    opacity: 0.5;
+  }
+
+  .message {
+    animation: none;
+  }
+
+  .spin {
+    animation: none;
+  }
+}
+
+/* ============================================
+   Skip Link
+   ============================================ */
+
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: 8px;
+  z-index: 9999;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+
+.skip-link:focus {
+  top: 8px;
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
