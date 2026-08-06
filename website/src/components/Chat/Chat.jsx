@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, Loader2, X, WifiOff, AlertTriangle, SlidersHorizontal } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Loader2, X, AlertTriangle, SlidersHorizontal } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -24,6 +24,8 @@ export default function Chat({
   const [messageType, setMessageType] = useState("text");
   const [transcribing, setTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState(null);
+  const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const audioInputRef = useRef(null);
@@ -31,6 +33,9 @@ export default function Chat({
   const inputModesRef = useRef(null);
   const sendBtnRef = useRef(null);
   const chatSettingsBtnRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
 
   // Expose focus fns to App
   useEffect(() => {
@@ -116,23 +121,125 @@ export default function Chat({
     }
   };
 
-  const handleAudioUpload = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  // Transcribe an audio File/Blob and insert text into the input
+  const transcribeAudio = useCallback(async (file) => {
     setTranscribing(true);
     setTranscribeError(null);
     try {
       const result = await api.transcribe(file);
-      setInput((prev) => (prev ? `${prev} ${result.text}` : result.text));
-      textareaRef.current?.focus();
+      // result.text may be a placeholder when the model isn't trained yet —
+      // insert it anyway so the user sees something
+      const text = result?.text?.trim();
+      if (text) {
+        setInput((prev) => (prev ? `${prev} ${text}` : text));
+        textareaRef.current?.focus();
+      } else {
+        setTranscribeError("Transcription returned empty text. Make sure the model is trained.");
+      }
     } catch (err) {
       setTranscribeError(`Transcription failed: ${err.message}`);
     } finally {
       setTranscribing(false);
     }
+  }, []);
+
+  // File-upload fallback handler
+  const handleAudioUpload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await transcribeAudio(file);
   };
 
+  // Start / stop live microphone recording
+  const handleMicClick = useCallback(async () => {
+    // ── STOP ──────────────────────────────────────────────
+    if (recording) {
+      // Guard against calling stop() on an already-inactive recorder
+      // (e.g. double-click) which would throw InvalidStateError
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+      return;
+    }
+
+    // ── START ─────────────────────────────────────────────
+    setTranscribeError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setTranscribeError("Microphone access is not supported in this browser.");
+      return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setTranscribeError("Microphone permission denied. Allow access in your browser settings.");
+      } else if (err.name === "NotFoundError") {
+        setTranscribeError("No microphone found. Plug one in and try again.");
+      } else {
+        setTranscribeError(`Could not access microphone: ${err.message}`);
+      }
+      return;
+    }
+
+    // Pick a supported MIME type — always fall back to audio/webm so the
+    // backend mimeFilter("audio/") never sees an empty content-type
+    const PREFERRED = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+    const mimeType = PREFERRED.find((t) => MediaRecorder.isTypeSupported(t)) ?? "audio/webm";
+
+    // Reset chunks for this recording session (supports record-twice)
+    audioChunksRef.current = [];
+
+    const recorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunksRef.current.push(e.data);
+    };
+
+    recorder.onstop = async () => {
+      // Release the mic — browser indicator disappears here
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(recordingTimerRef.current);
+      setRecording(false);
+      setRecordingSeconds(0);
+
+      // Derive extension from the actual mimeType used
+      const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "mp4" : "webm";
+      const blob = new Blob(audioChunksRef.current, { type: mimeType });
+      const file = new File([blob], `recording.${ext}`, { type: mimeType });
+      await transcribeAudio(file);
+    };
+
+    recorder.onerror = () => {
+      // Always release the stream on error so mic indicator clears
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(recordingTimerRef.current);
+      setRecording(false);
+      setRecordingSeconds(0);
+      setTranscribeError("Recording failed. Please try again.");
+    };
+
+    recorder.start(250); // collect chunks every 250 ms
+    setRecording(true);
+    setRecordingSeconds(0);
+    recordingTimerRef.current = setInterval(() => {
+      setRecordingSeconds((s) => s + 1);
+    }, 1000);
+  }, [recording, transcribeAudio]);
+
+  // Clean up recorder on unmount
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+      clearInterval(recordingTimerRef.current);
+    };
+  }, []);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -364,12 +471,33 @@ export default function Chat({
               onClick={() => setMessageType("audio")} aria-label="Audio generation mode" aria-pressed={messageType === "audio"}>
               <AudioLines size={16} aria-hidden="true" />
             </button>
-            <button type="button" className="mode-btn"
-              onClick={() => audioInputRef.current?.click()}
-              aria-label="Upload audio to transcribe"
-              disabled={transcribing} aria-busy={transcribing}>
-              {transcribing ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <Mic size={16} aria-hidden="true" />}
+
+            {/* Live mic capture button */}
+            <button
+              type="button"
+              className={`mode-btn mic-btn ${recording ? "recording" : ""}`}
+              onClick={handleMicClick}
+              aria-label={recording ? "Stop recording" : "Record audio"}
+              aria-pressed={recording}
+              disabled={transcribing}
+              title={recording ? "Stop recording" : "Record audio"}
+            >
+              {transcribing
+                ? <Loader2 size={16} className="spin" aria-hidden="true" />
+                : recording
+                  ? <MicOff size={16} aria-hidden="true" />
+                  : <Mic size={16} aria-hidden="true" />
+              }
             </button>
+
+            {/* Recording timer badge */}
+            {recording && (
+              <span className="recording-timer" aria-live="off" aria-hidden="true">
+                {String(Math.floor(recordingSeconds / 60)).padStart(2, "0")}:{String(recordingSeconds % 60).padStart(2, "0")}
+              </span>
+            )}
+
+            {/* File upload fallback (hidden) */}
             <input ref={audioInputRef} type="file" accept="audio/*"
               onChange={handleAudioUpload} style={{ display: "none" }} aria-hidden="true" tabIndex={-1} />
           </div>
