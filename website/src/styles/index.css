@@ -712,25 +712,123 @@ body {
    ============================================ */
 
 @media (max-width: 768px) {
+  /* Sidebar slides in as a drawer over content */
   .sidebar {
     position: fixed;
     z-index: 50;
     left: 0;
     top: 0;
     height: 100vh;
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.6);
   }
 
+  /* Dim the chat behind the open sidebar */
+  .sidebar-overlay {
+    display: block;
+  }
+
+  /* Chat header: hide subtitle to save space */
+  .chat-subtitle {
+    display: none;
+  }
+
+  /* Tighter header padding */
+  .chat-header {
+    padding: 10px 16px;
+    gap: 8px;
+  }
+
+  /* Messages: less padding */
+  .messages-container {
+    padding: 12px 16px;
+    gap: 16px;
+  }
+
+  /* Welcome screen: tighter */
+  .welcome-screen {
+    padding: 32px 16px;
+    gap: 12px;
+  }
+
+  .welcome-screen h2 {
+    font-size: 22px;
+  }
+
+  /* Suggestion pills: full width on mobile */
   .suggestions {
     flex-direction: column;
+    width: 100%;
   }
 
-  .messages-container {
-    padding: 16px;
+  .suggestion {
+    width: 100%;
+    text-align: left;
   }
 
+  /* Input area: tighter padding */
   .input-container {
-    padding: 12px 16px;
+    padding: 10px 12px 16px;
+  }
+
+  /* Input wrapper: wrap mode buttons onto their own row */
+  .input-wrapper {
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    gap: 6px;
+  }
+
+  /* Mode buttons row fills full width and wraps */
+  .input-modes {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding-bottom: 0;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+
+  /* Textarea and send button on their own row */
+  .chat-input {
+    min-width: 0;
+    font-size: 16px; /* prevents iOS zoom on focus */
+  }
+
+  .send-btn {
+    flex-shrink: 0;
+  }
+
+  /* Recording timer: keep it inline with the mode buttons */
+  .recording-timer {
+    font-size: 12px;
+    padding: 0 4px;
+  }
+
+  /* Input hint: hide on very small screens to save space */
+  .input-hint {
+    display: none;
+  }
+
+  /* Settings panel: full width on mobile */
+  .settings-panel {
+    max-width: 100%;
+    max-height: 92vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+
+  .settings-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  /* Message bubbles: full width */
+  .message {
+    max-width: 100%;
+  }
+
+  /* Code blocks: horizontal scroll */
+  .code-content {
+    font-size: 12px;
   }
 }
 
@@ -1098,8 +1196,58 @@ body {
 }
 
 /* ============================================
-   prefers-reduced-motion — disable shimmer
+   Mic Recording State
    ============================================ */
+
+.mic-btn.recording {
+  color: var(--error);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.mic-btn.recording:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: var(--error);
+}
+
+/* Pulsing red dot on the button while recording */
+.mic-btn.recording::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  background: var(--error);
+  border-radius: 50%;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+.mic-btn {
+  position: relative;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+
+.recording-timer {
+  align-self: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--error);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 0 2px;
+  min-width: 34px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-btn.recording::before {
+    animation: none;
+    opacity: 1;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line,
@@ -1125,8 +1273,17 @@ body {
 }
 
 /* ============================================
-   Skip Link
+   Sidebar Overlay (mobile backdrop)
    ============================================ */
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+  background: rgba(0, 0, 0, 0.55);
+  animation: fadeIn 0.2s ease;
+}
 
 .skip-link {
   position: fixed;
