@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Loader2, X, AlertTriangle, SlidersHorizontal } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -472,15 +472,27 @@ export default function Chat({
               <AudioLines size={16} aria-hidden="true" />
             </button>
 
+            {/* Upload audio file button */}
+            <button
+              type="button"
+              className="mode-btn"
+              onClick={() => audioInputRef.current?.click()}
+              aria-label="Upload audio file to transcribe"
+              disabled={transcribing || recording}
+              title="Upload audio file"
+            >
+              <Paperclip size={16} aria-hidden="true" />
+            </button>
+
             {/* Live mic capture button */}
             <button
               type="button"
               className={`mode-btn mic-btn ${recording ? "recording" : ""}`}
               onClick={handleMicClick}
-              aria-label={recording ? "Stop recording" : "Record audio"}
+              aria-label={recording ? "Stop recording" : "Record from mic"}
               aria-pressed={recording}
               disabled={transcribing}
-              title={recording ? "Stop recording" : "Record audio"}
+              title={recording ? "Stop recording" : "Record from mic"}
             >
               {transcribing
                 ? <Loader2 size={16} className="spin" aria-hidden="true" />

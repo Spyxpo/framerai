@@ -712,123 +712,25 @@ body {
    ============================================ */
 
 @media (max-width: 768px) {
-  /* Sidebar slides in as a drawer over content */
   .sidebar {
     position: fixed;
     z-index: 50;
     left: 0;
     top: 0;
     height: 100vh;
-    transform: translateX(0);
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.6);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
   }
 
-  /* Dim the chat behind the open sidebar */
-  .sidebar-overlay {
-    display: block;
-  }
-
-  /* Chat header: hide subtitle to save space */
-  .chat-subtitle {
-    display: none;
-  }
-
-  /* Tighter header padding */
-  .chat-header {
-    padding: 10px 16px;
-    gap: 8px;
-  }
-
-  /* Messages: less padding */
-  .messages-container {
-    padding: 12px 16px;
-    gap: 16px;
-  }
-
-  /* Welcome screen: tighter */
-  .welcome-screen {
-    padding: 32px 16px;
-    gap: 12px;
-  }
-
-  .welcome-screen h2 {
-    font-size: 22px;
-  }
-
-  /* Suggestion pills: full width on mobile */
   .suggestions {
     flex-direction: column;
-    width: 100%;
   }
 
-  .suggestion {
-    width: 100%;
-    text-align: left;
+  .messages-container {
+    padding: 16px;
   }
 
-  /* Input area: tighter padding */
   .input-container {
-    padding: 10px 12px 16px;
-  }
-
-  /* Input wrapper: wrap mode buttons onto their own row */
-  .input-wrapper {
-    flex-wrap: wrap;
-    padding: 8px 10px;
-    gap: 6px;
-  }
-
-  /* Mode buttons row fills full width and wraps */
-  .input-modes {
-    width: 100%;
-    flex-wrap: wrap;
-    gap: 2px;
-    padding-bottom: 0;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 6px;
-  }
-
-  /* Textarea and send button on their own row */
-  .chat-input {
-    min-width: 0;
-    font-size: 16px; /* prevents iOS zoom on focus */
-  }
-
-  .send-btn {
-    flex-shrink: 0;
-  }
-
-  /* Recording timer: keep it inline with the mode buttons */
-  .recording-timer {
-    font-size: 12px;
-    padding: 0 4px;
-  }
-
-  /* Input hint: hide on very small screens to save space */
-  .input-hint {
-    display: none;
-  }
-
-  /* Settings panel: full width on mobile */
-  .settings-panel {
-    max-width: 100%;
-    max-height: 92vh;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  }
-
-  .settings-overlay {
-    align-items: flex-end;
-    padding: 0;
-  }
-
-  /* Message bubbles: full width */
-  .message {
-    max-width: 100%;
-  }
-
-  /* Code blocks: horizontal scroll */
-  .code-content {
-    font-size: 12px;
+    padding: 12px 16px;
   }
 }
 
@@ -1272,18 +1174,6 @@ body {
   }
 }
 
-/* ============================================
-   Sidebar Overlay (mobile backdrop)
-   ============================================ */
-
-.sidebar-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  z-index: 49;
-  background: rgba(0, 0, 0, 0.55);
-  animation: fadeIn 0.2s ease;
-}
 
 .skip-link {
   position: fixed;
