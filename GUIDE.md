@@ -112,9 +112,12 @@ The web app opens at `http://localhost:5173`.
 - Transformer backbone: an autoregressive decoder using RoPE, SwiGLU, and RMSNorm.
 - Vision encoder: a ViT-style encoder that turns images into patch embeddings.
 - Audio encoder: a mel-spectrogram front-end and transformer that turns audio into embeddings.
-- Diffusion module: a U-Net with cross-attention for text-conditioned images.
-- Video generator: spatial-temporal diffusion with a 3D U-Net.
-- Audio generator: text-conditioned mel diffusion with Griffin-Lim reconstruction.
+- Image decoder: a KL-VAE plus a diffusion transformer on a rectified-flow objective, or the
+  original pixel-space U-Net, selected by `image_gen_arch`.
+- Video decoder: a causal 3D VAE plus a spacetime diffusion transformer, or the original 3D
+  U-Net, selected by `video_gen_arch`.
+- Audio decoder: an RVQ codec producing discrete acoustic tokens plus a neural vocoder, or the
+  original mel diffusion, selected by `audio_gen_arch`.
 - Multimodal projector: aligns vision and audio embeddings with the language model space.
 
 Model sizes are named presets in `model/configs/presets.py` (run
@@ -129,16 +132,29 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B | ~2.5B | ~3.7B |
 | `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~596M | ~7.8B |
 | `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~536M | ~34B |
-| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.2B | ~156B |
-| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~8.2B | ~202B |
-| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~16.3B | ~999B |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~5.4B | ~157B |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~11.5B | ~205B |
+| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~21.1B | ~1.00T |
+| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~39.3B | ~2.00T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
-The three largest scale their vision, audio, and diffusion towers with the backbone, so
-`framer-1t-a32b` holds a trillion parameters across all five modalities rather than in the
+The four largest scale their vision, audio, and diffusion towers with the backbone, so
+`framer-2t-a49b` holds two trillion parameters across all five modalities rather than in the
 language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
 `--preset NAME` selects any preset by name (also available on `train.sh`).
+
+### Why 384 fine-grained experts
+
+The flagship uses 384 experts of width 2048 rather than, say, 192 of width 4096. Total
+parameters scale with the expert *count*, active parameters with `n_experts_per_tok`, so
+narrower and more numerous experts buy sparsity at the same total. 384 is 3 x 128, which
+divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes - a placement
+constraint worth respecting before the sharding code exists rather than after.
+
+Attention is roughly 39% of the flagship's active budget (84 layers x 230.7M). That is a
+consequence of `d_model=10240` with only four routed experts per token, and it is the knob to
+turn if more of the active budget should sit in the FFN.
 
 ### How the estimator sizes a trillion parameters on a laptop
 
@@ -149,6 +165,209 @@ which materializes shapes without storage. That keeps the number honest — it t
 module code rather than a formula that can drift from it — while staying instant and
 allocation-free. `python build.py --preset NAME --estimate` prints the per-tower breakdown
 plus the bf16 weight footprint and the full AdamW training state.
+
+The tower list itself lives in one place, `MULTIMODAL_TOWERS` in `model/utils/helpers.py`,
+which the estimator, `build.py`'s breakdown, and the tests all import. `estimate_params` and
+`estimate_multimodal_params` take `strict=True` to re-raise instead of degrading to
+"could not be sized"; the tests use it so a tower that resists meta construction fails loudly
+rather than silently shrinking the reported model.
+
+### Choosing an architecture per modality
+
+Each decoder family is selected by a config field that defaults to the original implementation,
+so the laptop-scale presets keep their existing path byte for byte and only the large presets
+opt in. The estimator meta-constructs whatever the config selects, so `--estimate` stays exact
+across the switch.
+
+| Field | Default | Alternative | Set by |
+|---|---|---|---|
+| `image_gen_arch` | `unet` | `latent_dit` | the four large MoE presets |
+| `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
+| `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | the four large MoE presets |
+| `vocoder_arch` | `griffin_lim` | `istft` | the four large MoE presets |
+| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b` |
+| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b` |
+
+`unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
+cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that
+compresses 8x in each spatial dimension plus a diffusion transformer over the resulting latent
+grid, so a 512x512 image is denoised as a 64x64 latent - 64x fewer positions to attend over.
+
+The latent path brings three things the U-Net did not have:
+
+- **adaLN-zero conditioning.** Timestep and pooled text modulate every block through a
+  zero-initialized projection, so each block starts as the identity and the residual stream is
+  undisturbed at step zero. This is what makes a deep denoiser trainable from scratch.
+- **Rectified flow.** The model predicts a straight-line velocity between noise and data
+  rather than the noise itself, which makes the sampling trajectory nearly straight and
+  solvable in 20-50 ODE steps instead of a 1000-step ancestral chain.
+- **Classifier-free guidance.** `cfg_dropout_prob` replaces whole examples' conditioning with a
+  learned `null_context` embedding during training; at inference the conditional and
+  unconditional fields are evaluated in one batch-doubled forward and extrapolated apart by
+  `cfg_scale`. The README advertised this from the beginning and no such code existed until now.
+
+Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
+table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
+
+### Evaluating a checkpoint
+
+`model/eval/` provides one suite per modality behind a small harness:
+
+```python
+from model.eval import default_harness
+
+report = default_harness(model).run(inputs={
+    "text": {"batches": [(input_ids, labels)]},
+    "image": {"real": real_images, "fake": generated, "captions": caption_ids},
+    "video": {"real": real_clips, "fake": generated_clips},
+    "audio": {"reference": waveform, "estimate": reconstructed},
+})
+print(report.summary())
+```
+
+A suite that cannot run is recorded as skipped **with its reason**, not omitted. A missing
+input is not the same as a good score, and a harness that conflates them is worse than no
+harness.
+
+Two caveats worth stating before the numbers are used:
+
+- **Frechet distance uses the model's own encoders**, not Inception or I3D. The scores are
+  therefore comparable across FramerAI checkpoints and meaningless against published FID or FVD
+  figures.
+- **A low Frechet distance with poor alignment** means the model makes plausible images of the
+  wrong thing. `alignment_score` is what measures prompt adherence, and the two should be read
+  together.
+
+`bits_per_byte` is tokenizer-independent, so two models with different vocabularies can be
+compared on the same corpus - which raw perplexity cannot do.
+
+### Placing modalities in the sequence
+
+Under `prefix`, encoded image and audio embeddings are concatenated ahead of the tokens. That
+costs extra sequence positions and, more importantly, discards *where* each modality appeared:
+"how does the first image differ from the second" is unanswerable from a prefix.
+
+Under `interleaved`, the sequence reserves one placeholder token per embedding and
+`_scatter_modality_embeds` writes them in with `masked_scatter`. Length, attention mask, and
+label alignment are all unchanged, because this replaces rather than inserts.
+
+The two halves of the contract are `InterleavedSequenceBuilder` in `model/data.py`, which emits
+`<img> <img_patch> x N <img_end>` runs, and the encoder, which produces N embeddings. A count
+mismatch raises rather than corrupting the sequence silently.
+
+### High-resolution tiling
+
+With `vision_tiling` on, `image_size` becomes the *tile* size and `DynamicTiler` splits an image
+into the `(rows, cols)` grid whose aspect ratio best matches it, bounded by `vision_max_tiles`.
+Attention is quadratic within a tile but only linear across tiles, so 12 tiles cover roughly
+3.5x the linear resolution at a fraction of what one large forward would cost. A downscaled
+thumbnail is prepended because tiles alone destroy global layout.
+
+`PatchEmbedding.interpolate_pos_encoding` bicubically resamples the learned position table when
+the patch grid differs from the trained one, so the same weights accept a tile of any shape.
+
+`ContrastiveVisionTrainer` in `model/training/contrastive.py` gives the vision tower a training
+signal of its own: symmetric InfoNCE between pooled image and text embeddings with a learned
+temperature. Without it the encoder learns only from whatever gradient reaches it through the
+language-model loss, which is weak and indirect.
+
+### Requesting a size
+
+`resolve_image_request` in `model/utils/image_request.py` turns a request into concrete
+dimensions. Precedence is explicit over implicit, always:
+
+| Source | Wins over | Example |
+|---|---|---|
+| `width` + `height` | everything | `{"width": 1024, "height": 768}` |
+| `aspect` + `tier` | prompt and default | `{"aspect": "16:9", "tier": 1024}` |
+| prompt intent | default | `"a widescreen shot of a valley"` |
+| config default | - | `image_default_aspect`, `image_size_tier` |
+
+Because an explicit parameter short-circuits parsing entirely, a sizing word in the prompt can
+never quietly override what the caller asked for. The resolved `ImageRequest` carries `source`,
+so a caller can distinguish an instruction from a guess, and `snapped`, so an off-bucket
+request is visibly adjusted rather than silently changed.
+
+Prompt parsing recognises explicit sizes (`1024x1024`, `1024 by 768`), ratios (`16:9`), named
+shapes (`widescreen`, `portrait`, `phone wallpaper`, `ultrawide`, `banner`), and tier words
+(`hd`, `4k`). Set `image_allow_custom_size=False` to turn it off and honour only explicit
+parameters.
+
+A recognised phrase is stripped from the conditioning text only when it reads as an
+instruction. `_SUBJECT_WORDS` lists the shape words that are just as likely to be describing
+the subject: "a portrait of a woman" still resolves to 2:3, because the guess is a good one,
+but the prompt is left intact, since removing the word would leave "a of a woman". "a woman in
+portrait orientation" is a directive and is stripped.
+
+Buckets are generated, not listed: for tier area `A` and ratio `r`, the size is
+`round16(sqrt(A * r))` by `round16(sqrt(A / r))`. Every ratio therefore costs about the same
+compute, and both dimensions divide `vae_downsample * dit_patch_size`, which is what the DiT
+patch embedding requires.
+
+Arbitrary ratios need `image_gen_arch="latent_dit"`. Under `unet` a non-square request raises a
+message naming the setting, rather than producing something misshapen.
+
+### Distributing the experts
+
+`framer-2t-a49b` has 384 experts per layer across 80 MoE layers. Every rank holding every
+expert is what makes the model 3.6 TiB per host; expert parallelism gives each rank
+`n_experts // ep_world` of them, so expert weights divide by the mesh size while the router and
+attention stay replicated.
+
+```python
+from model.training import build_device_mesh, plan_from_environment, shard_model_experts
+
+mesh = build_device_mesh(ep_size=8)
+model = FramerModel.from_config_meta(config)
+shard_model_experts(model, plan_from_environment(ep_size=8, group=mesh["ep"].get_group()))
+model.to_empty(device="cuda")
+model.init_weights_(buffer_device="cuda")
+model = maybe_wrap_fsdp(model, config, device, mesh=mesh)
+```
+
+Order matters: sharding happens on the meta module, *before* materialization, so the experts a
+rank will never hold are never allocated in the first place.
+
+The `(dp, ep)` mesh is what keeps FSDP and expert parallelism composable. FSDP shards over
+`dp`; expert weights are already split over `ep`, and sharding them again would divide them
+twice and leave each rank with a fragment of a fragment.
+
+Routing is unchanged — `n_experts` stays global and the router still scores all of them. What
+changes is where the expert lives, so a token routed off-rank is sent there, computed, and sent
+back, which is the all-to-all dispatch and combine.
+
+384 is `3 x 128` precisely so this divides evenly across 8, 16, 32, 64, and 128-way meshes, and
+a test asserts that for every one of them.
+
+### Constructing a model too large for one host
+
+`build.py` allocates the whole model on one device, which works up to a few billion
+parameters and not beyond. `framer-2t-a49b` needs roughly 7.4 TiB in fp32 to instantiate, so
+`--mode build` refuses it up front and points at `--estimate` rather than being OOM-killed.
+Pass `--force` to override.
+
+To actually materialise a model at that scale, build its shapes first and fill them in
+per-rank afterwards:
+
+```python
+model = FramerModel.from_config_meta(config)   # shapes only, allocates nothing
+# ... apply FSDP / expert-parallel sharding to the meta module ...
+model.to_empty(device="cuda")                  # storage, no contents
+model.init_weights_(buffer_device="cuda")      # parameters and derived buffers
+```
+
+`to_empty()` allocates without initialising, so `init_weights_` has to fill everything:
+parameters get their distribution, and every module owning a *derived* buffer (RoPE inverse
+frequencies, diffusion noise schedules, mel filterbanks) recomputes it through
+`reset_buffers`. Modules with hand-rolled parameters that torch cannot initialise generically
+(`RMSNorm`, the patch and frame position embeddings) implement `reset_parameters`.
+
+Checkpoints go through `model/training/checkpoint.py`. `save_sharded` writes one file per
+rank into a directory and `load_sharded` reassembles them, resharding if the world size
+changed. `gather_full_state_dict` collects the complete tensors on rank 0 for a portable
+single-file export, which is only possible when the model fits on one host. Under FSDP2 each
+rank holds a slice of every parameter, so the old single-file save was persisting one rank's
+shard under a name that claimed to be the whole model.
 
 `FramerConfig.validate()` runs whenever a preset is built and after CLI overrides are applied.
 It checks the invariants the modules assume: head divisibility for attention and GQA, patch

@@ -6,9 +6,13 @@ KV cache for O(n) decoding, RoPE with optional context-extension scaling, and
 optional QK-normalization for stability at scale.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from ..configs.model_config import ROPE_SCALING_TYPES
 
 
 class RMSNorm(nn.Module):
@@ -19,6 +23,10 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d_model))
 
+    @torch.no_grad()
+    def reset_parameters(self):
+        self.weight.fill_(1.0)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x * norm * self.weight
@@ -27,10 +35,25 @@ class RMSNorm(nn.Module):
 class RotaryPositionalEmbedding(nn.Module):
     """Rotary Position Embedding (RoPE) with optional context-extension scaling.
 
-    Supports ``linear`` position interpolation and ``ntk`` base scaling so the
-    same weights can serve a longer context than they were trained on. cos/sin
-    are computed for absolute positions, which makes incremental decoding with a
-    KV cache correct (only the new positions are rotated per step).
+    Four strategies, all serving a longer context than the weights were trained
+    on. cos/sin are computed for absolute positions, which makes incremental
+    decoding with a KV cache correct (only the new positions are rotated per
+    step).
+
+    ``none``
+        No extension.
+    ``linear``
+        Position interpolation: divide every position by the scaling factor.
+        Uniform, and it compresses the high frequencies that carry local order.
+    ``ntk``
+        Raise the RoPE base so high frequencies stretch less than low ones.
+    ``yarn``
+        NTK-by-parts. Each frequency is classified by how many full rotations it
+        completes over the *original* context: high-frequency dimensions (short
+        wavelength, local order) are left alone, low-frequency dimensions (never
+        completing a rotation) are interpolated in full, and the band between the
+        two is ramped smoothly. A ``0.1 * ln(s) + 1`` factor on cos/sin
+        compensates for the attention-entropy drift the longer context causes.
     """
 
     def __init__(
@@ -40,19 +63,87 @@ class RotaryPositionalEmbedding(nn.Module):
         base: float = 10000.0,
         scaling_factor: float = 1.0,
         scaling_type: str = "linear",
+        low_freq_factor: float = 1.0,
+        high_freq_factor: float = 4.0,
+        original_max_seq_len: int = None,
     ):
         super().__init__()
+        if scaling_type not in ROPE_SCALING_TYPES:
+            raise ValueError(
+                f"Unknown rope scaling_type '{scaling_type}'. "
+                f"Expected one of {', '.join(ROPE_SCALING_TYPES)}"
+            )
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
         self.scaling_factor = max(1.0, float(scaling_factor))
         self.scaling_type = scaling_type
+        self.attention_factor = 1.0
+        # The unmodified base, so the buffer can be rebuilt from scratch after a
+        # meta-device build without re-applying the NTK adjustment twice.
+        self.base = float(base)
+        self.low_freq_factor = low_freq_factor
+        self.high_freq_factor = high_freq_factor
+        self.original_max_seq_len = original_max_seq_len
 
-        if scaling_type == "ntk" and self.scaling_factor > 1.0:
-            # NTK-aware: raise the base so high frequencies are stretched less.
-            base = base * (self.scaling_factor ** (head_dim / (head_dim - 2)))
+        inv_freq = self._compute_inv_freq()
+        if scaling_type == "yarn" and self.scaling_factor > 1.0:
+            self.attention_factor = 0.1 * math.log(self.scaling_factor) + 1.0
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _compute_inv_freq(self) -> torch.Tensor:
+        base = self.base
+        if self.scaling_type == "ntk" and self.scaling_factor > 1.0:
+            # NTK-aware: raise the base so high frequencies are stretched less.
+            base = base * (self.scaling_factor ** (self.head_dim / (self.head_dim - 2)))
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim))
+
+        if self.scaling_type == "yarn" and self.scaling_factor > 1.0:
+            inv_freq = self._yarn_inv_freq(
+                inv_freq,
+                self.scaling_factor,
+                self.original_max_seq_len or self.max_seq_len,
+                self.low_freq_factor,
+                self.high_freq_factor,
+            )
+        return inv_freq
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the inverse frequencies, for use after a meta-device build."""
+        device = device or self.inv_freq.device
+        self.inv_freq = self._compute_inv_freq().to(device)
+
+    @staticmethod
+    def _yarn_inv_freq(
+        inv_freq: torch.Tensor,
+        scaling_factor: float,
+        original_max_seq_len: int,
+        low_freq_factor: float,
+        high_freq_factor: float,
+    ) -> torch.Tensor:
+        """Per-dimension NTK-by-parts interpolation of the inverse frequencies."""
+        if high_freq_factor <= low_freq_factor:
+            raise ValueError(
+                f"rope_high_freq_factor ({high_freq_factor}) must exceed "
+                f"rope_low_freq_factor ({low_freq_factor})"
+            )
+        wavelength = 2 * math.pi / inv_freq
+        low_wavelength = original_max_seq_len / low_freq_factor
+        high_wavelength = original_max_seq_len / high_freq_factor
+
+        interpolated = inv_freq / scaling_factor
+        # Smooth ramp over the band between the two wavelength boundaries.
+        rotations = original_max_seq_len / wavelength
+        ramp = (rotations - low_freq_factor) / (high_freq_factor - low_freq_factor)
+        ramp = ramp.clamp(0.0, 1.0)
+        blended = (1 - ramp) * interpolated + ramp * inv_freq
+
+        # Outside the band the ramp already resolves to the right endpoint; the
+        # explicit wheres keep the boundaries exact rather than near-exact.
+        blended = torch.where(wavelength > low_wavelength, interpolated, blended)
+        return torch.where(wavelength < high_wavelength, inv_freq, blended)
 
     def forward(self, seq_len: int, offset: int = 0, device=None) -> tuple:
         device = device or self.inv_freq.device
@@ -61,6 +152,8 @@ class RotaryPositionalEmbedding(nn.Module):
             positions = positions / self.scaling_factor
         freqs = torch.einsum("i,j->ij", positions, self.inv_freq.to(device))
         emb = torch.cat([freqs, freqs], dim=-1)
+        if self.attention_factor != 1.0:
+            return emb.cos() * self.attention_factor, emb.sin() * self.attention_factor
         return emb.cos(), emb.sin()
 
 
@@ -102,6 +195,9 @@ class CausalSelfAttention(nn.Module):
         rope_theta: float = 10000.0,
         rope_scaling_factor: float = 1.0,
         rope_scaling_type: str = "linear",
+        rope_low_freq_factor: float = 1.0,
+        rope_high_freq_factor: float = 4.0,
+        rope_original_max_seq_len: int = None,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -126,6 +222,9 @@ class CausalSelfAttention(nn.Module):
         self.rope = RotaryPositionalEmbedding(
             self.head_dim, max_seq_len, base=rope_theta,
             scaling_factor=rope_scaling_factor, scaling_type=rope_scaling_type,
+            low_freq_factor=rope_low_freq_factor,
+            high_freq_factor=rope_high_freq_factor,
+            original_max_seq_len=rope_original_max_seq_len,
         )
 
     def forward(
@@ -234,6 +333,9 @@ class TransformerBlock(nn.Module):
         rope_theta: float = 10000.0,
         rope_scaling_factor: float = 1.0,
         rope_scaling_type: str = "linear",
+        rope_low_freq_factor: float = 1.0,
+        rope_high_freq_factor: float = 4.0,
+        rope_original_max_seq_len: int = None,
         ffn: nn.Module = None,
     ):
         super().__init__()
@@ -243,6 +345,9 @@ class TransformerBlock(nn.Module):
             n_kv_heads=n_kv_heads, use_qk_norm=use_qk_norm,
             rope_theta=rope_theta, rope_scaling_factor=rope_scaling_factor,
             rope_scaling_type=rope_scaling_type,
+            rope_low_freq_factor=rope_low_freq_factor,
+            rope_high_freq_factor=rope_high_freq_factor,
+            rope_original_max_seq_len=rope_original_max_seq_len,
         )
         self.norm2 = RMSNorm(d_model)
         # ffn may be a dense FeedForward or a MoEFeedForward (returns aux loss).

@@ -1,6 +1,7 @@
 """Utility functions for FramerAI model."""
 
 import os
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -40,7 +41,17 @@ def _count_on_meta(factory) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
-def estimate_multimodal_params(config) -> dict:
+# The multimodal towers FramerModel builds, in report order. Single source of
+# truth: build.py's breakdown and the estimator tests both import this rather
+# than repeating the tuple.
+MULTIMODAL_TOWERS = (
+    "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
+    "image_vae", "image_diffusion", "video_vae", "video_diffusion",
+    "audio_codec", "audio_vocoder", "audio_diffusion",
+)
+
+
+def estimate_multimodal_params(config, strict: bool = False) -> dict:
     """Count the multimodal towers of a config without allocating memory.
 
     Mirrors what :class:`model.framer.FramerModel` builds when
@@ -54,20 +65,24 @@ def estimate_multimodal_params(config) -> dict:
 
     Returns all-zero counts for a text-only config, and ``None`` if a tower
     cannot be built on the meta device, so callers can degrade to a text-only
-    estimate instead of failing.
+    estimate instead of failing. Pass ``strict=True`` to re-raise instead: a typo
+    in a new tower should fail loudly in tests rather than quietly downgrade
+    ``--estimate`` to "could not be sized".
     """
-    towers = (
-        "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-        "image_diffusion", "video_diffusion", "audio_diffusion",
-    )
     if config.text_only:
-        return {**{name: 0 for name in towers}, "total": 0}
+        return {**{name: 0 for name in MULTIMODAL_TOWERS}, "total": 0}
 
     from ..modules.audio_encoder import AudioEncoder
     from ..modules.diffusion import DiffusionModule
+    from ..modules.dit import DiT
     from ..modules.multimodal_projector import MultimodalProjector
+    from ..modules.rvq_audio import RVQAudioGenerator
+    from ..modules.spacetime_dit import SpacetimeDiT
+    from ..modules.vae import KLVAE
     from ..modules.video_generator import VideoGenerator
+    from ..modules.video_vae import CausalVideoVAE
     from ..modules.vision_encoder import VisionEncoder
+    from ..modules.vocoder import NeuralVocoder
 
     d = config.d_model
     factories = {
@@ -84,33 +99,98 @@ def estimate_multimodal_params(config) -> dict:
             dropout=config.dropout,
         ),
         "audio_projector": lambda: MultimodalProjector(config.audio_d_model, d),
-        "image_diffusion": lambda: DiffusionModule(
-            in_channels=3, base_channels=config.diffusion_channels, context_dim=d,
-            num_steps=config.diffusion_steps,
+        # The image decoder is arch-selected. Under "latent_dit" the autoencoder
+        # is counted separately from the denoiser, since they are trained
+        # separately and sized independently; under "unet" there is no VAE and
+        # the slot is zero.
+        "image_vae": lambda: (
+            KLVAE(
+                in_channels=3, latent_channels=config.vae_latent_channels,
+                base_channels=config.vae_base_channels, downsample=config.vae_downsample,
+            )
+            if config.image_gen_arch == "latent_dit"
+            else nn.Identity()
         ),
-        "video_diffusion": lambda: VideoGenerator(
-            frames=config.video_frames, resolution=config.video_resolution,
-            base_channels=config.diffusion_channels // 2, context_dim=d,
-            num_steps=config.diffusion_steps,
+        "image_diffusion": lambda: (
+            DiT(
+                in_channels=config.vae_latent_channels, d_model=config.dit_d_model,
+                n_layers=config.dit_n_layers, n_heads=config.dit_n_heads,
+                patch_size=config.dit_patch_size, context_dim=d,
+            )
+            if config.image_gen_arch == "latent_dit"
+            else DiffusionModule(
+                in_channels=3, base_channels=config.diffusion_channels, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
+        ),
+        "video_vae": lambda: (
+            CausalVideoVAE(
+                in_channels=3, latent_channels=config.video_vae_latent_channels,
+                base_channels=config.video_vae_base_channels,
+                temporal_downsample=config.video_vae_temporal_downsample,
+                spatial_downsample=config.video_vae_spatial_downsample,
+            )
+            if config.video_gen_arch == "spacetime_dit"
+            else nn.Identity()
+        ),
+        "video_diffusion": lambda: (
+            SpacetimeDiT(
+                in_channels=config.video_vae_latent_channels,
+                d_model=config.video_dit_d_model, n_layers=config.video_dit_n_layers,
+                n_heads=config.video_dit_n_heads, patch_size=config.video_dit_patch_size,
+                context_dim=d,
+            )
+            if config.video_gen_arch == "spacetime_dit"
+            else VideoGenerator(
+                frames=config.video_frames, resolution=config.video_resolution,
+                base_channels=config.diffusion_channels // 2, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
+        ),
+        # The audio decoder is arch-selected. Under "rvq_lm" the codec and the
+        # token language model replace the mel diffusion entirely.
+        # The vocoder is counted in its own slot, so it is excluded here rather
+        # than counted twice.
+        "audio_codec": lambda: (
+            RVQAudioGenerator(replace(config, vocoder_arch="griffin_lim"))
+            if config.audio_gen_arch == "rvq_lm"
+            else nn.Identity()
+        ),
+        "audio_vocoder": lambda: (
+            NeuralVocoder(
+                in_channels=config.rvq_codebook_dim, d_model=config.vocoder_d_model,
+                n_layers=config.vocoder_n_layers, n_fft=config.audio_n_fft * 2,
+                hop_length=config.codec_hop,
+            )
+            if config.audio_gen_arch == "rvq_lm" and config.vocoder_arch == "istft"
+            else nn.Identity()
         ),
         # AudioGenerator's parameters all live in this inner diffusion module.
-        "audio_diffusion": lambda: DiffusionModule(
-            in_channels=1, base_channels=config.audio_gen_channels, context_dim=d,
-            num_steps=config.diffusion_steps,
+        "audio_diffusion": lambda: (
+            nn.Identity()
+            if config.audio_gen_arch == "rvq_lm"
+            else DiffusionModule(
+                in_channels=1, base_channels=config.audio_gen_channels, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
         ),
     }
+
+    assert tuple(factories) == MULTIMODAL_TOWERS, "tower registry drifted from MULTIMODAL_TOWERS"
 
     counts = {}
     try:
         for name, factory in factories.items():
             counts[name] = _count_on_meta(factory)
     except Exception:  # noqa: BLE001 - any tower that resists meta construction
+        if strict:
+            raise
         return None
     counts["total"] = sum(counts.values())
     return counts
 
 
-def estimate_params(config) -> dict:
+def estimate_params(config, strict: bool = False) -> dict:
     """Estimate a config's parameter budget without instantiating the model.
 
     ``total`` and ``active`` cover the **text backbone**: total parameters versus
@@ -164,7 +244,7 @@ def estimate_params(config) -> dict:
     total += embed + d  # + final norm
     active += embed + d
 
-    multimodal = estimate_multimodal_params(config)
+    multimodal = estimate_multimodal_params(config, strict=strict)
     mm_total = multimodal["total"] if multimodal else 0
     model_total = total + mm_total
 

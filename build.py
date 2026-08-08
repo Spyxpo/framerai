@@ -42,6 +42,7 @@ from model.training import (
     train_language_model,
 )
 from model.utils import (
+    MULTIMODAL_TOWERS,
     count_parameters,
     estimate_params,
     get_device,
@@ -76,11 +77,46 @@ BUILTIN_SAMPLE_TEXTS = [
 # Build & Train
 # ---------------------------------------------------------------------------
 
-def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data"):
+def _available_memory_bytes() -> int:
+    """Physical RAM, or 0 when it cannot be determined."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return 0
+
+
+def check_buildable(config: FramerConfig, force: bool = False):
+    """Refuse to instantiate a config that cannot fit in memory.
+
+    ``build_model`` allocates the whole model on one device. For the largest
+    presets that is multiple terabytes, and without this guard the process is
+    simply OOM-killed with no explanation of why.
+    """
+    est = estimate_params(config)
+    # fp32 parameters plus headroom for the copy torch.save makes.
+    needed = est["model_total"] * 4
+    available = _available_memory_bytes()
+    if force or not available or needed < available * 0.8:
+        return est
+
+    gib = 1024 ** 3
+    raise SystemExit(
+        f"'{config.preset or 'custom'}' needs about {needed / gib:.0f} GiB to instantiate "
+        f"({est['model_total_h']} parameters in fp32) but this machine has "
+        f"{available / gib:.0f} GiB.\n"
+        f"  Size it without allocating:  python build.py --preset {config.preset} --estimate\n"
+        f"  Train it across hosts:       see the sharded checkpoint path in "
+        f"model/training/checkpoint.py\n"
+        f"  Build it anyway:             --force"
+    )
+
+
+def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", force: bool = False):
     """Initialize model architecture and save initial checkpoint."""
     logger.info("Building FramerAI model...")
     logger.info(f"Config: d_model={config.d_model}, layers={config.n_layers}, heads={config.n_heads}")
 
+    check_buildable(config, force=force)
     model = FramerModel(config)
     num_params = count_parameters(model)
     logger.info(f"Total trainable parameters: {num_params:,}")
@@ -226,7 +262,7 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                 if steps % 20 == 0:
                     logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}")
 
-    _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.diffusion_resolution), "target_images", "image")
+    _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.image_train_resolution), "target_images", "image")
     _run(AudioCaptionDataset(data_dir, tokenizer, config), "target_audio", "audio")
 
 
@@ -313,8 +349,7 @@ def print_estimate(config: FramerConfig):
     if mm is None:
         print("  Multimodal towers  (could not be sized on this build)")
     elif est["multimodal_total"]:
-        for name in ("vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-                     "image_diffusion", "video_diffusion", "audio_diffusion"):
+        for name in MULTIMODAL_TOWERS:
             print(f"    {name:<18s} {human_params(mm[name]):>9s}")
         print(f"  Multimodal total   {est['multimodal_h']:>9s}")
     else:
@@ -358,6 +393,8 @@ def main():
                         help="Print the parameter and memory budget for the resolved config, then exit")
     parser.add_argument("--text-only", action="store_true",
                         help="Build only the LLM core (skip multimodal encoders/decoders)")
+    parser.add_argument("--force", action="store_true",
+                        help="Instantiate even when the config does not fit in memory")
     parser.add_argument("--shard-dir", default=None,
                         help="Directory of packed token shards (see scripts/prepare_data.py)")
     parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default=None,
@@ -422,7 +459,7 @@ def main():
     logger.info("=" * 60)
 
     if args.mode in ("build", "all"):
-        build_model(config, args.output_dir, args.data_dir)
+        build_model(config, args.output_dir, args.data_dir, force=args.force)
 
     if args.mode in ("train", "all"):
         train_model(config, args.output_dir, args.resume, args.data_dir,

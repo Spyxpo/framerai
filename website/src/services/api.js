@@ -40,10 +40,12 @@ export const api = {
     }),
 
   // Generation
-  generateImage: (prompt, numImages = 1, resolution = 256) =>
+  generateImage: (prompt, numImages = 1, size = {}) =>
     request("/generate/image", {
       method: "POST",
-      body: JSON.stringify({ prompt, num_images: numImages, resolution }),
+      // Only send the size fields that were actually set, so the backend can
+      // fall through to prompt intent and then to its own default.
+      body: JSON.stringify({ prompt, num_images: numImages, ...size }),
     }),
 
   generateVideo: (prompt, numFrames = 16) =>

@@ -1,4 +1,5 @@
 from .helpers import (
+    MULTIMODAL_TOWERS,
     count_parameters,
     estimate_multimodal_params,
     estimate_params,
@@ -9,6 +10,7 @@ from .helpers import (
 )
 
 __all__ = [
+    "MULTIMODAL_TOWERS",
     "get_device",
     "count_parameters",
     "estimate_params",

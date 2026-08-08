@@ -7,13 +7,13 @@ from torch.utils.checkpoint import checkpoint
 
 from .configs import FramerConfig
 from .modules.audio_encoder import AudioEncoder
-from .modules.audio_generator import AudioGenerator
-from .modules.diffusion import DiffusionModule
+from .modules.latent_diffusion import build_image_generator
+from .modules.latent_video import build_video_generator
 from .modules.moe import build_ffn
 from .modules.multimodal_projector import MultimodalProjector
+from .modules.rvq_audio import build_audio_generator
 from .modules.transformer import CausalSelfAttention, FeedForward, RMSNorm, TransformerBlock
-from .modules.video_generator import VideoGenerator
-from .modules.vision_encoder import VisionEncoder
+from .modules.vision_encoder import DynamicTiler, VisionEncoder
 
 
 class FramerModel(nn.Module):
@@ -29,7 +29,13 @@ class FramerModel(nn.Module):
     - Mel diffusion for audio/speech generation
     """
 
-    def __init__(self, config: FramerConfig):
+    # Placeholder token ids the interleaved path writes into. They live in the
+    # tokenizer's reserved block, after the byte range, so their values are
+    # stable across tokenizer versions.
+    IMAGE_PLACEHOLDER_ID = 271
+    AUDIO_PLACEHOLDER_ID = 272
+
+    def __init__(self, config: FramerConfig, init_weights: bool = True):
         super().__init__()
         self.config = config
 
@@ -47,6 +53,9 @@ class FramerModel(nn.Module):
                 rope_theta=config.rope_theta,
                 rope_scaling_factor=config.rope_scaling_factor,
                 rope_scaling_type=config.rope_scaling_type,
+                rope_low_freq_factor=config.rope_low_freq_factor,
+                rope_high_freq_factor=config.rope_high_freq_factor,
+                rope_original_max_seq_len=config.rope_original_max_seq_len,
                 ffn=build_ffn(config, i, config.dropout),
             )
             for i in range(config.n_layers)
@@ -61,7 +70,8 @@ class FramerModel(nn.Module):
         # text_only builds just the LLM core (no multimodal submodules).
         self.text_only = config.text_only
         if config.text_only:
-            self._init_weights()
+            if init_weights:
+                self.init_weights_()
             return
 
         # Vision encoder
@@ -71,25 +81,23 @@ class FramerModel(nn.Module):
             config.vision_n_layers, config.dropout
         )
         self.vision_projector = MultimodalProjector(config.vision_d_model, config.d_model)
-
-        # Diffusion for image generation
-        self.diffusion = DiffusionModule(
-            in_channels=3,
-            base_channels=config.diffusion_channels,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-            beta_start=config.beta_start,
-            beta_end=config.beta_end,
+        # With tiling on, image_size is the tile size and effective resolution
+        # comes from the tile count instead.
+        self.tiler = (
+            DynamicTiler(config.image_size, config.vision_max_tiles, config.vision_thumbnail)
+            if config.vision_tiling
+            else None
         )
 
-        # Video generator
-        self.video_gen = VideoGenerator(
-            frames=config.video_frames,
-            resolution=config.video_resolution,
-            base_channels=config.diffusion_channels // 2,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-        )
+        # Image generation: pixel U-Net or latent diffusion transformer,
+        # selected by config.image_gen_arch. Both expose the same
+        # forward(images, context) -> loss and sample(shape, context, device).
+        self.diffusion = build_image_generator(config)
+
+        # Video generation: 3D U-Net or spacetime diffusion transformer,
+        # selected by config.video_gen_arch. Both expose the same
+        # forward(video, context) -> loss and sample(batch, context, device).
+        self.video_gen = build_video_generator(config)
 
         # Audio encoder (audio/speech understanding)
         self.audio_encoder = AudioEncoder(
@@ -105,21 +113,50 @@ class FramerModel(nn.Module):
         )
         self.audio_projector = MultimodalProjector(config.audio_d_model, config.d_model)
 
-        # Audio generator (text-to-audio / speech)
-        self.audio_gen = AudioGenerator(
-            n_mels=config.audio_n_mels,
-            n_frames=config.audio_gen_frames,
-            base_channels=config.audio_gen_channels,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-            sample_rate=config.audio_sample_rate,
-            n_fft=config.audio_n_fft,
-            hop_length=config.audio_hop_length,
-        )
+        # Audio generation: mel diffusion or RVQ acoustic tokens, selected by
+        # config.audio_gen_arch. Both expose forward(target, context) -> loss.
+        self.audio_gen = build_audio_generator(config)
 
-        self._init_weights()
+        if init_weights:
+            self.init_weights_()
 
-    def _init_weights(self):
+    @classmethod
+    def from_config_meta(cls, config) -> "FramerModel":
+        """Build the model's *shapes* on the meta device, allocating nothing.
+
+        A 2T preset is 3.6 TiB in bf16, so it cannot be constructed on one host
+        even to be sharded. The meta build gives the sharding machinery a module
+        tree to work from; materialize it per-rank afterwards::
+
+            model = FramerModel.from_config_meta(config)
+            # ... apply FSDP / expert-parallel sharding to the meta module ...
+            model.to_empty(device="cuda")
+            model.init_weights_(buffer_device="cuda")
+
+        Weight initialization is skipped here because ``nn.init.normal_`` fails
+        on meta tensors; call :meth:`init_weights_` once real storage exists.
+        """
+        with torch.device("meta"):
+            return cls(config, init_weights=False)
+
+    @torch.no_grad()
+    def init_weights_(self, buffer_device=None) -> "FramerModel":
+        """Initialize parameters and rebuild derived buffers, in place.
+
+        Safe to call after ``to_empty(device=...)``, which allocates storage
+        without contents: parameters get their distribution and every module
+        owning a derived buffer (RoPE frequencies, noise schedules, mel
+        filterbanks) recomputes it. Idempotent, so re-running it simply
+        reinitializes.
+        """
+        # Let every module that knows how to initialize itself do so first. On a
+        # normal build this repeats what __init__ already did; after to_empty()
+        # it is the only thing standing between the convolutions, norms, and
+        # positional parameters and uninitialized memory.
+        for module in self.modules():
+            if module is not self and hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -136,6 +173,65 @@ class FramerModel(nn.Module):
                 module.out_proj.weight.data.mul_(scale)
             elif isinstance(module, FeedForward):
                 module.w2.weight.data.mul_(scale)
+
+        self.reset_buffers(device=buffer_device)
+        return self
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None) -> "FramerModel":
+        """Recompute every derived buffer in the tree.
+
+        Buffers are computed, not learned, so ``to_empty()`` leaves them holding
+        uninitialized memory. Each owning module implements ``reset_buffers``;
+        this walks the tree and calls them.
+        """
+        for module in self.modules():
+            if module is not self and hasattr(module, "reset_buffers"):
+                module.reset_buffers(device)
+        return self
+
+    # ------------------------------------------------------------------
+    # Modality placement
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _scatter_modality_embeds(input_ids, x, embeds, placeholder_id):
+        """Write modality embeddings into the positions holding a placeholder.
+
+        The sequence already reserves one token per embedding, so this replaces
+        rather than inserts: length, attention mask, and label alignment are all
+        unchanged. A count mismatch means the sequence builder and the encoder
+        disagree, which would otherwise corrupt the sequence silently, so it
+        raises.
+        """
+        mask = input_ids == placeholder_id
+        slots = int(mask.sum())
+        if slots == 0:
+            return x
+
+        flat = embeds.reshape(-1, x.shape[-1])
+        if flat.shape[0] != slots:
+            raise ValueError(
+                f"{slots} placeholder tokens for id {placeholder_id} but "
+                f"{flat.shape[0]} embeddings to place"
+            )
+        return x.masked_scatter(mask.unsqueeze(-1), flat.to(x.dtype))
+
+    def encode_image_tiles(self, images: torch.Tensor) -> torch.Tensor:
+        """Encode an image as tiles plus a thumbnail, or as one whole image.
+
+        Returns ``(B, tokens, d_model)``. With tiling on, every tile is encoded
+        in one batched forward and the results are concatenated, so the token
+        count grows with tile count while attention cost stays per-tile.
+        """
+        if not getattr(self, "tiler", None):
+            return self.vision_projector(self.vision_encoder(images))
+
+        tiles, _ = self.tiler(images)
+        B, n_tiles = tiles.shape[:2]
+        flat = tiles.reshape(B * n_tiles, *tiles.shape[2:])
+        encoded = self.vision_projector(self.vision_encoder(flat))
+        return encoded.reshape(B, n_tiles * encoded.shape[1], encoded.shape[2])
 
     # ------------------------------------------------------------------
     # Transformer stack
@@ -167,15 +263,25 @@ class FramerModel(nn.Module):
         prefix_embeds: torch.Tensor = None,
         past_kvs: list = None,
         use_cache: bool = False,
+        modality_embeds: dict = None,
     ) -> dict:
         """Core language-model forward.
 
         Returns a dict with ``logits`` (token positions only), ``hidden`` (the
         pre-head normalized hidden states over token positions), ``aux`` (summed
         MoE auxiliary loss or None), and ``past_kvs`` (updated cache or None).
+
+        ``modality_embeds`` maps a placeholder token id to the embeddings that
+        replace it, used when ``mm_token_placement="interleaved"``. Placement
+        then costs no extra sequence length and preserves where each modality
+        appeared relative to the text, which prefix concatenation discards.
         """
         B, T = input_ids.shape
         x = self.token_embed(input_ids)
+
+        if modality_embeds:
+            for placeholder_id, embeds in modality_embeds.items():
+                x = self._scatter_modality_embeds(input_ids, x, embeds, placeholder_id)
 
         prefix_len = 0
         if prefix_embeds is not None:
@@ -255,18 +361,34 @@ class FramerModel(nn.Module):
         """Unified forward pass. Returns per-modality losses for present inputs."""
         results = {}
 
-        # Encode input modalities and build the prefix prepended to the tokens
-        prefix_parts = []
+        # Encode input modalities. Under "prefix" they are concatenated ahead of
+        # the tokens; under "interleaved" they are written into placeholder
+        # positions, so an image sits where it was mentioned.
+        interleaved = self.config.mm_token_placement == "interleaved"
+        prefix_parts, modality_embeds = [], {}
+
         if images is not None:
-            prefix_parts.append(self.forward_vision(images))
+            encoded = self.encode_image_tiles(images)
+            if interleaved:
+                modality_embeds[self.IMAGE_PLACEHOLDER_ID] = encoded
+            else:
+                prefix_parts.append(encoded)
         if audio is not None:
-            prefix_parts.append(self.forward_audio(audio))
+            encoded = self.forward_audio(audio)
+            if interleaved:
+                modality_embeds[self.AUDIO_PLACEHOLDER_ID] = encoded
+            else:
+                prefix_parts.append(encoded)
+
         prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
         # Text/code generation (single LM pass reused for conditioning below)
         text_context = None
         if input_ids is not None:
-            lm = self.forward_lm(input_ids, attention_mask, prefix_embeds)
+            lm = self.forward_lm(
+                input_ids, attention_mask, prefix_embeds,
+                modality_embeds=modality_embeds or None,
+            )
             results["logits"] = lm["logits"]
             # Reuse the LM hidden states as generation conditioning (detached to
             # keep decoder losses from backpropagating through the whole stack).

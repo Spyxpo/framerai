@@ -108,16 +108,20 @@ Keep the subject line under 72 characters and in the imperative mood.
 Match what CI runs before opening a pull request.
 
 ```bash
-# Model
-ruff check model build.py
-python -m compileall -q model build.py
+# Model (install once: pip install -r requirements.txt -r requirements-dev.txt)
+ruff check model build.py scripts tests conftest.py
+python -m compileall -q model build.py scripts tests conftest.py
+python -m pytest -q
 
 # Backend
-cd backend && npm ci && for f in $(find src -name '*.js'); do node --check "$f"; done
+cd backend && npm ci && for f in $(find src -name '*.js'); do node --check "$f"; done && npm test
 
 # Website
-cd website && npm ci && npm run build
+cd website && npm ci && npm run lint && npm test && npm run build
 ```
+
+The full `ruff.toml` rule set is blocking in CI, not advisory. `requirements-dev.txt`
+pulls in `requirements.txt`, so one install covers both runtime and tooling.
 
 ## Pull requests
 

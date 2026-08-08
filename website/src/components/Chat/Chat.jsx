@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";

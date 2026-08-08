@@ -17,7 +17,7 @@ class TemporalAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, H*W, C) where T is frames
@@ -30,12 +30,9 @@ class TemporalAttention(nn.Module):
         qkv = self.qkv(h).reshape(B * S, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        scale = math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) / scale
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
+        out = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.dropout_p if self.training else 0.0
+        )
         out = out.transpose(1, 2).contiguous().reshape(B * S, T, C)
         out = self.out(out)
         out = out.reshape(B, S, T, C).permute(0, 2, 1, 3)
@@ -156,10 +153,9 @@ class VideoUNet(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         # x: (B, C, T, H, W)
-        t_emb = self.time_embed(self._sinusoidal_embedding(t, x.shape[1] * 4 // 4))
-        # Adjust time embed dim
-        t_emb_ch = self._sinusoidal_embedding(t, self.conv_in.out_channels)
-        t_emb = self.time_embed(t_emb_ch)
+        # The sinusoidal width must match time_embed's input, which is the
+        # U-Net's base channel count - not the input channel count.
+        t_emb = self.time_embed(self._sinusoidal_embedding(t, self.conv_in.out_channels))
 
         h = self.conv_in(x)
 
@@ -212,6 +208,19 @@ class VideoGenerator(nn.Module):
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("sqrt_alpha_cumprod", torch.sqrt(alpha_cumprod))
         self.register_buffer("sqrt_one_minus_alpha_cumprod", torch.sqrt(1 - alpha_cumprod))
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the noise schedule, for use after a meta-device build."""
+        device = device or self.betas.device
+        betas = torch.linspace(1e-4, 0.02, self.num_steps, device=device)
+        alphas = 1.0 - betas
+        alpha_cumprod = torch.cumprod(alphas, dim=0)
+        self.betas = betas
+        self.alphas = alphas
+        self.alpha_cumprod = alpha_cumprod
+        self.sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod)
+        self.sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod)
 
     def forward(self, video: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         """Training: predict noise added to video."""

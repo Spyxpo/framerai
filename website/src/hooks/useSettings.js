@@ -46,14 +46,42 @@ export const SETTING_FIELDS = [
   },
 ];
 
+// Square-only sizes, kept for compatibility with older saved settings.
 export const RESOLUTIONS = [64, 128, 256, 512];
+
+// Aspect ratios the backend accepts, with the size they resolve to at each tier.
+export const ASPECT_RATIOS = [
+  { value: "1:1", label: "Square" },
+  { value: "4:3", label: "Standard" },
+  { value: "3:4", label: "Standard tall" },
+  { value: "3:2", label: "Landscape" },
+  { value: "2:3", label: "Portrait" },
+  { value: "16:9", label: "Widescreen" },
+  { value: "9:16", label: "Vertical" },
+  { value: "21:9", label: "Ultrawide" },
+];
+
+export const SIZE_TIERS = [256, 512, 768, 1024];
+
+const MULTIPLE = 16;
+
+/** Mirrors model/utils/image_sizing.py so the panel can preview the real size. */
+export function resolveSize(aspect, tier) {
+  const entry = ASPECT_RATIOS.find((r) => r.value === aspect) || ASPECT_RATIOS[0];
+  const [w, h] = entry.value.split(":").map(Number);
+  const ratio = w / h;
+  const area = tier * tier;
+  const round = (value) => Math.max(MULTIPLE, Math.round(value / MULTIPLE) * MULTIPLE);
+  return { width: round(Math.sqrt(area * ratio)), height: round(Math.sqrt(area / ratio)) };
+}
 
 export const DEFAULT_SETTINGS = {
   temperature: 0.7,
   top_p: 0.9,
   top_k: 50,
   max_new_tokens: 512,
-  resolution: 256,
+  aspect: "1:1",
+  sizeTier: 512,
   num_frames: 16,
 };
 
