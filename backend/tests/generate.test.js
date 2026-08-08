@@ -1,3 +1,14 @@
+/**
+ * Generation route behaviour: validation, forwarding, and uploads.
+ *
+ * Rate limiting is covered by limits.test.js, so it is raised out of the way
+ * here. The limits are read from the environment when the app module loads, and
+ * `node --test` runs each file in its own process, so this does not leak.
+ */
+
+process.env.GENERATE_RATE_LIMIT_MAX = "500";
+process.env.RATE_LIMIT_MAX = "1000";
+
 const test = require("node:test");
 const { after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -22,21 +33,70 @@ function lastCall(name) {
   return [...calls].reverse().find((c) => c.name === name);
 }
 
-test("image generation forwards the prompt and defaults", async () => {
+// Only the size fields the caller actually set are forwarded, so the worker can
+// fall through to prompt intent and then to the model's own default.
+function sizeArg(call) {
+  return Object.fromEntries(Object.entries(call.args[2]).filter(([, v]) => v !== undefined));
+}
+
+test("image generation forwards the prompt and no size at all", async () => {
   const res = await request(app).post("/api/generate/image").send({ prompt: "a cat" });
 
   assert.equal(res.status, 200);
   assert.equal(res.body.prompt, "a cat");
-  assert.deepEqual(lastCall("generateImage").args, ["a cat", 1, 256]);
+  const call = lastCall("generateImage");
+  assert.deepEqual([call.args[0], call.args[1]], ["a cat", 1]);
+  assert.deepEqual(sizeArg(call), {});
 });
 
-test("image generation forwards explicit count and resolution", async () => {
+test("image generation forwards an explicit width and height", async () => {
   const res = await request(app)
     .post("/api/generate/image")
-    .send({ prompt: "a cat", num_images: 3, resolution: 512 });
+    .send({ prompt: "a cat", num_images: 3, width: 1024, height: 768 });
 
   assert.equal(res.status, 200);
-  assert.deepEqual(lastCall("generateImage").args, ["a cat", 3, 512]);
+  assert.deepEqual(sizeArg(lastCall("generateImage")), { width: 1024, height: 768 });
+});
+
+test("image generation forwards an aspect ratio and size tier", async () => {
+  const res = await request(app)
+    .post("/api/generate/image")
+    .send({ prompt: "a cat", aspect: "16:9", tier: 1024, seed: 7 });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(sizeArg(lastCall("generateImage")), { aspect: "16:9", tier: 1024, seed: 7 });
+});
+
+test("the deprecated square resolution field still works", async () => {
+  const res = await request(app)
+    .post("/api/generate/image")
+    .send({ prompt: "a cat", resolution: 512 });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(sizeArg(lastCall("generateImage")), { resolution: 512 });
+});
+
+test("width without height is rejected", async () => {
+  const res = await request(app).post("/api/generate/image").send({ prompt: "a cat", width: 512 });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, "VALIDATION_ERROR");
+  assert.deepEqual(
+    res.body.details.map((d) => d.field),
+    ["height"]
+  );
+});
+
+test("out-of-range dimensions and unknown ratios are rejected", async () => {
+  const res = await request(app)
+    .post("/api/generate/image")
+    .send({ prompt: "a cat", width: 99999, height: 32, aspect: "5:1" });
+
+  assert.equal(res.status, 400);
+  assert.deepEqual(
+    res.body.details.map((d) => d.field),
+    ["width", "height", "aspect"]
+  );
 });
 
 test("every bad field is reported in one response", async () => {

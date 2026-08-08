@@ -246,15 +246,31 @@ function generateTextResponse(content, messages) {
   return `I understand your message: "${content}"\n\nAs FramerAI, I can help with text, code, image, video, and audio generation. To unlock full capabilities, train the model:\n\n\`\`\`bash\npython build.py --mode all --size tiny\n\`\`\`\n\nThen set MODEL_ENABLED=true and restart the backend.`;
 }
 
-async function generateImage(prompt, numImages = 1, resolution = 256) {
+async function generateImage(prompt, numImages = 1, size = {}) {
+  // The worker resolves the final dimensions: explicit width/height win, then an
+  // aspect ratio at a size tier, then whatever the prompt itself asks for, then
+  // the configured default. It reports back what it understood.
+  const payload = { prompt, num_images: numImages };
+  for (const key of ["width", "height", "aspect", "tier", "seed", "resolution"]) {
+    if (size[key] !== undefined && size[key] !== null) payload[key] = size[key];
+  }
+
   if (bridge.available()) {
     try {
-      const result = await bridge.request("image", { prompt, resolution });
+      const result = await bridge.request("image", payload);
       return {
         id: randomUUID(),
         prompt,
         images: [{ id: randomUUID(), url: `${GENERATED_URL}/${result.file}`, placeholder: false }],
-        metadata: { resolution, model: "framerai-diffusion" },
+        metadata: {
+          width: result.width,
+          height: result.height,
+          aspect: result.aspect,
+          source: result.source,
+          snapped: result.snapped,
+          seed: result.seed,
+          model: "framerai-diffusion",
+        },
       };
     } catch (err) {
       console.warn(`[model] image fallback: ${err.message}`);
@@ -269,7 +285,7 @@ async function generateImage(prompt, numImages = 1, resolution = 256) {
       placeholder: true,
       message: "Train the model to generate actual images",
     })),
-    metadata: { resolution, model: "framerai-diffusion" },
+    metadata: { ...size, model: "framerai-diffusion" },
   };
 }
 

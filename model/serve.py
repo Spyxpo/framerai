@@ -96,8 +96,20 @@ def handle(gen, op, params):
         return {"content": gen.generate_code(prompt, **code_kwargs)}
 
     if op == "image":
-        images = gen.generate_image(prompt, num_images=1, resolution=params.get("resolution", 256))
-        return {"file": _save_image(images, out_dir)}
+        images, request = gen.generate_image(
+            prompt,
+            num_images=params.get("num_images", 1),
+            width=params.get("width"),
+            height=params.get("height"),
+            aspect=params.get("aspect"),
+            tier=params.get("tier"),
+            seed=params.get("seed"),
+            resolution=params.get("resolution"),
+            return_request=True,
+        )
+        # The resolved size comes back so the caller can tell what was
+        # understood, especially when it was read out of the prompt.
+        return {"file": _save_image(images, out_dir), **request.to_dict()}
 
     if op == "video":
         frames = gen.generate_video(prompt, num_frames=params.get("num_frames", 16))

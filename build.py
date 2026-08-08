@@ -262,7 +262,7 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                 if steps % 20 == 0:
                     logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}")
 
-    _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.diffusion_resolution), "target_images", "image")
+    _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.image_train_resolution), "target_images", "image")
     _run(AudioCaptionDataset(data_dir, tokenizer, config), "target_audio", "audio")
 
 

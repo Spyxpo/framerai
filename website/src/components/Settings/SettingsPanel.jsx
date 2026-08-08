@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { X, RotateCcw } from "lucide-react";
-import { SETTING_FIELDS, RESOLUTIONS } from "../../hooks/useSettings";
+import { SETTING_FIELDS, ASPECT_RATIOS, SIZE_TIERS, resolveSize } from "../../hooks/useSettings";
 
 export default function SettingsPanel({ open, settings, model, onChange, onReset, onClose }) {
   const panelRef = useRef(null);
@@ -18,6 +18,8 @@ export default function SettingsPanel({ open, settings, model, onChange, onReset
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const resolved = resolveSize(settings.aspect, settings.sizeTier);
 
   return (
     <div className="settings-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -66,21 +68,45 @@ export default function SettingsPanel({ open, settings, model, onChange, onReset
           ))}
 
           <div className="setting">
-            <label htmlFor="setting-resolution">Image resolution</label>
+            <label htmlFor="setting-aspect">
+              Aspect ratio
+              <output htmlFor="setting-aspect">{resolved.width} x {resolved.height}</output>
+            </label>
             <select
-              id="setting-resolution"
-              value={settings.resolution}
-              onChange={(e) => onChange("resolution", Number(e.target.value))}
-              aria-describedby="setting-resolution-help"
+              id="setting-aspect"
+              value={settings.aspect}
+              onChange={(e) => onChange("aspect", e.target.value)}
+              aria-describedby="setting-aspect-help"
             >
-              {RESOLUTIONS.map((size) => (
-                <option key={size} value={size}>
-                  {size} x {size}
+              {ASPECT_RATIOS.map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label} ({value})
                 </option>
               ))}
             </select>
-            <p className="setting-help" id="setting-resolution-help">
-              Larger images take longer to generate.
+            <p className="setting-help" id="setting-aspect-help">
+              A prompt asking for a shape, such as &quot;make it 16:9&quot; or
+              &quot;portrait&quot;, overrides this.
+            </p>
+          </div>
+
+          <div className="setting">
+            <label htmlFor="setting-size-tier">Image size</label>
+            <select
+              id="setting-size-tier"
+              value={settings.sizeTier}
+              onChange={(e) => onChange("sizeTier", Number(e.target.value))}
+              aria-describedby="setting-size-tier-help"
+            >
+              {SIZE_TIERS.map((tier) => (
+                <option key={tier} value={tier}>
+                  {tier}px
+                </option>
+              ))}
+            </select>
+            <p className="setting-help" id="setting-size-tier-help">
+              Every aspect ratio holds roughly the same pixel count at a given size, so
+              larger sizes take longer regardless of shape.
             </p>
           </div>
         </div>

@@ -51,7 +51,8 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - **Text generation** - chat and Q&A with autoregressive decoding (top-k, top-p, temperature).
 - **Code generation** - lower-temperature sampling for more deterministic output.
 - **Image generation** - text-to-image via a latent diffusion transformer with rectified flow
-  and classifier-free guidance (the small presets keep a pixel-space U-Net).
+  and classifier-free guidance, at 512x512 by default and any aspect ratio on request
+  (the small presets keep a pixel-space U-Net).
 - **Video generation** - text-to-video with spatial-temporal attention.
 - **Audio generation** - text-to-audio and speech via mel diffusion with Griffin-Lim reconstruction.
 - **Image understanding** - a vision encoder processes uploaded images for multimodal chat.
@@ -265,6 +266,48 @@ the same numbers programmatically.
 > and the evaluation to measure progress; it does not provide trained frontier weights. See
 > [TODOS.md](TODOS.md) for the per-modality architecture roadmap.
 
+## Image size and aspect ratio
+
+Images are **512x512** by default. A request can ask for a different shape three ways, and the
+more explicit one always wins:
+
+1. **Explicit dimensions** — `width` and `height`, given together.
+2. **A named aspect ratio** at a size tier — `aspect` and `tier`.
+3. **The prompt itself** — "make it 16:9", "1024x768", "a widescreen shot", "phone wallpaper",
+   "a 4k panorama".
+
+Otherwise the configured default applies. The response reports the resolved `width`, `height`,
+`aspect`, and a `source` of `explicit`, `prompt`, or `default`, so it is always clear what was
+understood rather than guessed at silently.
+
+Every named ratio resolves to a bucket holding roughly the same pixel count, so shape does not
+change how long generation takes. At the 512 tier:
+
+| Ratio | Size | Ratio | Size |
+|-------|------|-------|------|
+| `1:1` | 512 x 512 | `16:9` | 688 x 384 |
+| `4:3` | 592 x 448 | `9:16` | 384 x 688 |
+| `3:4` | 448 x 592 | `21:9` | 784 x 336 |
+| `3:2` | 624 x 416 | `2:3` | 416 x 624 |
+
+Tiers of 256, 512, 768, and 1024 rescale the same table. Both dimensions are always a multiple
+of 16, because the latent grid must divide by `vae_downsample * dit_patch_size`; an off-bucket
+request is snapped to the nearest legal size and the response says so via `snapped`.
+
+A sizing phrase recognised in the prompt is removed from the text used for conditioning, but
+only when it reads as an instruction. "a woman in portrait orientation" generates a 416x624
+image of "a woman"; "a portrait of a woman" also generates 416x624, but keeps the full prompt,
+because there the word is the subject rather than the instruction.
+
+```bash
+curl -s localhost:3001/api/generate/image \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "a red bicycle", "aspect": "21:9", "tier": 1024}'
+```
+
+Arbitrary aspect ratios need `image_gen_arch="latent_dit"`. The pixel-space U-Net generates
+square images only and says so rather than producing something misshapen.
+
 ## API endpoints
 
 | Method | Endpoint | Description |
@@ -273,7 +316,7 @@ the same numbers programmatically.
 | POST | `/api/chat/conversations` | Create conversation |
 | GET | `/api/chat/conversations` | List conversations |
 | POST | `/api/chat/conversations/:id/messages` | Send message |
-| POST | `/api/generate/image` | Generate image from text |
+| POST | `/api/generate/image` | Generate image from text (`width`+`height`, or `aspect`+`tier`, or `seed`; `resolution` is the deprecated square-only alias) |
 | POST | `/api/generate/video` | Generate video from text |
 | POST | `/api/generate/audio` | Generate audio/speech from text |
 | POST | `/api/generate/code` | Generate code |
