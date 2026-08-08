@@ -9,6 +9,8 @@ ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 # default so the small presets stay laptop-runnable, and opts in per preset.
 IMAGE_GEN_ARCHS = ("unet", "latent_dit")
 VIDEO_GEN_ARCHS = ("unet3d", "spacetime_dit")
+AUDIO_GEN_ARCHS = ("mel_diffusion", "rvq_lm")
+VOCODER_ARCHS = ("griffin_lim", "istft")
 
 # Aspect ratios a request may name. Kept here so validate() can check the
 # configured default without importing the sizing helpers (and torch with them).
@@ -118,8 +120,31 @@ class FramerConfig:
     audio_n_layers: int = 12
 
     # Audio generation config (text-to-audio / speech)
+    # audio_gen_arch selects the decoder family. "mel_diffusion" treats a
+    # spectrogram as an image and inverts it with Griffin-Lim, which caps
+    # quality regardless of training; "rvq_lm" predicts discrete acoustic
+    # tokens and decodes them with a learned codec.
+    audio_gen_arch: str = "mel_diffusion"  # "mel_diffusion" | "rvq_lm"
     audio_gen_frames: int = 128
     audio_gen_channels: int = 128
+
+    # Neural audio codec (audio_gen_arch="rvq_lm")
+    codec_sample_rate: int = 24000
+    codec_hop: int = 320  # 75 Hz acoustic frame rate at 24 kHz
+    codec_base_channels: int = 64
+    rvq_n_quantizers: int = 8
+    rvq_codebook_size: int = 1024
+    rvq_codebook_dim: int = 256
+    rvq_quantizer_dropout: float = 0.0
+    audio_lm_d_model: int = 1024
+    audio_lm_n_layers: int = 12
+    audio_lm_n_heads: int = 16
+    vocoder_arch: str = "griffin_lim"  # "griffin_lim" | "istft"
+    vocoder_d_model: int = 512
+    vocoder_n_layers: int = 8
+    speaker_embed_dim: int = 256
+    use_speaker_conditioning: bool = False
+    use_ctc_head: bool = False
 
     # Code generation
     code_vocab_size: int = 50304  # shared vocab
@@ -253,6 +278,22 @@ class FramerConfig:
                 problems.append(
                     f"image_max_pixels ({self.image_max_pixels}) is below the smallest bucket"
                 )
+
+            if self.audio_gen_arch not in AUDIO_GEN_ARCHS:
+                problems.append(
+                    f"audio_gen_arch ('{self.audio_gen_arch}') must be one of "
+                    f"{', '.join(AUDIO_GEN_ARCHS)}"
+                )
+            if self.vocoder_arch not in VOCODER_ARCHS:
+                problems.append(
+                    f"vocoder_arch ('{self.vocoder_arch}') must be one of "
+                    f"{', '.join(VOCODER_ARCHS)}"
+                )
+            if self.audio_gen_arch == "rvq_lm":
+                if self.rvq_n_quantizers < 1:
+                    problems.append("rvq_lm requires rvq_n_quantizers >= 1")
+                if self.audio_lm_d_model % self.audio_lm_n_heads:
+                    problems.append("audio_lm_d_model must be divisible by audio_lm_n_heads")
 
             if self.video_gen_arch not in VIDEO_GEN_ARCHS:
                 problems.append(

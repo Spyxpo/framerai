@@ -90,13 +90,16 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Audio — neural codec and vocoder
 
-- [ ] Residual-vector-quantized audio codec at 24 kHz, giving discrete acoustic tokens the
+- [x] Residual-vector-quantized audio codec at 24 kHz, giving discrete acoustic tokens the
       language model can predict directly.
-- [ ] ISTFT-head neural vocoder replacing Griffin-Lim phase reconstruction, which caps
+- [x] ISTFT-head neural vocoder replacing Griffin-Lim phase reconstruction, which caps
       output quality no matter how well the model is trained.
-- [ ] Speaker and prosody conditioning from a reference clip.
-- [ ] CTC auxiliary head and aligned `<audio>` token placement, so transcription is trained
-      rather than hoped for.
+- [x] Speaker conditioning from a reference clip (`use_speaker_conditioning`).
+- [x] CTC auxiliary head, so transcription can be trained rather than hoped for. Aligned
+      `<audio>` token placement is part of the interleaved-token work below.
+- [ ] Wire the CTC head into the training loop; the module exists but nothing calls it yet.
+- [ ] Adversarial and multi-scale spectral losses for the codec (MSE alone under-trains it).
+- [ ] Prosody conditioning beyond speaker identity.
 - [ ] Streaming audio generation and playback over the WebSocket.
 - [ ] Mel-spectrogram cache to speed up audio training.
 

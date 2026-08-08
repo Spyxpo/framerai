@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Residual vector-quantized audio codec and neural vocoder**
+  (`audio_gen_arch="rvq_lm"`). A causal convolutional codec at 24 kHz with a
+  75 Hz acoustic frame rate turns audio into discrete tokens
+  (`model/modules/rvq.py`, `model/modules/audio_codec.py`), which a
+  text-conditioned transformer predicts as a classification problem
+  (`model/modules/audio_lm.py`, `model/modules/rvq_audio.py`) rather than
+  regressing onto a spectrogram. An inverse-STFT vocoder
+  (`model/modules/vocoder.py`) predicts magnitude *and* phase and inverts once,
+  replacing 32 Griffin-Lim iterations that guessed phase back after discarding
+  it - the ceiling no amount of training could lift. Adds speaker conditioning
+  from a reference clip and a CTC head so transcription can be trained rather
+  than hoped for. The four large MoE presets opt in; the default stays
+  `mel_diffusion`.
 - **Spacetime diffusion transformer for video generation**
   (`video_gen_arch="spacetime_dit"`). A causal 3D VAE compressing 4x in time and
   8x in space (`model/modules/video_vae.py`), and a transformer with factorised
@@ -98,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `build.py` refuses to instantiate a config that cannot fit in memory, naming
   `--estimate` and `--force`, instead of being OOM-killed without explanation.
 - **`framer-2t-a49b`, the two-trillion-parameter all-modality flagship.** 1.96T
-  text backbone, 49.40B active per token, 39.00B across the vision and audio
+  text backbone, 49.40B active per token, 39.32B across the vision and audio
   encoders and the image, video, and audio decoders, for 2.00T in total.
   `d_model=10240`, 84 layers, 80/8 heads, 16K context, 384 fine-grained experts
   with top-4 routing and one shared expert. 384 is 3 x 128, so the experts shard

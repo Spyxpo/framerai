@@ -68,11 +68,11 @@ def test_multimodal_breakdown_covers_every_tower():
     assert set(counts) == set(MULTIMODAL_TOWERS) | {"total"}
     assert counts["total"] == sum(counts[name] for name in MULTIMODAL_TOWERS)
     # Arch-selected slots are populated; the alternatives report zero. The
-    # default image and video paths are the original U-Nets, which have no
-    # autoencoder, so both VAE slots are empty here.
-    latent_only = {"image_vae", "video_vae"}
-    assert all(counts[name] > 0 for name in set(MULTIMODAL_TOWERS) - latent_only)
-    assert all(counts[name] == 0 for name in latent_only)
+    # defaults are the original U-Nets and mel diffusion, so the autoencoder,
+    # codec, and vocoder slots are empty here.
+    unused_by_default = {"image_vae", "video_vae", "audio_codec", "audio_vocoder"}
+    assert all(counts[name] > 0 for name in set(MULTIMODAL_TOWERS) - unused_by_default)
+    assert all(counts[name] == 0 for name in unused_by_default)
 
 
 def test_latent_dit_moves_the_image_budget_into_the_vae_and_denoiser():
@@ -124,3 +124,21 @@ def test_strict_mode_surfaces_a_broken_tower():
     assert estimate_multimodal_params(cfg) is None
     with pytest.raises(ValueError):
         estimate_multimodal_params(cfg, strict=True)
+
+
+def test_rvq_audio_moves_the_budget_into_the_codec_and_vocoder():
+    mel = estimate_multimodal_params(tiny_multimodal_config())
+    rvq = estimate_multimodal_params(
+        tiny_multimodal_config(
+            audio_gen_arch="rvq_lm", vocoder_arch="istft", codec_base_channels=8,
+            codec_hop=32, rvq_n_quantizers=2, rvq_codebook_size=16,
+            rvq_codebook_dim=16, audio_lm_d_model=32, audio_lm_n_layers=1,
+            audio_lm_n_heads=4, vocoder_d_model=32, vocoder_n_layers=1,
+        )
+    )
+    assert mel["audio_codec"] == 0 and rvq["audio_codec"] > 0
+    assert mel["audio_vocoder"] == 0 and rvq["audio_vocoder"] > 0
+    # Mel diffusion is replaced outright, not supplemented.
+    assert mel["audio_diffusion"] > 0 and rvq["audio_diffusion"] == 0
+    for name in ("vision_encoder", "audio_encoder", "image_diffusion", "video_diffusion"):
+        assert mel[name] == rvq[name]

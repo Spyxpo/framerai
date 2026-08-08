@@ -77,6 +77,10 @@ _MOE = {
         video_gen_arch="spacetime_dit",
         video_vae_latent_channels=8, video_vae_base_channels=96,
         video_dit_d_model=1152, video_dit_n_layers=18, video_dit_n_heads=9,
+        audio_gen_arch="rvq_lm", vocoder_arch="istft",
+        codec_base_channels=64, rvq_n_quantizers=8, rvq_codebook_size=1024,
+        audio_lm_d_model=1024, audio_lm_n_layers=12, audio_lm_n_heads=16,
+        vocoder_d_model=512, vocoder_n_layers=8, use_speaker_conditioning=True,
     ),
     "framer-200b-a20b": dict(  # ~200B total across all modalities / ~20B active
         d_model=5120, n_layers=48, n_heads=40, n_kv_heads=8, d_ff=17920, max_seq_len=8192,
@@ -93,6 +97,10 @@ _MOE = {
         video_gen_arch="spacetime_dit",
         video_vae_latent_channels=8, video_vae_base_channels=128,
         video_dit_d_model=1536, video_dit_n_layers=24, video_dit_n_heads=12,
+        audio_gen_arch="rvq_lm", vocoder_arch="istft",
+        codec_base_channels=64, rvq_n_quantizers=8, rvq_codebook_size=2048,
+        audio_lm_d_model=1536, audio_lm_n_layers=16, audio_lm_n_heads=24,
+        vocoder_d_model=768, vocoder_n_layers=8, use_speaker_conditioning=True,
     ),
     "framer-1t-a32b": dict(  # ~1.0T total across all modalities / ~32B active (cluster-only)
         d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672, max_seq_len=8192,
@@ -109,6 +117,10 @@ _MOE = {
         video_gen_arch="spacetime_dit",
         video_vae_latent_channels=8, video_vae_base_channels=128,
         video_dit_d_model=1920, video_dit_n_layers=28, video_dit_n_heads=15,
+        audio_gen_arch="rvq_lm", vocoder_arch="istft",
+        codec_base_channels=96, rvq_n_quantizers=12, rvq_codebook_size=2048,
+        audio_lm_d_model=2048, audio_lm_n_layers=20, audio_lm_n_heads=32,
+        vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
     ),
     "framer-2t-a49b": dict(  # ~2.0T total across all modalities / ~49B active (cluster-only)
         # 384 experts is 3 * 128, so it divides evenly across 8/16/32/64/128-way
@@ -134,6 +146,13 @@ _MOE = {
         video_gen_arch="spacetime_dit",
         video_vae_latent_channels=8, video_vae_base_channels=128,
         video_dit_d_model=2304, video_dit_n_layers=32, video_dit_n_heads=18,
+        # Discrete acoustic tokens plus a learned vocoder. Mel diffusion with
+        # Griffin-Lim caps quality regardless of training; the small presets
+        # keep it, the flagship does not.
+        audio_gen_arch="rvq_lm", vocoder_arch="istft",
+        codec_base_channels=96, rvq_n_quantizers=12, rvq_codebook_size=2048,
+        audio_lm_d_model=2560, audio_lm_n_layers=24, audio_lm_n_heads=40,
+        vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
     ),
 }
 

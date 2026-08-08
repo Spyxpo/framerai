@@ -55,7 +55,8 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
   (the small presets keep a pixel-space U-Net).
 - **Video generation** - text-to-video via a causal 3D VAE and a spacetime diffusion
   transformer, with variable duration, resolution, and frame rate.
-- **Audio generation** - text-to-audio and speech via mel diffusion with Griffin-Lim reconstruction.
+- **Audio generation** - text-to-audio and speech via discrete acoustic tokens from a residual
+  vector-quantized codec, decoded through a neural vocoder, with speaker conditioning.
 - **Image understanding** - a vision encoder processes uploaded images for multimodal chat.
 - **Audio understanding** - an audio encoder transcribes and describes uploaded audio.
 - **Streaming** - WebSocket-based real-time token streaming.
@@ -84,7 +85,11 @@ FramerAI combines several neural architectures into one unified model:
   **spacetime diffusion transformer** with factorised spatial and temporal attention and
   frame-rate conditioning. Causal convolutions mean frame *t* never sees frame *t+1*, which is
   what makes variable duration and streaming decode possible. Selected by `video_gen_arch`.
-- **Audio generator** - text-conditioned mel diffusion with Griffin-Lim waveform reconstruction.
+- **Audio decoder** - a **residual vector-quantized codec** at 24 kHz turning audio into
+  discrete tokens the language model predicts directly, and an **inverse-STFT neural vocoder**
+  that reconstructs phase instead of guessing it back. Speaker conditioning from a reference
+  clip, and an optional CTC head so transcription is trained rather than hoped for. Selected by
+  `audio_gen_arch`; `mel_diffusion` keeps the original spectrogram path.
 - **Multimodal projector** - aligns vision and audio embeddings with the language model space.
 
 Input modalities (image and audio) are encoded and prepended to the token sequence;
@@ -208,10 +213,10 @@ model — the number that describes FramerAI as a multimodal system.
 | `framer-8b`        | 4096 | 32 | 32 / 8 | ~7.2B  | ~7.2B  | ~596M  | ~7.8B  |
 | `framer-tiny-moe`  | 256  | 6  | 8 / 4  | ~33M   | ~21M   | ~20M   | ~53M   |
 | `framer-30b-a3b`   | 2048 | 28 | 16 / 4 | ~34B   | ~3.0B  | ~536M  | ~34B   |
-| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~5.5B  | ~158B  |
-| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~11.4B | ~205B  |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~5.4B  | ~157B  |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~11.5B | ~205B  |
 | `framer-1t-a32b`   | 8192  | 64 | 64 / 8 | ~983B  | ~32B   | ~21.1B | ~1.00T |
-| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~39.0B | **~2.00T** |
+| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~39.3B | **~2.00T** |
 
 `framer-2t-a49b` is the all-modality flagship: 2.00T parameters covering text, code, image,
 video, and audio, of which ~49B are active for any given text token. The four largest
@@ -245,12 +250,14 @@ Preset: framer-2t-a49b
     image_diffusion       10.23B
     video_vae            236.11M
     video_diffusion        7.33B
-    audio_diffusion        2.45B
-  Multimodal total      39.00B
+    audio_codec            2.69B
+    audio_vocoder         78.75M
+    audio_diffusion            0
+  Multimodal total      39.32B
 
   MODEL TOTAL            2.00T parameters
-  Weights (bf16)        3727.2 GiB
-  Training state       29817.2 GiB (weights + fp32 master + AdamW moments)
+  Weights (bf16)        3727.8 GiB
+  Training state       29822.0 GiB (weights + fp32 master + AdamW moments)
 ```
 
 `python build.py --list-presets` prints the whole ladder, and `estimate_params(config)` returns

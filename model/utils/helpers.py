@@ -1,6 +1,7 @@
 """Utility functions for FramerAI model."""
 
 import os
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -45,7 +46,8 @@ def _count_on_meta(factory) -> int:
 # than repeating the tuple.
 MULTIMODAL_TOWERS = (
     "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-    "image_vae", "image_diffusion", "video_vae", "video_diffusion", "audio_diffusion",
+    "image_vae", "image_diffusion", "video_vae", "video_diffusion",
+    "audio_codec", "audio_vocoder", "audio_diffusion",
 )
 
 
@@ -74,11 +76,13 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
     from ..modules.diffusion import DiffusionModule
     from ..modules.dit import DiT
     from ..modules.multimodal_projector import MultimodalProjector
+    from ..modules.rvq_audio import RVQAudioGenerator
     from ..modules.spacetime_dit import SpacetimeDiT
     from ..modules.vae import KLVAE
     from ..modules.video_generator import VideoGenerator
     from ..modules.video_vae import CausalVideoVAE
     from ..modules.vision_encoder import VisionEncoder
+    from ..modules.vocoder import NeuralVocoder
 
     d = config.d_model
     factories = {
@@ -143,10 +147,32 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
                 num_steps=config.diffusion_steps,
             )
         ),
+        # The audio decoder is arch-selected. Under "rvq_lm" the codec and the
+        # token language model replace the mel diffusion entirely.
+        # The vocoder is counted in its own slot, so it is excluded here rather
+        # than counted twice.
+        "audio_codec": lambda: (
+            RVQAudioGenerator(replace(config, vocoder_arch="griffin_lim"))
+            if config.audio_gen_arch == "rvq_lm"
+            else nn.Identity()
+        ),
+        "audio_vocoder": lambda: (
+            NeuralVocoder(
+                in_channels=config.rvq_codebook_dim, d_model=config.vocoder_d_model,
+                n_layers=config.vocoder_n_layers, n_fft=config.audio_n_fft * 2,
+                hop_length=config.codec_hop,
+            )
+            if config.audio_gen_arch == "rvq_lm" and config.vocoder_arch == "istft"
+            else nn.Identity()
+        ),
         # AudioGenerator's parameters all live in this inner diffusion module.
-        "audio_diffusion": lambda: DiffusionModule(
-            in_channels=1, base_channels=config.audio_gen_channels, context_dim=d,
-            num_steps=config.diffusion_steps,
+        "audio_diffusion": lambda: (
+            nn.Identity()
+            if config.audio_gen_arch == "rvq_lm"
+            else DiffusionModule(
+                in_channels=1, base_channels=config.audio_gen_channels, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
         ),
     }
 
