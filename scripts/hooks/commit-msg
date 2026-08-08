@@ -1,0 +1,15 @@
+#!/bin/sh
+# Reject AI co-author trailers before the commit exists.
+#
+# Once such a commit reaches a pull request, the pull request ref freezes on
+# merge and only GitHub Support can remove it. Catching it here costs nothing.
+#
+# Install: git config core.hooksPath scripts/hooks
+
+if grep -qiE '^co-authored-by:.*(anthropic|claude)' "$1"; then
+    echo "commit-msg: blocked - AI co-author trailer in the commit message." >&2
+    echo "  Remove the 'Co-Authored-By:' line and commit again." >&2
+    exit 1
+fi
+
+exit 0
