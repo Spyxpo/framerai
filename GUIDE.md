@@ -132,13 +132,26 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.2B | ~156B |
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~8.2B | ~202B |
 | `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~16.3B | ~999B |
+| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~31.9B | ~1.99T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
-The three largest scale their vision, audio, and diffusion towers with the backbone, so
-`framer-1t-a32b` holds a trillion parameters across all five modalities rather than in the
+The four largest scale their vision, audio, and diffusion towers with the backbone, so
+`framer-2t-a49b` holds two trillion parameters across all five modalities rather than in the
 language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
 `--preset NAME` selects any preset by name (also available on `train.sh`).
+
+### Why 384 fine-grained experts
+
+The flagship uses 384 experts of width 2048 rather than, say, 192 of width 4096. Total
+parameters scale with the expert *count*, active parameters with `n_experts_per_tok`, so
+narrower and more numerous experts buy sparsity at the same total. 384 is 3 x 128, which
+divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes - a placement
+constraint worth respecting before the sharding code exists rather than after.
+
+Attention is roughly 39% of the flagship's active budget (84 layers x 230.7M). That is a
+consequence of `d_model=10240` with only four routed experts per token, and it is the knob to
+turn if more of the active budget should sit in the FFN.
 
 ### How the estimator sizes a trillion parameters on a laptop
 
@@ -149,6 +162,12 @@ which materializes shapes without storage. That keeps the number honest — it t
 module code rather than a formula that can drift from it — while staying instant and
 allocation-free. `python build.py --preset NAME --estimate` prints the per-tower breakdown
 plus the bf16 weight footprint and the full AdamW training state.
+
+The tower list itself lives in one place, `MULTIMODAL_TOWERS` in `model/utils/helpers.py`,
+which the estimator, `build.py`'s breakdown, and the tests all import. `estimate_params` and
+`estimate_multimodal_params` take `strict=True` to re-raise instead of degrading to
+"could not be sized"; the tests use it so a tower that resists meta construction fails loudly
+rather than silently shrinking the reported model.
 
 `FramerConfig.validate()` runs whenever a preset is built and after CLI overrides are applied.
 It checks the invariants the modules assume: head divisibility for attention and GQA, patch

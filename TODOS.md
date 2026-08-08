@@ -22,8 +22,8 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 ## Model and training
 
 - [x] Publish reproducible size presets (registry in `model/configs/presets.py`,
-      `framer-tiny` … `framer-1t-a32b`) with a parameter estimator.
-- [x] Scale every modality on the large presets, so `framer-1t-a32b` is ~1T parameters of
+      `framer-tiny` … `framer-2t-a49b`) with a parameter estimator.
+- [x] Scale every modality on the large presets, so `framer-2t-a49b` is ~2T parameters of
       text, code, image, video, and audio in one model, and report the whole-model number
       (`--estimate`, `--list-presets`) without instantiating anything.
 - [x] Validate config shape invariants up front (`FramerConfig.validate()`).
@@ -39,9 +39,11 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Streaming, packed token-shard data pipeline (`scripts/prepare_data.py`).
 - [x] Optional safetensors export.
 - [~] Multi-GPU / distributed training via torch-native FSDP2 (guarded; validated single-device).
-      Tensor / expert / pipeline parallelism for the 1T preset remain to be built.
+      Tensor / expert / pipeline parallelism for the 2T preset remain to be built.
 - [ ] Add a full state-dict gather for FSDP checkpoint save/load.
-- [ ] Add expert-parallel sharding and sharded checkpoint save/load, without which the 1T
+- [ ] Add deferred (meta-device) initialisation, without which `framer-2t-a49b` cannot be
+      constructed at all: `_init_weights` calls `nn.init.normal_`, which fails on meta tensors.
+- [ ] Add expert-parallel sharding and sharded checkpoint save/load, without which the 2T
       preset cannot be materialised across hosts.
 - [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
 - [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the

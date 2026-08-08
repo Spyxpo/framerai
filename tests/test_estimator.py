@@ -10,7 +10,11 @@ import pytest
 from conftest import tiny_config
 from model.configs import PRESETS, FramerConfig
 from model.framer import FramerModel
-from model.utils.helpers import estimate_multimodal_params, estimate_params
+from model.utils.helpers import (
+    MULTIMODAL_TOWERS,
+    estimate_multimodal_params,
+    estimate_params,
+)
 
 
 def tiny_multimodal_config(**overrides):
@@ -61,17 +65,27 @@ def test_text_only_has_no_multimodal_params():
 
 def test_multimodal_breakdown_covers_every_tower():
     counts = estimate_multimodal_params(tiny_multimodal_config())
-    towers = ("vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-              "image_diffusion", "video_diffusion", "audio_diffusion")
-    assert set(counts) == set(towers) | {"total"}
-    assert all(counts[name] > 0 for name in towers)
-    assert counts["total"] == sum(counts[name] for name in towers)
+    assert set(counts) == set(MULTIMODAL_TOWERS) | {"total"}
+    assert all(counts[name] > 0 for name in MULTIMODAL_TOWERS)
+    assert counts["total"] == sum(counts[name] for name in MULTIMODAL_TOWERS)
 
 
 @pytest.mark.parametrize("name", sorted(PRESETS))
 def test_every_preset_is_estimable_without_instantiation(name):
-    est = estimate_params(FramerConfig.from_preset(name))
+    # strict=True so a tower that resists meta construction fails the test
+    # instead of quietly degrading the estimate to text-only.
+    est = estimate_params(FramerConfig.from_preset(name), strict=True)
     assert est["model_total"] > 0
     assert est["active"] <= est["total"]
     assert est["bf16_bytes"] == 2 * est["model_total"]
     assert est["adamw_bytes"] == 16 * est["model_total"]
+
+
+def test_strict_mode_surfaces_a_broken_tower():
+    """A typo in a tower factory must fail loudly, not report 'could not be sized'."""
+    # GroupNorm(32, 48) raises at construction; validate() would normally catch
+    # this, but the estimator must not swallow it when it slips through.
+    cfg = tiny_multimodal_config(diffusion_channels=48)
+    assert estimate_multimodal_params(cfg) is None
+    with pytest.raises(ValueError):
+        estimate_multimodal_params(cfg, strict=True)

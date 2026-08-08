@@ -200,12 +200,17 @@ model — the number that describes FramerAI as a multimodal system.
 | `framer-30b-a3b`   | 2048 | 28 | 16 / 4 | ~34B   | ~3.0B  | ~536M  | ~34B   |
 | `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~4.2B  | ~156B  |
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~8.2B  | ~202B  |
-| `framer-1t-a32b`   | 8192 | 64 | 64 / 8 | ~983B  | ~32B   | ~16.3B | **~999B** |
+| `framer-1t-a32b`   | 8192  | 64 | 64 / 8 | ~983B  | ~32B   | ~16.3B | ~999B  |
+| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~31.9B | **~1.99T** |
 
-`framer-1t-a32b` is the all-modality flagship: ~1.0T parameters covering text, code, image,
-video, and audio, of which ~32B are active for any given text token. The three largest
+`framer-2t-a49b` is the all-modality flagship: ~2.0T parameters covering text, code, image,
+video, and audio, of which ~49B are active for any given text token. The four largest
 presets scale their perception and generation towers with the backbone; the smaller ones
 keep laptop-sized towers.
+
+Its 384 experts are deliberately fine-grained rather than fewer and wider: total parameters
+scale with the expert count while active parameters scale with top-k, and 384 (3 x 128)
+divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes.
 
 Legacy `--size tiny|small|medium|large` still works as an alias for the `framer-*` presets.
 
@@ -216,35 +221,37 @@ is computed analytically and the multimodal towers are constructed on the meta d
 trillion-parameter definition can therefore be sized on a laptop in under a second:
 
 ```console
-$ python build.py --preset framer-1t-a32b --estimate
-Preset: framer-1t-a32b
-  d_model=8192 layers=64 heads=64/8 seq=8192
-  MoE: 256 experts, top-4, 1 shared, expert_d_ff=2560, 4 dense layers first
+$ python build.py --preset framer-2t-a49b --estimate
+Preset: framer-2t-a49b
+  d_model=10240 layers=84 heads=80/8 seq=16384
+  MoE: 384 experts, top-4, 1 shared, expert_d_ff=2048, 4 dense layers first
 
-  Text backbone        983.16B total      31.90B active/token
-    vision_encoder         5.44B
-    vision_projector      92.32M
-    audio_encoder          3.15B
-    audio_projector       88.13M
-    image_diffusion        5.18B
-    video_diffusion      934.12M
-    audio_diffusion        1.39B
-  Multimodal total      16.28B
+  Text backbone          1.96T total      49.40B active/token
+    vision_encoder        12.89B
+    vision_projector     146.86M
+    audio_encoder          5.45B
+    audio_projector      136.38M
+    image_diffusion        9.17B
+    video_diffusion        1.64B
+    audio_diffusion        2.45B
+  Multimodal total      31.88B
 
-  MODEL TOTAL          999.44B parameters
-  Weights (bf16)        1861.6 GiB
-  Training state       14892.9 GiB (weights + fp32 master + AdamW moments)
+  MODEL TOTAL            1.99T parameters
+  Weights (bf16)        3713.9 GiB
+  Training state       29711.2 GiB (weights + fp32 master + AdamW moments)
 ```
 
 `python build.py --list-presets` prints the whole ladder, and `estimate_params(config)` returns
 the same numbers programmatically.
 
 > **Reality check.** The small and mid presets train on a single consumer GPU or CPU. The large
-> MoE presets are *correct, estimable definitions*: `framer-1t-a32b` needs roughly 1.9 TiB just
-> to hold its weights in bf16, and around 15 TiB with the optimizer state, so it is a
-> multi-node preset that no single machine will instantiate. The code path — MoE routing, GQA,
-> the KV cache, FSDP2 sharding — is what makes that scale reachable, and the whole architecture
-> can be validated locally at `framer-tiny-moe`.
+> MoE presets are *correct, estimable definitions*: `framer-2t-a49b` needs roughly 3.6 TiB just
+> to hold its weights in bf16, and around 29 TiB with the optimizer state, so it is a
+> multi-node preset that no single machine can even *construct*, let alone train. Materialising
+> it needs deferred initialization, sharded checkpointing, and expert-parallel placement, none
+> of which single-device code paths provide. The code path — MoE routing, GQA, the KV cache,
+> FSDP2 sharding — is what makes that scale reachable, and the whole architecture can be
+> validated locally at `framer-tiny-moe`.
 >
 > Parameters are the ceiling, not the quality. Frontier-level output additionally requires
 > training compute on the order of 10^25–10^26 FLOPs and licensed corpora at petabyte scale

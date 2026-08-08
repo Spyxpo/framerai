@@ -1,15 +1,15 @@
-"""Named model-size presets for FramerAI, from laptop-scale to a 1T flagship.
+"""Named model-size presets for FramerAI, from laptop-scale to a 2T flagship.
 
 Each preset is a set of :class:`FramerConfig` field overrides. Dense presets
 scale the classic decoder; MoE presets add sparse experts so *total* parameters
 grow into the hundreds-of-billions / trillion range while *active* (per-token)
 parameters stay tractable.
 
-The three largest MoE presets scale every modality, not just the text core: the
+The four largest MoE presets scale every modality, not just the text core: the
 vision and audio encoders and the image / video / audio diffusion decoders grow
-with the backbone, so ``framer-1t-a32b`` is a trillion parameters of text, code,
-image, video and audio in one model rather than a large LLM with small towers.
-``model.utils.helpers.estimate_params`` reports the whole-model number.
+with the backbone, so ``framer-2t-a49b`` is two trillion parameters of text,
+code, image, video and audio in one model rather than a large LLM with small
+towers. ``model.utils.helpers.estimate_params`` reports the whole-model number.
 
 Reality note: the largest MoE presets are correct, instantiable *definitions*
 whose parameter counts can be estimated on a laptop, but training them requires a
@@ -91,6 +91,20 @@ _MOE = {
         audio_d_model=2560, audio_n_heads=20, audio_n_layers=40,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=1536, audio_gen_channels=768, audio_gen_frames=256,
+    ),
+    "framer-2t-a49b": dict(  # ~2.0T total across all modalities / ~49B active (cluster-only)
+        # 384 experts is 3 * 128, so it divides evenly across 8/16/32/64/128-way
+        # expert-parallel meshes. Fine-grained experts (384 narrow ones rather
+        # than 256 wide ones) buy sparsity: total scales with the expert count
+        # while active scales with top-k.
+        d_model=10240, n_layers=84, n_heads=80, n_kv_heads=8, d_ff=32768, max_seq_len=16384,
+        use_moe=True, n_experts=384, n_experts_per_tok=4, n_shared_experts=1,
+        expert_d_ff=2048, moe_layer_freq=1, first_dense_layers=4, use_qk_norm=True,
+        image_size=448, patch_size=14,
+        vision_d_model=4096, vision_n_heads=32, vision_n_layers=64,
+        audio_d_model=3072, audio_n_heads=24, audio_n_layers=48,
+        audio_n_mels=128, audio_max_frames=3000,
+        diffusion_channels=2048, audio_gen_channels=1024, audio_gen_frames=512,
     ),
 }
 
