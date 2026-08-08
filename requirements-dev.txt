@@ -1,0 +1,11 @@
+# Development and CI tooling. Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=8.4.0
+pytest-cov>=7.0.0
+ruff>=0.14.0
+
+# safetensors is an optional runtime extra, but the export path is covered by
+# CI, so it is not optional here.
+safetensors>=0.7.0

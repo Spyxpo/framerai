@@ -11,9 +11,12 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Add a `pytest` suite covering the backbone, MoE routing, data pipeline, generation,
       presets, and the parameter estimator, and run it in CI.
 - [x] Add unit tests for the backend routes and WebSocket service (node:test with supertest).
-- [ ] Add component tests for the website chat flow (Vitest and Testing Library).
+- [x] Add component tests for the website (Vitest, Testing Library, jsdom) and an ESLint flat
+      config, both blocking in CI. The website previously had no lint and no test leg at all.
+- [ ] Extend website component tests past the settings panel to the full chat flow.
 - [ ] Add end-to-end smoke tests that boot the backend and exercise the core endpoints.
-- [ ] Add code coverage reporting to CI and publish a coverage badge.
+- [x] Add code coverage reporting to CI (`pytest --cov`, uploaded as an artifact).
+- [ ] Publish a coverage badge.
 - [ ] Introduce pre-commit hooks running ruff and lightweight JS checks.
 
 ## Model and training

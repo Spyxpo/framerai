@@ -47,3 +47,11 @@ backend/uploads/generated/*
 .idea/
 *.swp
 *.swo
+
+# Test and coverage artifacts
+.pytest_cache/
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+website/coverage/
