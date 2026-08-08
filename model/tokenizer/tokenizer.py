@@ -3,9 +3,6 @@
 import json
 import os
 import re
-import struct
-from pathlib import Path
-from typing import Optional
 
 
 class FramerTokenizer:

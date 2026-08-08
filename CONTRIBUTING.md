@@ -43,6 +43,9 @@ See [GUIDE.md](GUIDE.md) for a deeper walkthrough of each component.
 
 ## Development setup
 
+Python 3.10 or newer, Node 18 or newer for the backend, and Node 20.19 or newer for the
+website (its build tooling requires it). CI runs the same versions.
+
 ### Model (Python)
 
 ```bash

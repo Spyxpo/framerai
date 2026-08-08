@@ -41,7 +41,13 @@ from model.training import (
     maybe_wrap_fsdp,
     train_language_model,
 )
-from model.utils import count_parameters, estimate_params, get_device, load_checkpoint
+from model.utils import (
+    count_parameters,
+    estimate_params,
+    get_device,
+    human_params,
+    load_checkpoint,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -288,6 +294,39 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
     logger.info(f"  Parameters: {count_parameters(model):,}")
 
 
+def print_estimate(config: FramerConfig):
+    """Print the whole-model parameter and memory budget without building it."""
+    est = estimate_params(config)
+    gb = 1024 ** 3
+
+    print(f"Preset: {config.preset or 'custom'}")
+    print(f"  d_model={config.d_model} layers={config.n_layers} "
+          f"heads={config.n_heads}/{config.kv_heads} seq={config.max_seq_len}")
+    if config.use_moe:
+        print(f"  MoE: {config.n_experts} experts, top-{config.n_experts_per_tok}, "
+              f"{config.n_shared_experts} shared, expert_d_ff={config.expert_d_ff or config.d_ff}, "
+              f"{config.first_dense_layers} dense layers first")
+    print()
+    print(f"  Text backbone      {est['total_h']:>9s} total   {est['active_h']:>9s} active/token")
+
+    mm = est["multimodal"]
+    if mm is None:
+        print("  Multimodal towers  (could not be sized on this build)")
+    elif est["multimodal_total"]:
+        for name in ("vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
+                     "image_diffusion", "video_diffusion", "audio_diffusion"):
+            print(f"    {name:<18s} {human_params(mm[name]):>9s}")
+        print(f"  Multimodal total   {est['multimodal_h']:>9s}")
+    else:
+        print("  Multimodal towers  none (text_only build)")
+
+    print()
+    print(f"  MODEL TOTAL        {est['model_total_h']:>9s} parameters")
+    print(f"  Weights (bf16)     {est['bf16_bytes'] / gb:>9.1f} GiB")
+    print(f"  Training state     {est['adamw_bytes'] / gb:>9.1f} GiB "
+          f"(weights + fp32 master + AdamW moments)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="FramerAI Model Builder")
     parser.add_argument("--mode", choices=["build", "train", "export", "all"], default="build", help="Operation mode")
@@ -311,10 +350,12 @@ def main():
 
     # Size presets (named registry, scaling from ~15M to 1T-MoE)
     parser.add_argument("--preset", default=None,
-                        help="Named preset, e.g. framer-small / framer-8b / framer-1t-a32b")
+                        help="Named preset, e.g. framer-small / framer-8b / framer-200b-a20b / framer-1t-a32b")
     parser.add_argument("--size", choices=["tiny", "small", "medium", "large"], default=None,
                         help="Legacy size alias for framer-{tiny,small,medium,large}")
     parser.add_argument("--list-presets", action="store_true", help="List presets and exit")
+    parser.add_argument("--estimate", action="store_true",
+                        help="Print the parameter and memory budget for the resolved config, then exit")
     parser.add_argument("--text-only", action="store_true",
                         help="Build only the LLM core (skip multimodal encoders/decoders)")
     parser.add_argument("--shard-dir", default=None,
@@ -331,11 +372,13 @@ def main():
     args = parser.parse_args()
 
     if args.list_presets:
-        from model.utils import estimate_params
-        print("Available presets (total / active params):")
+        print(f"  {'preset':<18s} {'text':>9s} {'active/tok':>11s} {'multimodal':>11s} {'model total':>12s}")
         for name in list_presets():
             est = estimate_params(FramerConfig.from_preset(name))
-            print(f"  {name:20s} {est['total_h']:>9s} / {est['active_h']:>9s}")
+            print(
+                f"  {name:<18s} {est['total_h']:>9s} {est['active_h']:>11s} "
+                f"{est['multimodal_h']:>11s} {est['model_total_h']:>12s}"
+            )
         return
 
     # Build config from a preset (default framer-medium), then apply CLI overrides.
@@ -367,6 +410,12 @@ def main():
         config.device = args.device
     if args.rope_scaling:
         config.rope_scaling_factor = args.rope_scaling
+
+    config.validate()
+
+    if args.estimate:
+        print_estimate(config)
+        return
 
     logger.info("=" * 60)
     logger.info(f"FramerAI Model Builder | preset={resolve_preset_name(preset_name)}")
