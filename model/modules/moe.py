@@ -79,7 +79,6 @@ class MoEFeedForward(nn.Module):
     def _aux_loss(self, router_probs, topk_idx, router_logits, N):
         """Switch/GShard load-balancing loss + router z-loss."""
         # Fraction of (token, slot) assignments landing on each expert.
-        assign = torch.zeros(self.n_experts, device=router_probs.device, dtype=torch.float32)
         counts = torch.bincount(topk_idx.reshape(-1), minlength=self.n_experts).float()
         assign = counts / (N * self.top_k)
         # Mean routing probability mass per expert (differentiable).

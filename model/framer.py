@@ -47,6 +47,9 @@ class FramerModel(nn.Module):
                 rope_theta=config.rope_theta,
                 rope_scaling_factor=config.rope_scaling_factor,
                 rope_scaling_type=config.rope_scaling_type,
+                rope_low_freq_factor=config.rope_low_freq_factor,
+                rope_high_freq_factor=config.rope_high_freq_factor,
+                rope_original_max_seq_len=config.rope_original_max_seq_len,
                 ffn=build_ffn(config, i, config.dropout),
             )
             for i in range(config.n_layers)
