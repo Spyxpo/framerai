@@ -1098,8 +1098,58 @@ body {
 }
 
 /* ============================================
-   prefers-reduced-motion — disable shimmer
+   Mic Recording State
    ============================================ */
+
+.mic-btn.recording {
+  color: var(--error);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.mic-btn.recording:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: var(--error);
+}
+
+/* Pulsing red dot on the button while recording */
+.mic-btn.recording::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  background: var(--error);
+  border-radius: 50%;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+.mic-btn {
+  position: relative;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+
+.recording-timer {
+  align-self: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--error);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 0 2px;
+  min-width: 34px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-btn.recording::before {
+    animation: none;
+    opacity: 1;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line,
@@ -1124,9 +1174,6 @@ body {
   }
 }
 
-/* ============================================
-   Skip Link
-   ============================================ */
 
 .skip-link {
   position: fixed;
