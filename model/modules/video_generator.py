@@ -209,6 +209,19 @@ class VideoGenerator(nn.Module):
         self.register_buffer("sqrt_alpha_cumprod", torch.sqrt(alpha_cumprod))
         self.register_buffer("sqrt_one_minus_alpha_cumprod", torch.sqrt(1 - alpha_cumprod))
 
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the noise schedule, for use after a meta-device build."""
+        device = device or self.betas.device
+        betas = torch.linspace(1e-4, 0.02, self.num_steps, device=device)
+        alphas = 1.0 - betas
+        alpha_cumprod = torch.cumprod(alphas, dim=0)
+        self.betas = betas
+        self.alphas = alphas
+        self.alpha_cumprod = alpha_cumprod
+        self.sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod)
+        self.sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod)
+
     def forward(self, video: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         """Training: predict noise added to video."""
         B = video.shape[0]

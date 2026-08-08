@@ -23,6 +23,10 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d_model))
 
+    @torch.no_grad()
+    def reset_parameters(self):
+        self.weight.fill_(1.0)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x * norm * self.weight
@@ -74,21 +78,42 @@ class RotaryPositionalEmbedding(nn.Module):
         self.scaling_factor = max(1.0, float(scaling_factor))
         self.scaling_type = scaling_type
         self.attention_factor = 1.0
+        # The unmodified base, so the buffer can be rebuilt from scratch after a
+        # meta-device build without re-applying the NTK adjustment twice.
+        self.base = float(base)
+        self.low_freq_factor = low_freq_factor
+        self.high_freq_factor = high_freq_factor
+        self.original_max_seq_len = original_max_seq_len
 
-        if scaling_type == "ntk" and self.scaling_factor > 1.0:
-            # NTK-aware: raise the base so high frequencies are stretched less.
-            base = base * (self.scaling_factor ** (head_dim / (head_dim - 2)))
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
-
+        inv_freq = self._compute_inv_freq()
         if scaling_type == "yarn" and self.scaling_factor > 1.0:
-            original = original_max_seq_len or max_seq_len
-            inv_freq = self._yarn_inv_freq(
-                inv_freq, self.scaling_factor, original, low_freq_factor, high_freq_factor
-            )
             self.attention_factor = 0.1 * math.log(self.scaling_factor) + 1.0
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _compute_inv_freq(self) -> torch.Tensor:
+        base = self.base
+        if self.scaling_type == "ntk" and self.scaling_factor > 1.0:
+            # NTK-aware: raise the base so high frequencies are stretched less.
+            base = base * (self.scaling_factor ** (self.head_dim / (self.head_dim - 2)))
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim))
+
+        if self.scaling_type == "yarn" and self.scaling_factor > 1.0:
+            inv_freq = self._yarn_inv_freq(
+                inv_freq,
+                self.scaling_factor,
+                self.original_max_seq_len or self.max_seq_len,
+                self.low_freq_factor,
+                self.high_freq_factor,
+            )
+        return inv_freq
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the inverse frequencies, for use after a meta-device build."""
+        device = device or self.inv_freq.device
+        self.inv_freq = self._compute_inv_freq().to(device)
 
     @staticmethod
     def _yarn_inv_freq(
