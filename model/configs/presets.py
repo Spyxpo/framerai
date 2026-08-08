@@ -1,14 +1,19 @@
-"""Named model-size presets for FramerAI, from laptop-scale to 1T-MoE.
+"""Named model-size presets for FramerAI, from laptop-scale to a 1T flagship.
 
 Each preset is a set of :class:`FramerConfig` field overrides. Dense presets
 scale the classic decoder; MoE presets add sparse experts so *total* parameters
 grow into the hundreds-of-billions / trillion range while *active* (per-token)
 parameters stay tractable.
 
+The three largest MoE presets scale every modality, not just the text core: the
+vision and audio encoders and the image / video / audio diffusion decoders grow
+with the backbone, so ``framer-1t-a32b`` is a trillion parameters of text, code,
+image, video and audio in one model rather than a large LLM with small towers.
+``model.utils.helpers.estimate_params`` reports the whole-model number.
+
 Reality note: the largest MoE presets are correct, instantiable *definitions*
-whose parameter counts can be estimated on a laptop (see
-``model.utils.helpers.estimate_params``), but training them requires a multi-GPU
-cluster. Small/mid presets are trainable on a single consumer GPU or CPU.
+whose parameter counts can be estimated on a laptop, but training them requires a
+multi-node cluster. Small/mid presets train on a single consumer GPU or CPU.
 """
 
 # Dense decoder ladder (n_heads * head_dim == d_model; head_dim == 128 or 64).
@@ -37,32 +42,55 @@ _DENSE = {
     "framer-3b": dict(
         d_model=2560, n_layers=32, n_heads=20, n_kv_heads=4, d_ff=6912, max_seq_len=4096,
     ),
-    "framer-8b": dict(  # Llama-3-8B-shaped
+    "framer-8b": dict(  # classic 8B dense shape
         d_model=4096, n_layers=32, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
     ),
 }
 
 # Sparse Mixture-of-Experts ladder. Labels are total / active (approximate).
 _MOE = {
-    "framer-tiny-moe": dict(  # laptop-validatable MoE
+    "framer-tiny-moe": dict(  # laptop-validatable MoE (tiny towers, like framer-tiny)
         d_model=256, n_layers=6, n_heads=8, n_kv_heads=4, d_ff=1024, max_seq_len=1024,
         use_moe=True, n_experts=8, n_experts_per_tok=2, n_shared_experts=1,
         expert_d_ff=512, moe_layer_freq=1, first_dense_layers=1,
+        vision_d_model=256, vision_n_heads=4, vision_n_layers=4,
+        audio_d_model=256, audio_n_heads=4, audio_n_layers=4,
+        diffusion_channels=64, audio_gen_channels=32,
     ),
     "framer-30b-a3b": dict(  # ~30B total / ~3B active
         d_model=2048, n_layers=28, n_heads=16, n_kv_heads=4, d_ff=8192, max_seq_len=4096,
         use_moe=True, n_experts=128, n_experts_per_tok=8, n_shared_experts=2,
         expert_d_ff=1536, moe_layer_freq=1, first_dense_layers=1,
     ),
-    "framer-160b-a16b": dict(  # ~160B total / ~16B active
+    "framer-160b-a16b": dict(  # ~156B total across all modalities / ~15B active
         d_model=4096, n_layers=48, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
         use_moe=True, n_experts=128, n_experts_per_tok=10, n_shared_experts=1,
-        expert_d_ff=2048, moe_layer_freq=1, first_dense_layers=2,
+        expert_d_ff=2048, moe_layer_freq=1, first_dense_layers=2, use_qk_norm=True,
+        image_size=384, patch_size=16,
+        vision_d_model=2048, vision_n_heads=16, vision_n_layers=32,
+        audio_d_model=1536, audio_n_heads=12, audio_n_layers=24,
+        audio_n_mels=128, audio_max_frames=2048,
+        diffusion_channels=768, audio_gen_channels=384, audio_gen_frames=256,
     ),
-    "framer-1t-a32b": dict(  # ~1T total / ~32B active (cluster-only)
+    "framer-200b-a20b": dict(  # ~200B total across all modalities / ~20B active
+        d_model=5120, n_layers=48, n_heads=40, n_kv_heads=8, d_ff=17920, max_seq_len=8192,
+        use_moe=True, n_experts=128, n_experts_per_tok=8, n_shared_experts=3,
+        expert_d_ff=2048, moe_layer_freq=1, first_dense_layers=2, use_qk_norm=True,
+        image_size=448, patch_size=14,
+        vision_d_model=2560, vision_n_heads=20, vision_n_layers=40,
+        audio_d_model=2048, audio_n_heads=16, audio_n_layers=32,
+        audio_n_mels=128, audio_max_frames=3000,
+        diffusion_channels=1024, audio_gen_channels=512, audio_gen_frames=256,
+    ),
+    "framer-1t-a32b": dict(  # ~1.0T total across all modalities / ~32B active (cluster-only)
         d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672, max_seq_len=8192,
         use_moe=True, n_experts=256, n_experts_per_tok=4, n_shared_experts=1,
-        expert_d_ff=2560, moe_layer_freq=1, first_dense_layers=3,
+        expert_d_ff=2560, moe_layer_freq=1, first_dense_layers=4, use_qk_norm=True,
+        image_size=448, patch_size=14,
+        vision_d_model=3072, vision_n_heads=24, vision_n_layers=48,
+        audio_d_model=2560, audio_n_heads=20, audio_n_layers=40,
+        audio_n_mels=128, audio_max_frames=3000,
+        diffusion_channels=1536, audio_gen_channels=768, audio_gen_frames=256,
     ),
 }
 
@@ -96,4 +124,6 @@ def build_preset_config(name: str, **overrides):
             f"(aliases: {', '.join(_ALIASES)})"
         )
     fields = {"preset": resolved, **PRESETS[resolved], **overrides}
-    return FramerConfig(**fields)
+    config = FramerConfig(**fields)
+    config.validate()
+    return config

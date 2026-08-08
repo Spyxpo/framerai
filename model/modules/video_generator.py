@@ -1,6 +1,7 @@
-"""Video generation module with temporal attention (Sora-like architecture)."""
+"""Video generation module: spatial-temporal diffusion over frame stacks."""
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

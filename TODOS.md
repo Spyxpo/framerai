@@ -8,7 +8,8 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 ## Testing and quality
 
-- [ ] Add a `pytest` suite covering the tokenizer, transformer forward pass, and generation utilities.
+- [x] Add a `pytest` suite covering the backbone, MoE routing, data pipeline, generation,
+      presets, and the parameter estimator, and run it in CI.
 - [x] Add unit tests for the backend routes and WebSocket service (node:test with supertest).
 - [ ] Add component tests for the website chat flow (Vitest and Testing Library).
 - [ ] Add end-to-end smoke tests that boot the backend and exercise the core endpoints.
@@ -19,6 +20,11 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 - [x] Publish reproducible size presets (registry in `model/configs/presets.py`,
       `framer-tiny` … `framer-1t-a32b`) with a parameter estimator.
+- [x] Scale every modality on the large presets, so `framer-1t-a32b` is ~1T parameters of
+      text, code, image, video, and audio in one model, and report the whole-model number
+      (`--estimate`, `--list-presets`) without instantiating anything.
+- [x] Validate config shape invariants up front (`FramerConfig.validate()`).
+- [x] Benchmark and tune the audio encoder and generator dimensions per size.
 - [x] Grouped-query attention, fused SDPA/flash attention, and an incremental KV cache.
 - [x] Mixture-of-Experts FFN with load-balancing + router z-loss for trillion-scale totals.
 - [x] Support gradient checkpointing and mixed precision (bf16/fp16/fp32) flags end to end.
@@ -28,24 +34,64 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [~] Multi-GPU / distributed training via torch-native FSDP2 (guarded; validated single-device).
       Tensor / expert / pipeline parallelism for the 1T preset remain to be built.
 - [ ] Add a full state-dict gather for FSDP checkpoint save/load.
-- [ ] Add evaluation harness with standard benchmarks and a results table in the docs.
+- [ ] Add expert-parallel sharding and sharded checkpoint save/load, without which the 1T
+      preset cannot be materialised across hosts.
+- [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
+- [ ] Implement `yarn` RoPE scaling, which the config accepts but the code treats as linear.
+- [ ] Add instruction and preference post-training (chat template, SFT, DPO).
 - [ ] Add ONNX export and a safetensors round-trip validation test.
 
-## Phase 2 — generation quality (image / video / audio)
+## Architecture roadmap — reaching frontier-class output
 
-- [ ] Latent diffusion for image generation (VAE + DiT), DALL·E-3-style.
-- [ ] Spacetime-latent-patch diffusion transformer for video, Sora-style.
-- [ ] Neural vocoder to replace Griffin-Lim (also tracked below).
-- [ ] Interleaved multimodal token placement (LLaVA/Qwen-VL-style) beyond prefix concat.
+Parameter count is the ceiling, not the quality. The current decoders cannot reach
+frontier-class output at any size, for architectural reasons; each item below replaces one
+of them with the family that can, selected by a config field so the small presets keep
+their laptop-runnable path. Every phase ships tiny-scale tests and the metric that measures
+it. Training compute and licensed data remain a separate, external problem.
 
-## Multimodal and audio
+### Image generation — latent diffusion transformer
 
-- [ ] Replace Griffin-Lim with a neural vocoder for higher-fidelity audio output.
-- [ ] Add streaming audio generation and playback over the WebSocket.
-- [ ] Add in-browser microphone capture (MediaRecorder) for audio input.
-- [ ] Add a mel-spectrogram cache to speed up audio training.
-- [ ] Add example image and audio caption datasets with real media.
-- [ ] Benchmark and tune the audio encoder and generator dimensions per size.
+- [ ] KL-VAE (8x spatial downsample) so training runs in latent space, not pixel space.
+- [ ] Diffusion transformer denoiser with adaLN-zero timestep and text conditioning.
+- [ ] Rectified-flow objective with an ODE sampler at 20–50 steps, replacing 1000-step
+      ancestral sampling.
+- [ ] Classifier-free guidance with a learned null-context embedding (advertised in the
+      README today but never implemented).
+- [ ] Caption enrichment pass over the training corpus; caption quality dominates prompt
+      adherence.
+
+### Video generation — spacetime latent diffusion
+
+- [ ] 3D causal video VAE (4x temporal, 8x spatial compression).
+- [ ] Spacetime-patch diffusion transformer with factorised spatial/temporal attention,
+      variable duration, resolution, and aspect ratio, and frame-rate conditioning.
+- [ ] Remove the per-frame Python loop in the 3D U-Net forward pass, the current
+      throughput wall.
+
+### Audio — neural codec and vocoder
+
+- [ ] Residual-vector-quantized audio codec at 24 kHz, giving discrete acoustic tokens the
+      language model can predict directly.
+- [ ] ISTFT-head neural vocoder replacing Griffin-Lim phase reconstruction, which caps
+      output quality no matter how well the model is trained.
+- [ ] Speaker and prosody conditioning from a reference clip.
+- [ ] CTC auxiliary head and aligned `<audio>` token placement, so transcription is trained
+      rather than hoped for.
+- [ ] Streaming audio generation and playback over the WebSocket.
+- [ ] Mel-spectrogram cache to speed up audio training.
+
+### Understanding
+
+- [ ] Dynamic high-resolution tiling in the vision encoder (tiles plus a global thumbnail).
+- [ ] Interleaved multimodal token placement, replacing prefix concatenation.
+- [ ] Contrastive pretraining entry point for the vision tower.
+- [ ] Example image and audio caption datasets with real media.
+
+### Evaluation
+
+- [ ] `model/eval/` harness: text perplexity and task accuracy, image contrastive-alignment
+      score and FID, audio mel-distance / speaker similarity / WER, video FVD and temporal
+      consistency. This is what turns architecture parity into a measurable claim.
 
 ## Backend
 
@@ -88,6 +134,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 - [x] Make FramerAI self-contained: remove teacher-model distillation and its dependencies.
 - [x] Add the audio modality (understanding and generation) across model, backend, and website.
+- [x] Add in-browser microphone capture (MediaRecorder) for audio input.
 - [x] Add a local-corpus data loader for from-scratch training.
 - [x] Add a Python inference bridge with placeholder fallback.
 - [x] Add a Dockerfile and docker-compose for the model and full stack.
