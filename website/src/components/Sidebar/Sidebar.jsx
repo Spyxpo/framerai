@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from "react";
+import { useRef, useEffect } from "react";
 import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings } from "lucide-react";
 
 export default function Sidebar({

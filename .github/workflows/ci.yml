@@ -34,11 +34,10 @@ jobs:
       - name: Install lint tooling
         run: python -m pip install --upgrade pip ruff
 
-      - name: Lint (blocking - real errors only)
-        run: ruff check --select=E9,F63,F7,F82 model build.py scripts tests conftest.py
-
-      - name: Lint (full - informational)
-        continue-on-error: true
+      # The full ruff.toml rule set is blocking. It was informational while the
+      # tree was brought up to it; the tree passes clean now, so a regression
+      # should fail the build rather than scroll past in a green log.
+      - name: Lint
         run: ruff check model build.py scripts tests conftest.py
 
       - name: Byte-compile sources
@@ -57,16 +56,28 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # CPU-only wheels: the suite never needs a GPU, and the CUDA wheels do not
-      # fit on a default runner alongside the preinstalled toolchains.
+      # torch comes from the CPU wheel index first: the suite never needs a GPU
+      # and the CUDA wheels do not fit on a default runner alongside the
+      # preinstalled toolchains. Everything else installs from the requirements
+      # files, so the tested dependency set is the shipped dependency set. It
+      # previously did not match, and a runtime dependency could be added
+      # without CI noticing.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install numpy Pillow soundfile pytest safetensors
+          pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q --cov=model --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-python
+          path: coverage.xml
+          if-no-files-found: warn
 
       # Every preset, up to the trillion-parameter flagship, must be sizable on a
       # 2-core runner: the estimator allocates nothing.
@@ -134,6 +145,14 @@ jobs:
       - name: Install dependencies
         working-directory: website
         run: npm ci
+
+      - name: Lint
+        working-directory: website
+        run: npm run lint
+
+      - name: Test
+        working-directory: website
+        run: npm test
 
       - name: Build
         working-directory: website
