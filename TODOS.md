@@ -79,11 +79,14 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Video generation — spacetime latent diffusion
 
-- [ ] 3D causal video VAE (4x temporal, 8x spatial compression).
-- [ ] Spacetime-patch diffusion transformer with factorised spatial/temporal attention,
+- [x] 3D causal video VAE (4x temporal, 8x spatial compression).
+- [x] Spacetime-patch diffusion transformer with factorised spatial/temporal attention,
       variable duration, resolution, and aspect ratio, and frame-rate conditioning.
-- [ ] Remove the per-frame Python loop in the 3D U-Net forward pass, the current
-      throughput wall.
+- [x] Remove the per-frame Python loop from the video forward pass. The spacetime
+      transformer's two attention passes are batched reshapes; the 3D U-Net remains
+      available under `video_gen_arch="unet3d"` and still has the loop.
+- [ ] Train the video VAE and re-measure its `scale_factor`.
+- [ ] Streaming decode, which the causal VAE makes possible but nothing yet exercises.
 
 ### Audio — neural codec and vocoder
 

@@ -112,8 +112,23 @@ def handle(gen, op, params):
         return {"file": _save_image(images, out_dir), **request.to_dict()}
 
     if op == "video":
-        frames = gen.generate_video(prompt, num_frames=params.get("num_frames", 16))
-        return {"file": _save_video(frames, out_dir)}
+        frames, request = gen.generate_video(
+            prompt,
+            num_frames=params.get("num_frames"),
+            width=params.get("width"),
+            height=params.get("height"),
+            aspect=params.get("aspect"),
+            tier=params.get("tier"),
+            fps=params.get("fps"),
+            seed=params.get("seed"),
+            return_request=True,
+        )
+        return {
+            "file": _save_video(frames, out_dir),
+            "frames": len(frames),
+            "fps": params.get("fps"),
+            **request.to_dict(),
+        }
 
     if op == "audio":
         waveform, sample_rate = gen.generate_audio(prompt)

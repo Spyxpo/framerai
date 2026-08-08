@@ -178,18 +178,70 @@ class FramerGenerator:
     def generate_video(
         self,
         prompt: str,
-        num_frames: int = 16,
-    ) -> list:
-        """Generate video frames from text prompt."""
-        context = self._text_context(prompt)
-        video = self.model.video_gen.sample(1, context, self.device)
+        num_frames: int = None,
+        width: int = None,
+        height: int = None,
+        aspect: str = None,
+        tier: int = None,
+        fps: int = None,
+        seed: int = None,
+        return_request: bool = False,
+    ):
+        """Generate video frames from a text prompt at a requested size.
+
+        Size resolves exactly as it does for images, reusing the same buckets and
+        prompt parsing; ``num_frames`` and ``fps`` control duration separately.
+        """
+        config = self.model.config
+        request = resolve_image_request(
+            prompt, width=width, height=height, aspect=aspect, tier=tier, seed=seed, config=config
+        )
+        frames_requested = int(num_frames or config.video_frames)
+        self._require_video_size_support(request, frames_requested)
+
+        generator = None
+        if request.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(int(request.seed))
+
+        context = self._text_context(request.prompt)
+        video = self._sample_video(request, frames_requested, fps, context, generator)
 
         frames = []
         video_np = video[0].cpu().permute(1, 2, 3, 0).numpy()  # (T, H, W, C)
         for i in range(video_np.shape[0]):
             frame = ((video_np[i] + 1) * 127.5).clip(0, 255).astype(np.uint8)
             frames.append(Image.fromarray(frame))
-        return frames
+        return (frames, request) if return_request else frames
+
+    def _require_video_size_support(self, request, frames):
+        """The 3D U-Net was built for one fixed square resolution."""
+        config = self.model.config
+        if config.video_gen_arch == "spacetime_dit":
+            return
+        if request.width != request.height or request.width != config.video_resolution:
+            raise ValueError(
+                f"video_gen_arch='unet3d' generates {config.video_resolution}x"
+                f"{config.video_resolution} only; {request.width}x{request.height} was "
+                "requested. Set video_gen_arch='spacetime_dit' for arbitrary sizes."
+            )
+        if frames != config.video_frames:
+            raise ValueError(
+                f"video_gen_arch='unet3d' generates {config.video_frames} frames only. "
+                "Set video_gen_arch='spacetime_dit' for variable duration."
+            )
+
+    def _sample_video(self, request, frames, fps, context, generator):
+        """Sample, passing duration and size through when the decoder takes them."""
+        sampler = self.model.video_gen.sample
+        try:
+            return sampler(
+                1, context, self.device,
+                frames=frames, height=request.height, width=request.width,
+                fps=fps, generator=generator,
+            )
+        except TypeError:
+            # The 3D U-Net's sampler takes only (batch_size, context, device).
+            return sampler(1, context, self.device)
 
     @torch.no_grad()
     def generate_code(

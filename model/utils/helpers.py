@@ -45,7 +45,7 @@ def _count_on_meta(factory) -> int:
 # than repeating the tuple.
 MULTIMODAL_TOWERS = (
     "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-    "image_vae", "image_diffusion", "video_diffusion", "audio_diffusion",
+    "image_vae", "image_diffusion", "video_vae", "video_diffusion", "audio_diffusion",
 )
 
 
@@ -74,8 +74,10 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
     from ..modules.diffusion import DiffusionModule
     from ..modules.dit import DiT
     from ..modules.multimodal_projector import MultimodalProjector
+    from ..modules.spacetime_dit import SpacetimeDiT
     from ..modules.vae import KLVAE
     from ..modules.video_generator import VideoGenerator
+    from ..modules.video_vae import CausalVideoVAE
     from ..modules.vision_encoder import VisionEncoder
 
     d = config.d_model
@@ -117,10 +119,29 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
                 num_steps=config.diffusion_steps,
             )
         ),
-        "video_diffusion": lambda: VideoGenerator(
-            frames=config.video_frames, resolution=config.video_resolution,
-            base_channels=config.diffusion_channels // 2, context_dim=d,
-            num_steps=config.diffusion_steps,
+        "video_vae": lambda: (
+            CausalVideoVAE(
+                in_channels=3, latent_channels=config.video_vae_latent_channels,
+                base_channels=config.video_vae_base_channels,
+                temporal_downsample=config.video_vae_temporal_downsample,
+                spatial_downsample=config.video_vae_spatial_downsample,
+            )
+            if config.video_gen_arch == "spacetime_dit"
+            else nn.Identity()
+        ),
+        "video_diffusion": lambda: (
+            SpacetimeDiT(
+                in_channels=config.video_vae_latent_channels,
+                d_model=config.video_dit_d_model, n_layers=config.video_dit_n_layers,
+                n_heads=config.video_dit_n_heads, patch_size=config.video_dit_patch_size,
+                context_dim=d,
+            )
+            if config.video_gen_arch == "spacetime_dit"
+            else VideoGenerator(
+                frames=config.video_frames, resolution=config.video_resolution,
+                base_channels=config.diffusion_channels // 2, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
         ),
         # AudioGenerator's parameters all live in this inner diffusion module.
         "audio_diffusion": lambda: DiffusionModule(

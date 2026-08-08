@@ -9,10 +9,10 @@ from .configs import FramerConfig
 from .modules.audio_encoder import AudioEncoder
 from .modules.audio_generator import AudioGenerator
 from .modules.latent_diffusion import build_image_generator
+from .modules.latent_video import build_video_generator
 from .modules.moe import build_ffn
 from .modules.multimodal_projector import MultimodalProjector
 from .modules.transformer import CausalSelfAttention, FeedForward, RMSNorm, TransformerBlock
-from .modules.video_generator import VideoGenerator
 from .modules.vision_encoder import VisionEncoder
 
 
@@ -81,14 +81,10 @@ class FramerModel(nn.Module):
         # forward(images, context) -> loss and sample(shape, context, device).
         self.diffusion = build_image_generator(config)
 
-        # Video generator
-        self.video_gen = VideoGenerator(
-            frames=config.video_frames,
-            resolution=config.video_resolution,
-            base_channels=config.diffusion_channels // 2,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-        )
+        # Video generation: 3D U-Net or spacetime diffusion transformer,
+        # selected by config.video_gen_arch. Both expose the same
+        # forward(video, context) -> loss and sample(batch, context, device).
+        self.video_gen = build_video_generator(config)
 
         # Audio encoder (audio/speech understanding)
         self.audio_encoder = AudioEncoder(

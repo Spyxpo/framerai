@@ -67,11 +67,12 @@ def test_multimodal_breakdown_covers_every_tower():
     counts = estimate_multimodal_params(tiny_multimodal_config())
     assert set(counts) == set(MULTIMODAL_TOWERS) | {"total"}
     assert counts["total"] == sum(counts[name] for name in MULTIMODAL_TOWERS)
-    # Arch-selected slots are populated; the alternatives report zero. Under the
-    # default "unet" image path there is no autoencoder.
-    always_built = set(MULTIMODAL_TOWERS) - {"image_vae"}
-    assert all(counts[name] > 0 for name in always_built)
-    assert counts["image_vae"] == 0
+    # Arch-selected slots are populated; the alternatives report zero. The
+    # default image and video paths are the original U-Nets, which have no
+    # autoencoder, so both VAE slots are empty here.
+    latent_only = {"image_vae", "video_vae"}
+    assert all(counts[name] > 0 for name in set(MULTIMODAL_TOWERS) - latent_only)
+    assert all(counts[name] == 0 for name in latent_only)
 
 
 def test_latent_dit_moves_the_image_budget_into_the_vae_and_denoiser():
@@ -87,6 +88,21 @@ def test_latent_dit_moves_the_image_budget_into_the_vae_and_denoiser():
     # Towers the image arch does not touch are unchanged.
     for name in ("vision_encoder", "audio_encoder", "video_diffusion", "audio_diffusion"):
         assert unet[name] == latent[name]
+
+
+def test_spacetime_video_moves_the_video_budget_into_the_vae_and_denoiser():
+    unet3d = estimate_multimodal_params(tiny_multimodal_config())
+    latent = estimate_multimodal_params(
+        tiny_multimodal_config(
+            video_gen_arch="spacetime_dit", video_vae_base_channels=16,
+            video_vae_latent_channels=4, video_dit_d_model=48,
+            video_dit_n_layers=2, video_dit_n_heads=4,
+        )
+    )
+    assert unet3d["video_vae"] == 0 and latent["video_vae"] > 0
+    assert latent["video_diffusion"] > 0
+    for name in ("vision_encoder", "audio_encoder", "image_diffusion", "audio_diffusion"):
+        assert unet3d[name] == latent[name]
 
 
 @pytest.mark.parametrize("name", sorted(PRESETS))

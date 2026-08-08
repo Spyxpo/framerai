@@ -114,7 +114,8 @@ The web app opens at `http://localhost:5173`.
 - Audio encoder: a mel-spectrogram front-end and transformer that turns audio into embeddings.
 - Image decoder: a KL-VAE plus a diffusion transformer on a rectified-flow objective, or the
   original pixel-space U-Net, selected by `image_gen_arch`.
-- Video generator: spatial-temporal diffusion with a 3D U-Net.
+- Video decoder: a causal 3D VAE plus a spacetime diffusion transformer, or the original 3D
+  U-Net, selected by `video_gen_arch`.
 - Audio generator: text-conditioned mel diffusion with Griffin-Lim reconstruction.
 - Multimodal projector: aligns vision and audio embeddings with the language model space.
 
@@ -130,10 +131,10 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B | ~2.5B | ~3.7B |
 | `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~596M | ~7.8B |
 | `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~536M | ~34B |
-| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.6B | ~157B |
-| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~9.2B | ~203B |
-| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~17.4B | ~1.00T |
-| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~33.1B | ~2.00T |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~5.5B | ~158B |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~11.4B | ~205B |
+| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~21.1B | ~1.00T |
+| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~39.0B | ~2.00T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
@@ -180,6 +181,7 @@ across the switch.
 | Field | Default | Alternative | Set by |
 |---|---|---|---|
 | `image_gen_arch` | `unet` | `latent_dit` | the four large MoE presets |
+| `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
 
 `unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
 cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that

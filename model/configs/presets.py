@@ -74,6 +74,9 @@ _MOE = {
         image_gen_arch="latent_dit",
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=1536, dit_n_layers=20, dit_n_heads=12,
+        video_gen_arch="spacetime_dit",
+        video_vae_latent_channels=8, video_vae_base_channels=96,
+        video_dit_d_model=1152, video_dit_n_layers=18, video_dit_n_heads=9,
     ),
     "framer-200b-a20b": dict(  # ~200B total across all modalities / ~20B active
         d_model=5120, n_layers=48, n_heads=40, n_kv_heads=8, d_ff=17920, max_seq_len=8192,
@@ -87,6 +90,9 @@ _MOE = {
         image_gen_arch="latent_dit",
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=2048, dit_n_layers=24, dit_n_heads=16,
+        video_gen_arch="spacetime_dit",
+        video_vae_latent_channels=8, video_vae_base_channels=128,
+        video_dit_d_model=1536, video_dit_n_layers=24, video_dit_n_heads=12,
     ),
     "framer-1t-a32b": dict(  # ~1.0T total across all modalities / ~32B active (cluster-only)
         d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672, max_seq_len=8192,
@@ -100,6 +106,9 @@ _MOE = {
         image_gen_arch="latent_dit",
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=2560, dit_n_layers=28, dit_n_heads=20,
+        video_gen_arch="spacetime_dit",
+        video_vae_latent_channels=8, video_vae_base_channels=128,
+        video_dit_d_model=1920, video_dit_n_layers=28, video_dit_n_heads=15,
     ),
     "framer-2t-a49b": dict(  # ~2.0T total across all modalities / ~49B active (cluster-only)
         # 384 experts is 3 * 128, so it divides evenly across 8/16/32/64/128-way
@@ -120,6 +129,11 @@ _MOE = {
         image_gen_arch="latent_dit",
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=3072, dit_n_layers=32, dit_n_heads=24,
+        # Spacetime transformer for video: factorised attention over a causal 3D
+        # latent, replacing the U-Net whose forward looped over frames.
+        video_gen_arch="spacetime_dit",
+        video_vae_latent_channels=8, video_vae_base_channels=128,
+        video_dit_d_model=2304, video_dit_n_layers=32, video_dit_n_heads=18,
     ),
 }
 
