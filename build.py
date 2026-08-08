@@ -42,6 +42,7 @@ from model.training import (
     train_language_model,
 )
 from model.utils import (
+    MULTIMODAL_TOWERS,
     count_parameters,
     estimate_params,
     get_device,
@@ -313,8 +314,7 @@ def print_estimate(config: FramerConfig):
     if mm is None:
         print("  Multimodal towers  (could not be sized on this build)")
     elif est["multimodal_total"]:
-        for name in ("vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-                     "image_diffusion", "video_diffusion", "audio_diffusion"):
+        for name in MULTIMODAL_TOWERS:
             print(f"    {name:<18s} {human_params(mm[name]):>9s}")
         print(f"  Multimodal total   {est['multimodal_h']:>9s}")
     else:

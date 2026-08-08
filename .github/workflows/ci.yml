@@ -79,11 +79,12 @@ jobs:
           path: coverage.xml
           if-no-files-found: warn
 
-      # Every preset, up to the trillion-parameter flagship, must be sizable on a
-      # 2-core runner: the estimator allocates nothing.
+      # Every preset, up to the two-trillion-parameter flagship, must be sizable
+      # on a 2-core runner: the estimator allocates nothing.
       - name: Estimate presets without instantiating them
         run: |
           python build.py --list-presets
+          python build.py --preset framer-2t-a49b --estimate
           python build.py --preset framer-1t-a32b --estimate
           python build.py --preset framer-200b-a20b --estimate
 

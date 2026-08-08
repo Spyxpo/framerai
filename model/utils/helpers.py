@@ -40,7 +40,16 @@ def _count_on_meta(factory) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
-def estimate_multimodal_params(config) -> dict:
+# The multimodal towers FramerModel builds, in report order. Single source of
+# truth: build.py's breakdown and the estimator tests both import this rather
+# than repeating the tuple.
+MULTIMODAL_TOWERS = (
+    "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
+    "image_diffusion", "video_diffusion", "audio_diffusion",
+)
+
+
+def estimate_multimodal_params(config, strict: bool = False) -> dict:
     """Count the multimodal towers of a config without allocating memory.
 
     Mirrors what :class:`model.framer.FramerModel` builds when
@@ -54,14 +63,12 @@ def estimate_multimodal_params(config) -> dict:
 
     Returns all-zero counts for a text-only config, and ``None`` if a tower
     cannot be built on the meta device, so callers can degrade to a text-only
-    estimate instead of failing.
+    estimate instead of failing. Pass ``strict=True`` to re-raise instead: a typo
+    in a new tower should fail loudly in tests rather than quietly downgrade
+    ``--estimate`` to "could not be sized".
     """
-    towers = (
-        "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-        "image_diffusion", "video_diffusion", "audio_diffusion",
-    )
     if config.text_only:
-        return {**{name: 0 for name in towers}, "total": 0}
+        return {**{name: 0 for name in MULTIMODAL_TOWERS}, "total": 0}
 
     from ..modules.audio_encoder import AudioEncoder
     from ..modules.diffusion import DiffusionModule
@@ -100,17 +107,21 @@ def estimate_multimodal_params(config) -> dict:
         ),
     }
 
+    assert tuple(factories) == MULTIMODAL_TOWERS, "tower registry drifted from MULTIMODAL_TOWERS"
+
     counts = {}
     try:
         for name, factory in factories.items():
             counts[name] = _count_on_meta(factory)
     except Exception:  # noqa: BLE001 - any tower that resists meta construction
+        if strict:
+            raise
         return None
     counts["total"] = sum(counts.values())
     return counts
 
 
-def estimate_params(config) -> dict:
+def estimate_params(config, strict: bool = False) -> dict:
     """Estimate a config's parameter budget without instantiating the model.
 
     ``total`` and ``active`` cover the **text backbone**: total parameters versus
@@ -164,7 +175,7 @@ def estimate_params(config) -> dict:
     total += embed + d  # + final norm
     active += embed + d
 
-    multimodal = estimate_multimodal_params(config)
+    multimodal = estimate_multimodal_params(config, strict=strict)
     mm_total = multimodal["total"] if multimodal else 0
     model_total = total + mm_total
 

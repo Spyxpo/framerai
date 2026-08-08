@@ -1,4 +1,4 @@
-"""Preset registry + parameter estimator tests (incl. the 1T target)."""
+"""Preset registry + parameter estimator tests (incl. the 2T flagship)."""
 
 import pytest
 
@@ -8,7 +8,12 @@ from model.framer import FramerModel
 from model.utils.helpers import estimate_params
 
 # The presets that must be multimodal at scale, not a big LLM with default towers.
-LARGE_MULTIMODAL = ["framer-160b-a16b", "framer-200b-a20b", "framer-1t-a32b"]
+LARGE_MULTIMODAL = [
+    "framer-160b-a16b",
+    "framer-200b-a20b",
+    "framer-1t-a32b",
+    "framer-2t-a49b",
+]
 
 
 def test_all_presets_build_configs():
