@@ -112,6 +112,67 @@ class FramerConfig:
     def num_patches(self) -> int:
         return (self.image_size // self.patch_size) ** 2
 
+    def validate(self) -> "FramerConfig":
+        """Check the shape invariants the modules assume, and fail early if not.
+
+        Without this a bad ``--d-model`` or a mistyped preset surfaces as an
+        obscure error deep inside module construction (or, worse, only once a
+        multi-hour training run reaches the multimodal decoders).
+        """
+        problems = []
+
+        if self.d_model % self.n_heads:
+            problems.append(f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})")
+        if self.n_heads % self.kv_heads:
+            problems.append(
+                f"n_heads ({self.n_heads}) must be divisible by n_kv_heads ({self.kv_heads}) for GQA"
+            )
+        if self.n_layers < 1:
+            problems.append(f"n_layers ({self.n_layers}) must be at least 1")
+
+        if self.use_moe:
+            if self.n_experts < 1:
+                problems.append("use_moe=True requires n_experts >= 1")
+            if self.n_experts_per_tok > self.n_experts:
+                problems.append(
+                    f"n_experts_per_tok ({self.n_experts_per_tok}) exceeds "
+                    f"n_experts ({self.n_experts})"
+                )
+            if self.first_dense_layers >= self.n_layers:
+                problems.append(
+                    f"first_dense_layers ({self.first_dense_layers}) leaves no MoE layer "
+                    f"in n_layers ({self.n_layers})"
+                )
+
+        if not self.text_only:
+            if self.image_size % self.patch_size:
+                problems.append(
+                    f"image_size ({self.image_size}) must be divisible by "
+                    f"patch_size ({self.patch_size})"
+                )
+            if self.vision_d_model % self.vision_n_heads:
+                problems.append("vision_d_model must be divisible by vision_n_heads")
+            if self.audio_d_model % self.audio_n_heads:
+                problems.append("audio_d_model must be divisible by audio_n_heads")
+            # The diffusion blocks use GroupNorm(32, ch) and the video U-Net runs
+            # at half the image channel width, so 64 is the real granularity.
+            if self.diffusion_channels % 64:
+                problems.append(
+                    f"diffusion_channels ({self.diffusion_channels}) must be a multiple of 64 "
+                    "(GroupNorm(32) over both the image and the half-width video U-Net)"
+                )
+            if self.audio_gen_channels % 32:
+                problems.append(
+                    f"audio_gen_channels ({self.audio_gen_channels}) must be a multiple of 32 "
+                    "(GroupNorm(32))"
+                )
+
+        if problems:
+            raise ValueError(
+                f"Invalid FramerConfig ({self.preset or 'custom'}): " + "; ".join(problems)
+            )
+        return self
+
     def is_moe_layer(self, layer_idx: int) -> bool:
         """Whether the transformer layer at ``layer_idx`` uses a MoE FFN."""
         if not self.use_moe or self.n_experts <= 0:
