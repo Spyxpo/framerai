@@ -94,6 +94,15 @@ optional body explaining what and why
 Common types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`.
 Keep the subject line under 72 characters and in the imperative mood.
 
+Do not add `Co-Authored-By:` trailers naming an AI assistant or vendor. A pull
+request ref freezes when the pull request merges, so a trailer that lands there
+can only be removed by GitHub Support. CI fails the build on one; install the
+local hook to catch it before the commit exists:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
 ## Coding standards
 
 - Python: format and lint with [ruff](https://docs.astral.sh/ruff/). Target Python 3.10+.
