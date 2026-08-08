@@ -17,7 +17,7 @@ class TemporalAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.out = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, H*W, C) where T is frames
@@ -30,12 +30,9 @@ class TemporalAttention(nn.Module):
         qkv = self.qkv(h).reshape(B * S, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        scale = math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) / scale
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
+        out = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.dropout_p if self.training else 0.0
+        )
         out = out.transpose(1, 2).contiguous().reshape(B * S, T, C)
         out = self.out(out)
         out = out.reshape(B, S, T, C).permute(0, 2, 1, 3)

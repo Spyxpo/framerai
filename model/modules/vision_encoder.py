@@ -1,6 +1,5 @@
 """Vision encoder for processing image inputs."""
 
-import math
 
 import torch
 import torch.nn as nn
@@ -29,7 +28,13 @@ class PatchEmbedding(nn.Module):
 
 
 class VisionAttention(nn.Module):
-    """Multi-head self-attention for vision transformer."""
+    """Multi-head self-attention for vision transformer.
+
+    Uses the fused SDPA kernel rather than materializing a ``(B, heads, T, T)``
+    matrix. The explicit form made the encoder's memory cost quadratic in the
+    patch count and retained for backward across every layer, which put the
+    large presets' configured resolutions out of reach on any hardware.
+    """
 
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
@@ -37,19 +42,16 @@ class VisionAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        scale = math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) / scale
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
+        out = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.dropout_p if self.training else 0.0
+        )
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 

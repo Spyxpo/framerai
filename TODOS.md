@@ -26,6 +26,10 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Validate config shape invariants up front (`FramerConfig.validate()`).
 - [x] Benchmark and tune the audio encoder and generator dimensions per size.
 - [x] Grouped-query attention, fused SDPA/flash attention, and an incremental KV cache.
+- [x] Use fused SDPA in the vision, audio, temporal, and diffusion attention paths, which
+      materialised an explicit attention matrix and made memory quadratic in patch/pixel
+      count. Compute in the pixel-space image U-Net stays quadratic; only the latent
+      diffusion path below makes high resolutions practical.
 - [x] Mixture-of-Experts FFN with load-balancing + router z-loss for trillion-scale totals.
 - [x] Support gradient checkpointing and mixed precision (bf16/fp16/fp32) flags end to end.
 - [x] Warmup→cosine LR schedule wired through `config.warmup_steps`.
