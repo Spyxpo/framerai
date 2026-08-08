@@ -1,5 +1,10 @@
 from dataclasses import dataclass, fields
 
+# RoPE context-extension strategies the backbone implements. Kept here, with no
+# torch dependency, so both the config validator and the module can share one
+# list instead of drifting apart.
+ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
+
 
 @dataclass
 class FramerConfig:
@@ -95,6 +100,11 @@ class FramerConfig:
     rope_theta: float = 10000.0
     rope_scaling_factor: float = 1.0
     rope_scaling_type: str = "linear"  # "linear" | "ntk" | "yarn" | "none"
+    # yarn only: the wavelength band, in rotations over the original context,
+    # between "leave this frequency alone" and "interpolate it in full".
+    rope_low_freq_factor: float = 1.0
+    rope_high_freq_factor: float = 4.0
+    rope_original_max_seq_len: int = None  # defaults to max_seq_len
 
     # Identity
     preset: str = None
@@ -129,6 +139,19 @@ class FramerConfig:
             )
         if self.n_layers < 1:
             problems.append(f"n_layers ({self.n_layers}) must be at least 1")
+
+        # An unrecognised scaling type used to fall through every branch and
+        # silently apply no extension at all, which is worse than failing.
+        if self.rope_scaling_type not in ROPE_SCALING_TYPES:
+            problems.append(
+                f"rope_scaling_type ('{self.rope_scaling_type}') must be one of "
+                f"{', '.join(ROPE_SCALING_TYPES)}"
+            )
+        if self.rope_scaling_type == "yarn" and self.rope_high_freq_factor <= self.rope_low_freq_factor:
+            problems.append(
+                f"rope_high_freq_factor ({self.rope_high_freq_factor}) must exceed "
+                f"rope_low_freq_factor ({self.rope_low_freq_factor})"
+            )
 
         if self.use_moe:
             if self.n_experts < 1:

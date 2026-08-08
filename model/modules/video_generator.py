@@ -156,10 +156,9 @@ class VideoUNet(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         # x: (B, C, T, H, W)
-        t_emb = self.time_embed(self._sinusoidal_embedding(t, x.shape[1] * 4 // 4))
-        # Adjust time embed dim
-        t_emb_ch = self._sinusoidal_embedding(t, self.conv_in.out_channels)
-        t_emb = self.time_embed(t_emb_ch)
+        # The sinusoidal width must match time_embed's input, which is the
+        # U-Net's base channel count - not the input channel count.
+        t_emb = self.time_embed(self._sinusoidal_embedding(t, self.conv_in.out_channels))
 
         h = self.conv_in(x)
 

@@ -7,8 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Video generation raised `RuntimeError` on every forward pass.** The 3D U-Net
+  sized its timestep embedding from the input channel count instead of the base
+  channel count, so `forward_video`, `VideoGenerator.sample`, and the
+  `/api/generate/video` route could never produce a frame.
+- **`decode()` returned an empty string after the tokenizer was reloaded.**
+  `FramerTokenizer.load` rebuilt the merge map but not the merge vocabulary, so
+  every merged token silently decoded to nothing on the live inference path.
+  Saved tokenizers now carry a version, their own special-token table, and a
+  fixed-capacity reserved marker block placed after the byte range, so adding a
+  marker no longer shifts byte or merge ids. Version 1 files still load.
+- **`rope_scaling_type="yarn"` applied no context extension at all.** It matched
+  neither the NTK nor the linear branch and silently behaved like `"none"`. YaRN
+  is now implemented as per-dimension NTK-by-parts interpolation with the
+  attention-factor compensation, configurable through `rope_low_freq_factor`,
+  `rope_high_freq_factor`, and `rope_original_max_seq_len`. `validate()` rejects
+  an unrecognised `rope_scaling_type` rather than ignoring it.
+- Removed a dead zero-initialisation in the MoE auxiliary-loss path.
+
 ### Added
 
+- Forward-pass tests for every multimodal tower (`tests/test_modality_forward.py`),
+  tokenizer save/load round-trip and id-layout tests (`tests/test_tokenizer.py`),
+  and RoPE context-extension tests (`tests/test_rope.py`). No test previously
+  executed a vision, audio, image-diffusion, or video forward pass.
 - **All-modality flagship**: `framer-1t-a32b` now scales its vision and audio
   encoders and its image, video, and audio diffusion decoders with the backbone -
   ~999B parameters of text, code, image, video, and audio in one model, ~32B

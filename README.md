@@ -50,7 +50,7 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 
 - **Text generation** - chat and Q&A with autoregressive decoding (top-k, top-p, temperature).
 - **Code generation** - lower-temperature sampling for more deterministic output.
-- **Image generation** - text-to-image via classifier-free diffusion.
+- **Image generation** - text-to-image via a cross-attention-conditioned diffusion U-Net.
 - **Video generation** - text-to-video with spatial-temporal attention.
 - **Audio generation** - text-to-audio and speech via mel diffusion with Griffin-Lim reconstruction.
 - **Image understanding** - a vision encoder processes uploaded images for multimodal chat.
@@ -65,8 +65,8 @@ FramerAI combines several neural architectures into one unified model:
 
 - **Transformer backbone** - autoregressive decoder with **grouped-query attention (GQA)**,
   fused scaled-dot-product (flash / memory-efficient) attention, an **incremental KV cache**
-  for O(n) decoding, RoPE with **context-extension scaling**, SwiGLU, RMSNorm, and optional
-  QK-normalization for stability at scale.
+  for O(n) decoding, RoPE with **context-extension scaling** (linear, NTK, or YaRN), SwiGLU,
+  RMSNorm, and optional QK-normalization for stability at scale.
 - **Mixture-of-Experts (MoE)** - sparse top-k routed experts (with optional always-on shared
   experts and a load-balancing auxiliary loss) let *total* parameters reach a trillion while
   *active* per-token compute stays small. See [Model sizes](#model-sizes).
