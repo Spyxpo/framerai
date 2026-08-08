@@ -379,3 +379,54 @@ def _resample(wav: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
     right = (left + 1).clamp(max=wav.shape[0] - 1)
     frac = idx - left.float()
     return wav[left] * (1 - frac) + wav[right] * frac
+
+
+class InterleavedSequenceBuilder:
+    """Build token sequences with modality placeholders in the right places.
+
+    Interleaved placement needs the sequence to reserve exactly one token per
+    modality embedding. Getting that count wrong corrupts the sequence, so the
+    builder that emits the placeholders and the encoder that fills them have to
+    agree; this class owns the emitting half and reports how many slots it
+    reserved so the caller can check.
+
+    A run looks like ``<img> <img_patch> x N <img_end>``: the markers stay so
+    the model can tell where a modality started and stopped, and only the inner
+    run is replaced by embeddings.
+    """
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.image_patch = tokenizer.reserved_tokens["<img_patch>"]
+        self.audio_frame = tokenizer.reserved_tokens["<audio_frame>"]
+        self.specials = tokenizer.special_tokens
+
+    def _run(self, open_token: str, placeholder: int, end_token: str, count: int) -> list:
+        return [self.specials[open_token]] + [placeholder] * count + [self.specials[end_token]]
+
+    def image_run(self, n_tokens: int) -> list:
+        return self._run("<img>", self.image_patch, "<img_end>", n_tokens)
+
+    def audio_run(self, n_frames: int) -> list:
+        return self._run("<audio>", self.audio_frame, "<audio_end>", n_frames)
+
+    def build(self, segments: list) -> dict:
+        """Assemble a sequence from ``("text"|"image"|"audio", value)`` segments.
+
+        ``value`` is a string for text and a token count for a modality.
+        Returns the ids plus the number of slots reserved per placeholder, which
+        is what the caller checks against the encoder's output.
+        """
+        ids, counts = [], {self.image_patch: 0, self.audio_frame: 0}
+        for kind, value in segments:
+            if kind == "text":
+                ids.extend(self.tokenizer.encode(value, add_special=False))
+            elif kind == "image":
+                ids.extend(self.image_run(value))
+                counts[self.image_patch] += value
+            elif kind == "audio":
+                ids.extend(self.audio_run(value))
+                counts[self.audio_frame] += value
+            else:
+                raise ValueError(f"Unknown segment kind '{kind}'")
+        return {"input_ids": ids, "placeholder_counts": counts}

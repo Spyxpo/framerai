@@ -121,6 +121,8 @@ _MOE = {
         codec_base_channels=96, rvq_n_quantizers=12, rvq_codebook_size=2048,
         audio_lm_d_model=2048, audio_lm_n_layers=20, audio_lm_n_heads=32,
         vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
+        vision_tiling=True, vision_max_tiles=8, vision_thumbnail=True,
+        mm_token_placement="interleaved",
     ),
     "framer-2t-a49b": dict(  # ~2.0T total across all modalities / ~49B active (cluster-only)
         # 384 experts is 3 * 128, so it divides evenly across 8/16/32/64/128-way
@@ -153,6 +155,10 @@ _MOE = {
         codec_base_channels=96, rvq_n_quantizers=12, rvq_codebook_size=2048,
         audio_lm_d_model=2560, audio_lm_n_layers=24, audio_lm_n_heads=40,
         vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
+        # image_size is the tile size here; effective resolution is ~1568px
+        # across 12 tiles plus a thumbnail, at per-tile attention cost.
+        vision_tiling=True, vision_max_tiles=12, vision_thumbnail=True,
+        mm_token_placement="interleaved",
     ),
 }
 

@@ -13,7 +13,7 @@ from .modules.moe import build_ffn
 from .modules.multimodal_projector import MultimodalProjector
 from .modules.rvq_audio import build_audio_generator
 from .modules.transformer import CausalSelfAttention, FeedForward, RMSNorm, TransformerBlock
-from .modules.vision_encoder import VisionEncoder
+from .modules.vision_encoder import DynamicTiler, VisionEncoder
 
 
 class FramerModel(nn.Module):
@@ -28,6 +28,12 @@ class FramerModel(nn.Module):
     - Audio encoder for audio/speech understanding
     - Mel diffusion for audio/speech generation
     """
+
+    # Placeholder token ids the interleaved path writes into. They live in the
+    # tokenizer's reserved block, after the byte range, so their values are
+    # stable across tokenizer versions.
+    IMAGE_PLACEHOLDER_ID = 271
+    AUDIO_PLACEHOLDER_ID = 272
 
     def __init__(self, config: FramerConfig, init_weights: bool = True):
         super().__init__()
@@ -75,6 +81,13 @@ class FramerModel(nn.Module):
             config.vision_n_layers, config.dropout
         )
         self.vision_projector = MultimodalProjector(config.vision_d_model, config.d_model)
+        # With tiling on, image_size is the tile size and effective resolution
+        # comes from the tile count instead.
+        self.tiler = (
+            DynamicTiler(config.image_size, config.vision_max_tiles, config.vision_thumbnail)
+            if config.vision_tiling
+            else None
+        )
 
         # Image generation: pixel U-Net or latent diffusion transformer,
         # selected by config.image_gen_arch. Both expose the same
@@ -178,6 +191,49 @@ class FramerModel(nn.Module):
         return self
 
     # ------------------------------------------------------------------
+    # Modality placement
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _scatter_modality_embeds(input_ids, x, embeds, placeholder_id):
+        """Write modality embeddings into the positions holding a placeholder.
+
+        The sequence already reserves one token per embedding, so this replaces
+        rather than inserts: length, attention mask, and label alignment are all
+        unchanged. A count mismatch means the sequence builder and the encoder
+        disagree, which would otherwise corrupt the sequence silently, so it
+        raises.
+        """
+        mask = input_ids == placeholder_id
+        slots = int(mask.sum())
+        if slots == 0:
+            return x
+
+        flat = embeds.reshape(-1, x.shape[-1])
+        if flat.shape[0] != slots:
+            raise ValueError(
+                f"{slots} placeholder tokens for id {placeholder_id} but "
+                f"{flat.shape[0]} embeddings to place"
+            )
+        return x.masked_scatter(mask.unsqueeze(-1), flat.to(x.dtype))
+
+    def encode_image_tiles(self, images: torch.Tensor) -> torch.Tensor:
+        """Encode an image as tiles plus a thumbnail, or as one whole image.
+
+        Returns ``(B, tokens, d_model)``. With tiling on, every tile is encoded
+        in one batched forward and the results are concatenated, so the token
+        count grows with tile count while attention cost stays per-tile.
+        """
+        if not getattr(self, "tiler", None):
+            return self.vision_projector(self.vision_encoder(images))
+
+        tiles, _ = self.tiler(images)
+        B, n_tiles = tiles.shape[:2]
+        flat = tiles.reshape(B * n_tiles, *tiles.shape[2:])
+        encoded = self.vision_projector(self.vision_encoder(flat))
+        return encoded.reshape(B, n_tiles * encoded.shape[1], encoded.shape[2])
+
+    # ------------------------------------------------------------------
     # Transformer stack
     # ------------------------------------------------------------------
 
@@ -207,15 +263,25 @@ class FramerModel(nn.Module):
         prefix_embeds: torch.Tensor = None,
         past_kvs: list = None,
         use_cache: bool = False,
+        modality_embeds: dict = None,
     ) -> dict:
         """Core language-model forward.
 
         Returns a dict with ``logits`` (token positions only), ``hidden`` (the
         pre-head normalized hidden states over token positions), ``aux`` (summed
         MoE auxiliary loss or None), and ``past_kvs`` (updated cache or None).
+
+        ``modality_embeds`` maps a placeholder token id to the embeddings that
+        replace it, used when ``mm_token_placement="interleaved"``. Placement
+        then costs no extra sequence length and preserves where each modality
+        appeared relative to the text, which prefix concatenation discards.
         """
         B, T = input_ids.shape
         x = self.token_embed(input_ids)
+
+        if modality_embeds:
+            for placeholder_id, embeds in modality_embeds.items():
+                x = self._scatter_modality_embeds(input_ids, x, embeds, placeholder_id)
 
         prefix_len = 0
         if prefix_embeds is not None:
@@ -295,18 +361,34 @@ class FramerModel(nn.Module):
         """Unified forward pass. Returns per-modality losses for present inputs."""
         results = {}
 
-        # Encode input modalities and build the prefix prepended to the tokens
-        prefix_parts = []
+        # Encode input modalities. Under "prefix" they are concatenated ahead of
+        # the tokens; under "interleaved" they are written into placeholder
+        # positions, so an image sits where it was mentioned.
+        interleaved = self.config.mm_token_placement == "interleaved"
+        prefix_parts, modality_embeds = [], {}
+
         if images is not None:
-            prefix_parts.append(self.forward_vision(images))
+            encoded = self.encode_image_tiles(images)
+            if interleaved:
+                modality_embeds[self.IMAGE_PLACEHOLDER_ID] = encoded
+            else:
+                prefix_parts.append(encoded)
         if audio is not None:
-            prefix_parts.append(self.forward_audio(audio))
+            encoded = self.forward_audio(audio)
+            if interleaved:
+                modality_embeds[self.AUDIO_PLACEHOLDER_ID] = encoded
+            else:
+                prefix_parts.append(encoded)
+
         prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
         # Text/code generation (single LM pass reused for conditioning below)
         text_context = None
         if input_ids is not None:
-            lm = self.forward_lm(input_ids, attention_mask, prefix_embeds)
+            lm = self.forward_lm(
+                input_ids, attention_mask, prefix_embeds,
+                modality_embeds=modality_embeds or None,
+            )
             results["logits"] = lm["logits"]
             # Reuse the LM hidden states as generation conditioning (detached to
             # keep decoder losses from backpropagating through the whole stack).

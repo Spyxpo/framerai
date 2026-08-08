@@ -185,6 +185,8 @@ across the switch.
 | `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
 | `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | the four large MoE presets |
 | `vocoder_arch` | `griffin_lim` | `istft` | the four large MoE presets |
+| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b` |
+| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b` |
 
 `unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
 cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that
@@ -206,6 +208,36 @@ The latent path brings three things the U-Net did not have:
 
 Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
 table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
+
+### Placing modalities in the sequence
+
+Under `prefix`, encoded image and audio embeddings are concatenated ahead of the tokens. That
+costs extra sequence positions and, more importantly, discards *where* each modality appeared:
+"how does the first image differ from the second" is unanswerable from a prefix.
+
+Under `interleaved`, the sequence reserves one placeholder token per embedding and
+`_scatter_modality_embeds` writes them in with `masked_scatter`. Length, attention mask, and
+label alignment are all unchanged, because this replaces rather than inserts.
+
+The two halves of the contract are `InterleavedSequenceBuilder` in `model/data.py`, which emits
+`<img> <img_patch> x N <img_end>` runs, and the encoder, which produces N embeddings. A count
+mismatch raises rather than corrupting the sequence silently.
+
+### High-resolution tiling
+
+With `vision_tiling` on, `image_size` becomes the *tile* size and `DynamicTiler` splits an image
+into the `(rows, cols)` grid whose aspect ratio best matches it, bounded by `vision_max_tiles`.
+Attention is quadratic within a tile but only linear across tiles, so 12 tiles cover roughly
+3.5x the linear resolution at a fraction of what one large forward would cost. A downscaled
+thumbnail is prepended because tiles alone destroy global layout.
+
+`PatchEmbedding.interpolate_pos_encoding` bicubically resamples the learned position table when
+the patch grid differs from the trained one, so the same weights accept a tile of any shape.
+
+`ContrastiveVisionTrainer` in `model/training/contrastive.py` gives the vision tower a training
+signal of its own: symmetric InfoNCE between pooled image and text embeddings with a learned
+temperature. Without it the encoder learns only from whatever gradient reaches it through the
+language-model loss, which is weak and indirect.
 
 ### Requesting a size
 

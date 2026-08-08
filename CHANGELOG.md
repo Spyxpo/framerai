@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Interleaved multimodal token placement and dynamic high-resolution tiling.**
+  `mm_token_placement="interleaved"` writes encoded modality embeddings into
+  placeholder token positions with `masked_scatter` instead of concatenating
+  them ahead of the sequence, so an image sits where it was mentioned and the
+  sequence does not grow. `InterleavedSequenceBuilder` in `model/data.py` emits
+  the matching placeholder runs, and a count mismatch raises rather than
+  corrupting the sequence. `vision_tiling` splits a high-resolution image into
+  encoder-sized tiles plus a global thumbnail, choosing the grid whose aspect
+  ratio best matches the image; `PatchEmbedding.interpolate_pos_encoding`
+  resamples the learned position table so one encoder accepts any tile shape.
+  `model/training/contrastive.py` adds symmetric InfoNCE pretraining for the
+  vision tower with a learned temperature. `framer-1t-a32b` and
+  `framer-2t-a49b` opt in; the defaults are unchanged.
 - **Residual vector-quantized audio codec and neural vocoder**
   (`audio_gen_arch="rvq_lm"`). A causal convolutional codec at 24 kHz with a
   75 Hz acoustic frame rate turns audio into discrete tokens
