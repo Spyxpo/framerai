@@ -118,22 +118,43 @@ The web app opens at `http://localhost:5173`.
 - Multimodal projector: aligns vision and audio embeddings with the language model space.
 
 Model sizes are named presets in `model/configs/presets.py` (run
-`python build.py --list-presets` to print total/active parameter counts). LLM-core
-counts (total vs. active per token):
+`python build.py --list-presets` to print them). Text is the transformer backbone,
+multimodal is the encoders plus the diffusion decoders, and model total is the whole thing:
 
-| Preset | d_model | Layers | Heads (Q/KV) | Total | Active |
-|--------|---------|--------|--------------|-------|--------|
-| `framer-tiny` | 256 | 6 | 8 / 4 | ~19M | ~19M |
-| `framer-small` | 768 | 12 | 12 / 4 | ~142M | ~142M |
-| `framer-medium` | 1024 | 24 | 16 / 8 | ~429M | ~429M |
-| `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B |
-| `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B |
-| `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B |
-| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~999B | ~32B |
+| Preset | d_model | Layers | Heads (Q/KV) | Text | Active | Multimodal | Model total |
+|--------|---------|--------|--------------|------|--------|------------|-------------|
+| `framer-tiny` | 256 | 6 | 8 / 4 | ~19M | ~19M | ~20M | ~39M |
+| `framer-small` | 768 | 12 | 12 / 4 | ~142M | ~142M | ~94M | ~236M |
+| `framer-medium` | 1024 | 24 | 16 / 8 | ~429M | ~429M | ~512M | ~941M |
+| `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B | ~2.5B | ~3.7B |
+| `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~596M | ~7.8B |
+| `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~536M | ~34B |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.2B | ~156B |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~8.2B | ~202B |
+| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~16.3B | ~999B |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
-scale total parameters via sparse experts and need multi-GPU hardware to train.
-`--size tiny|small|medium|large` remains as a legacy alias.
+scale total parameters via sparse experts and need multi-node hardware to train.
+The three largest scale their vision, audio, and diffusion towers with the backbone, so
+`framer-1t-a32b` holds a trillion parameters across all five modalities rather than in the
+language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
+`--preset NAME` selects any preset by name (also available on `train.sh`).
+
+### How the estimator sizes a trillion parameters on a laptop
+
+`estimate_params(config)` in `model/utils/helpers.py` never builds the model. The text
+backbone is computed analytically from the config (attention, SwiGLU or MoE experts,
+embeddings, norms), and each multimodal tower is constructed under `torch.device("meta")`,
+which materializes shapes without storage. That keeps the number honest — it tracks the real
+module code rather than a formula that can drift from it — while staying instant and
+allocation-free. `python build.py --preset NAME --estimate` prints the per-tower breakdown
+plus the bf16 weight footprint and the full AdamW training state.
+
+`FramerConfig.validate()` runs whenever a preset is built and after CLI overrides are applied.
+It checks the invariants the modules assume: head divisibility for attention and GQA, patch
+size dividing image size, MoE routing width, and the `GroupNorm(32)` channel granularity that
+the image and video U-Nets require (which makes 64 the real step for `diffusion_channels`,
+since the video U-Net runs at half width).
 
 To experiment with a custom shape, pass overrides:
 

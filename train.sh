@@ -28,6 +28,7 @@ fi
 # Defaults (override via CLI flags or environment variables)
 # ---------------------------------------------------------------------------
 MODEL_SIZE="${MODEL_SIZE:-tiny}"
+MODEL_PRESET="${MODEL_PRESET:-}"
 MAX_STEPS="${MAX_STEPS:-1000}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LEARNING_RATE="${LEARNING_RATE:-3e-4}"
@@ -48,6 +49,9 @@ Usage: ./train.sh [OPTIONS]
 
 Model options:
   --size SIZE            Model size: tiny, small, medium, large (default: tiny)
+  --preset NAME          Named preset, overrides --size. Run
+                         'python build.py --list-presets' for the full ladder
+                         (framer-tiny ... framer-200b-a20b, framer-1t-a32b)
   --device DEVICE        Device: auto, cpu, cuda, mps (default: auto)
   --rope-scaling F       RoPE scaling factor for extended context
 
@@ -74,6 +78,7 @@ HELP
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --size)             MODEL_SIZE="$2"; shift 2 ;;
+        --preset)           MODEL_PRESET="$2"; shift 2 ;;
         --device)           DEVICE="$2"; shift 2 ;;
         --rope-scaling)     ROPE_SCALING="$2"; shift 2 ;;
         --max-steps)        MAX_STEPS="$2"; shift 2 ;;
@@ -114,7 +119,11 @@ log_config() { echo -e "  ${BOLD}$1:${NC} $2"; }
 echo ""
 echo -e "${BOLD}FramerAI Training Pipeline${NC}"
 echo "=========================================="
-log_config "Model size"    "$MODEL_SIZE"
+if [[ -n "$MODEL_PRESET" ]]; then
+    log_config "Preset"        "$MODEL_PRESET"
+else
+    log_config "Model size"    "$MODEL_SIZE"
+fi
 log_config "Max steps"     "$MAX_STEPS"
 log_config "Batch size"    "$BATCH_SIZE"
 log_config "Learning rate" "$LEARNING_RATE"
@@ -152,9 +161,13 @@ fi
 # STEP 2: Build, train, and export the model
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_TRAIN" == "0" ]]; then
-    log_step "Building and training FramerAI (size=$MODEL_SIZE) from '$DATA_DIR'"
-
-    TRAIN_CMD="python build.py --mode all --size $MODEL_SIZE"
+    if [[ -n "$MODEL_PRESET" ]]; then
+        log_step "Building and training FramerAI (preset=$MODEL_PRESET) from '$DATA_DIR'"
+        TRAIN_CMD="python build.py --mode all --preset $MODEL_PRESET"
+    else
+        log_step "Building and training FramerAI (size=$MODEL_SIZE) from '$DATA_DIR'"
+        TRAIN_CMD="python build.py --mode all --size $MODEL_SIZE"
+    fi
     TRAIN_CMD+=" --max-steps $MAX_STEPS"
     TRAIN_CMD+=" --batch-size $BATCH_SIZE"
     TRAIN_CMD+=" --lr $LEARNING_RATE"
