@@ -42,7 +42,7 @@ _DENSE = {
     "framer-3b": dict(
         d_model=2560, n_layers=32, n_heads=20, n_kv_heads=4, d_ff=6912, max_seq_len=4096,
     ),
-    "framer-8b": dict(  # Llama-3-8B-shaped
+    "framer-8b": dict(  # classic 8B dense shape
         d_model=4096, n_layers=32, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
     ),
 }

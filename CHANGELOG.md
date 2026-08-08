@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **All-modality flagship**: `framer-1t-a32b` now scales its vision and audio
+  encoders and its image, video, and audio diffusion decoders with the backbone -
+  ~999B parameters of text, code, image, video, and audio in one model, ~32B
+  active per text token. New `framer-200b-a20b` (~202B total / ~20B active) sits
+  between it and `framer-30b-a3b`.
+- **Whole-model parameter estimator**: `estimate_params` reports `multimodal`,
+  `model_total`, and the bf16 / AdamW memory footprint alongside the existing
+  text-core counts, and `estimate_multimodal_params` counts each tower by building
+  it on the meta device (no allocation). QK-norm parameters are now counted.
+- `build.py --estimate` prints the per-tower parameter and memory budget for a
+  config and exits; `--list-presets` gains multimodal and model-total columns;
+  `train.sh --preset NAME` reaches any preset from the wrapper script.
+- `FramerConfig.validate()` checks the shape invariants the modules assume (head
+  divisibility, patch/image size, MoE routing width, `GroupNorm(32)` channel
+  granularity) when a preset is built and after CLI overrides are applied.
+- CI runs the Python test suite on CPU wheels plus an estimator smoke check,
+  lints and byte-compiles `tests/`, `scripts/`, and `conftest.py`, and caches pip.
+
 - Scale-capable LLM core: **grouped-query attention (GQA)**, fused
   scaled-dot-product (flash / memory-efficient) attention, an incremental **KV
   cache** for O(n) decoding, RoPE **context-extension scaling** (linear / NTK),
@@ -47,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `framer-160b-a16b` scales its multimodal towers on the same basis as the
+  flagship (~156B total across all modalities).
+- `framer-tiny-moe` uses the tiny towers its dense sibling uses, so the
+  laptop-validation preset stays laptop-sized.
 - FramerAI now trains from scratch on a local corpus. Removed the knowledge
   distillation pipeline and all external teacher-model dependencies
   (`transformers`, `accelerate`, `bitsandbytes`, `sentencepiece`, `huggingface-hub`).

@@ -22,7 +22,7 @@ class FramerConfig:
     use_moe: bool = False
     n_experts: int = 0  # number of routed experts per MoE layer
     n_experts_per_tok: int = 2  # top-k routing
-    n_shared_experts: int = 0  # always-on experts (DeepSeek-style), 0 disables
+    n_shared_experts: int = 0  # always-on experts every token uses, 0 disables
     expert_d_ff: int = None  # per-expert FFN width. None -> falls back to d_ff
     moe_layer_freq: int = 1  # 1 = every layer is MoE; 2 = every other; etc.
     first_dense_layers: int = 0  # keep the first N layers dense (routing warmup)

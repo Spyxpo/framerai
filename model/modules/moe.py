@@ -3,7 +3,7 @@
 This is the mechanism that lets *total* parameters scale to hundreds of billions
 or a trillion while the *active* (per-token) compute stays small: each token is
 routed to only ``n_experts_per_tok`` of the ``n_experts`` experts. Optional
-always-on shared experts (DeepSeek-style) capture common computation.
+always-on shared experts capture computation common to every token.
 
 The dispatch here is correctness-first: experts are iterated and each processes
 only the tokens routed to it (a gather / index_add scatter). This is exact and
