@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Spacetime diffusion transformer for video generation**
+  (`video_gen_arch="spacetime_dit"`). A causal 3D VAE compressing 4x in time and
+  8x in space (`model/modules/video_vae.py`), and a transformer with factorised
+  spatial and temporal attention, 3D sin-cos positions, and frame-rate
+  conditioning (`model/modules/spacetime_dit.py`). Both attention passes are
+  batched reshapes, which removes the per-frame Python loop that made the 3D
+  U-Net's throughput fall linearly with clip length. Causal convolutions and
+  per-frame normalization mean frame *t* never depends on frame *t+1*, so
+  duration is variable and streaming decode is possible. `generate_video` gains
+  `width`, `height`, `aspect`, `fps`, and `seed`, reusing the image size buckets.
+  The four large MoE presets opt in; the default stays `unet3d`.
 - **Latent diffusion transformer for image generation** (`image_gen_arch="latent_dit"`).
   A KL-VAE compressing 8x into a latent grid (`model/modules/vae.py`), a diffusion
   transformer denoiser with adaLN-zero timestep and text conditioning and
@@ -87,8 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `build.py` refuses to instantiate a config that cannot fit in memory, naming
   `--estimate` and `--force`, instead of being OOM-killed without explanation.
 - **`framer-2t-a49b`, the two-trillion-parameter all-modality flagship.** 1.96T
-  text backbone, 49.40B active per token, 31.88B across the vision and audio
-  encoders and the image, video, and audio decoders, for 1.99T in total.
+  text backbone, 49.40B active per token, 39.00B across the vision and audio
+  encoders and the image, video, and audio decoders, for 2.00T in total.
   `d_model=10240`, 84 layers, 80/8 heads, 16K context, 384 fine-grained experts
   with top-4 routing and one shared expert. 384 is 3 x 128, so the experts shard
   evenly across 8/16/32/64/128-way expert-parallel meshes. Sizing it allocates

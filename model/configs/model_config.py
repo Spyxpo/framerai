@@ -8,6 +8,7 @@ ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 # Decoder families. Each modality keeps its original implementation as the
 # default so the small presets stay laptop-runnable, and opts in per preset.
 IMAGE_GEN_ARCHS = ("unet", "latent_dit")
+VIDEO_GEN_ARCHS = ("unet3d", "spacetime_dit")
 
 # Aspect ratios a request may name. Kept here so validate() can check the
 # configured default without importing the sizing helpers (and torch with them).
@@ -88,9 +89,23 @@ class FramerConfig:
     cfg_scale: float = 5.0  # default guidance strength at inference
 
     # Video generation config
+    # video_gen_arch selects the decoder family. "unet3d" is the original 3D
+    # U-Net, whose forward pass loops over frames in Python; "spacetime_dit" is
+    # a causal 3D VAE plus a transformer with factorised spacetime attention.
+    video_gen_arch: str = "unet3d"  # "unet3d" | "spacetime_dit"
     video_frames: int = 16
     video_resolution: int = 256
-    temporal_layers: int = 8
+    video_fps: int = 24
+
+    # Latent video (video_gen_arch="spacetime_dit")
+    video_vae_latent_channels: int = 8
+    video_vae_base_channels: int = 128
+    video_vae_temporal_downsample: int = 4  # power of two
+    video_vae_spatial_downsample: int = 8  # power of two
+    video_dit_d_model: int = 1536
+    video_dit_n_layers: int = 24
+    video_dit_n_heads: int = 12
+    video_dit_patch_size: tuple = (1, 2, 2)  # (t, h, w) over the latent grid
 
     # Audio encoder config (speech / audio understanding)
     audio_sample_rate: int = 16000
@@ -238,6 +253,31 @@ class FramerConfig:
                 problems.append(
                     f"image_max_pixels ({self.image_max_pixels}) is below the smallest bucket"
                 )
+
+            if self.video_gen_arch not in VIDEO_GEN_ARCHS:
+                problems.append(
+                    f"video_gen_arch ('{self.video_gen_arch}') must be one of "
+                    f"{', '.join(VIDEO_GEN_ARCHS)}"
+                )
+            if self.video_gen_arch == "spacetime_dit":
+                for factor, name in (
+                    (self.video_vae_temporal_downsample, "video_vae_temporal_downsample"),
+                    (self.video_vae_spatial_downsample, "video_vae_spatial_downsample"),
+                ):
+                    if factor < 1 or (factor & (factor - 1)):
+                        problems.append(f"{name} ({factor}) must be a power of two")
+                if self.video_vae_temporal_downsample > self.video_vae_spatial_downsample:
+                    problems.append(
+                        "video_vae_temporal_downsample cannot exceed "
+                        "video_vae_spatial_downsample"
+                    )
+                if self.video_dit_d_model % self.video_dit_n_heads:
+                    problems.append("video_dit_d_model must be divisible by video_dit_n_heads")
+                if self.video_dit_d_model % 6:
+                    problems.append(
+                        f"video_dit_d_model ({self.video_dit_d_model}) must be divisible by 6 "
+                        "(3D sin-cos positional embedding)"
+                    )
 
             if self.image_gen_arch not in IMAGE_GEN_ARCHS:
                 problems.append(
