@@ -45,7 +45,7 @@ def _count_on_meta(factory) -> int:
 # than repeating the tuple.
 MULTIMODAL_TOWERS = (
     "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
-    "image_diffusion", "video_diffusion", "audio_diffusion",
+    "image_vae", "image_diffusion", "video_diffusion", "audio_diffusion",
 )
 
 
@@ -72,7 +72,9 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
 
     from ..modules.audio_encoder import AudioEncoder
     from ..modules.diffusion import DiffusionModule
+    from ..modules.dit import DiT
     from ..modules.multimodal_projector import MultimodalProjector
+    from ..modules.vae import KLVAE
     from ..modules.video_generator import VideoGenerator
     from ..modules.vision_encoder import VisionEncoder
 
@@ -91,9 +93,29 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
             dropout=config.dropout,
         ),
         "audio_projector": lambda: MultimodalProjector(config.audio_d_model, d),
-        "image_diffusion": lambda: DiffusionModule(
-            in_channels=3, base_channels=config.diffusion_channels, context_dim=d,
-            num_steps=config.diffusion_steps,
+        # The image decoder is arch-selected. Under "latent_dit" the autoencoder
+        # is counted separately from the denoiser, since they are trained
+        # separately and sized independently; under "unet" there is no VAE and
+        # the slot is zero.
+        "image_vae": lambda: (
+            KLVAE(
+                in_channels=3, latent_channels=config.vae_latent_channels,
+                base_channels=config.vae_base_channels, downsample=config.vae_downsample,
+            )
+            if config.image_gen_arch == "latent_dit"
+            else nn.Identity()
+        ),
+        "image_diffusion": lambda: (
+            DiT(
+                in_channels=config.vae_latent_channels, d_model=config.dit_d_model,
+                n_layers=config.dit_n_layers, n_heads=config.dit_n_heads,
+                patch_size=config.dit_patch_size, context_dim=d,
+            )
+            if config.image_gen_arch == "latent_dit"
+            else DiffusionModule(
+                in_channels=3, base_channels=config.diffusion_channels, context_dim=d,
+                num_steps=config.diffusion_steps,
+            )
         ),
         "video_diffusion": lambda: VideoGenerator(
             frames=config.video_frames, resolution=config.video_resolution,

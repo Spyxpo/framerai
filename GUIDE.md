@@ -112,7 +112,8 @@ The web app opens at `http://localhost:5173`.
 - Transformer backbone: an autoregressive decoder using RoPE, SwiGLU, and RMSNorm.
 - Vision encoder: a ViT-style encoder that turns images into patch embeddings.
 - Audio encoder: a mel-spectrogram front-end and transformer that turns audio into embeddings.
-- Diffusion module: a U-Net with cross-attention for text-conditioned images.
+- Image decoder: a KL-VAE plus a diffusion transformer on a rectified-flow objective, or the
+  original pixel-space U-Net, selected by `image_gen_arch`.
 - Video generator: spatial-temporal diffusion with a 3D U-Net.
 - Audio generator: text-conditioned mel diffusion with Griffin-Lim reconstruction.
 - Multimodal projector: aligns vision and audio embeddings with the language model space.
@@ -129,10 +130,10 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B | ~2.5B | ~3.7B |
 | `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~596M | ~7.8B |
 | `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~536M | ~34B |
-| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.2B | ~156B |
-| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~8.2B | ~202B |
-| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~16.3B | ~999B |
-| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~31.9B | ~1.99T |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~4.6B | ~157B |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~9.2B | ~203B |
+| `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~17.4B | ~1.00T |
+| `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~33.1B | ~2.00T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
@@ -168,6 +169,38 @@ which the estimator, `build.py`'s breakdown, and the tests all import. `estimate
 `estimate_multimodal_params` take `strict=True` to re-raise instead of degrading to
 "could not be sized"; the tests use it so a tower that resists meta construction fails loudly
 rather than silently shrinking the reported model.
+
+### Choosing an architecture per modality
+
+Each decoder family is selected by a config field that defaults to the original implementation,
+so the laptop-scale presets keep their existing path byte for byte and only the large presets
+opt in. The estimator meta-constructs whatever the config selects, so `--estimate` stays exact
+across the switch.
+
+| Field | Default | Alternative | Set by |
+|---|---|---|---|
+| `image_gen_arch` | `unet` | `latent_dit` | the four large MoE presets |
+
+`unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
+cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that
+compresses 8x in each spatial dimension plus a diffusion transformer over the resulting latent
+grid, so a 512x512 image is denoised as a 64x64 latent - 64x fewer positions to attend over.
+
+The latent path brings three things the U-Net did not have:
+
+- **adaLN-zero conditioning.** Timestep and pooled text modulate every block through a
+  zero-initialized projection, so each block starts as the identity and the residual stream is
+  undisturbed at step zero. This is what makes a deep denoiser trainable from scratch.
+- **Rectified flow.** The model predicts a straight-line velocity between noise and data
+  rather than the noise itself, which makes the sampling trajectory nearly straight and
+  solvable in 20-50 ODE steps instead of a 1000-step ancestral chain.
+- **Classifier-free guidance.** `cfg_dropout_prob` replaces whole examples' conditioning with a
+  learned `null_context` embedding during training; at inference the conditional and
+  unconditional fields are evaluated in one batch-doubled forward and extrapolated apart by
+  `cfg_scale`. The README advertised this from the beginning and no such code existed until now.
+
+Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
+table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
 
 ### Constructing a model too large for one host
 

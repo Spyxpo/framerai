@@ -66,8 +66,27 @@ def test_text_only_has_no_multimodal_params():
 def test_multimodal_breakdown_covers_every_tower():
     counts = estimate_multimodal_params(tiny_multimodal_config())
     assert set(counts) == set(MULTIMODAL_TOWERS) | {"total"}
-    assert all(counts[name] > 0 for name in MULTIMODAL_TOWERS)
     assert counts["total"] == sum(counts[name] for name in MULTIMODAL_TOWERS)
+    # Arch-selected slots are populated; the alternatives report zero. Under the
+    # default "unet" image path there is no autoencoder.
+    always_built = set(MULTIMODAL_TOWERS) - {"image_vae"}
+    assert all(counts[name] > 0 for name in always_built)
+    assert counts["image_vae"] == 0
+
+
+def test_latent_dit_moves_the_image_budget_into_the_vae_and_denoiser():
+    unet = estimate_multimodal_params(tiny_multimodal_config())
+    latent = estimate_multimodal_params(
+        tiny_multimodal_config(
+            image_gen_arch="latent_dit", vae_base_channels=16, vae_downsample=8,
+            dit_d_model=32, dit_n_layers=2, dit_n_heads=4,
+        )
+    )
+    assert unet["image_vae"] == 0 and latent["image_vae"] > 0
+    assert latent["image_diffusion"] > 0
+    # Towers the image arch does not touch are unchanged.
+    for name in ("vision_encoder", "audio_encoder", "video_diffusion", "audio_diffusion"):
+        assert unet[name] == latent[name]
 
 
 @pytest.mark.parametrize("name", sorted(PRESETS))

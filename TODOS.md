@@ -66,12 +66,14 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Image generation — latent diffusion transformer
 
-- [ ] KL-VAE (8x spatial downsample) so training runs in latent space, not pixel space.
-- [ ] Diffusion transformer denoiser with adaLN-zero timestep and text conditioning.
-- [ ] Rectified-flow objective with an ODE sampler at 20–50 steps, replacing 1000-step
+- [x] KL-VAE (8x spatial downsample) so training runs in latent space, not pixel space.
+- [x] Diffusion transformer denoiser with adaLN-zero timestep and text conditioning.
+- [x] Rectified-flow objective with an ODE sampler at 20–50 steps, replacing 1000-step
       ancestral sampling.
-- [ ] Classifier-free guidance with a learned null-context embedding (advertised in the
-      README today but never implemented).
+- [x] Classifier-free guidance with a learned null-context embedding (advertised in the
+      README for a long time and never implemented until now).
+- [ ] Train the VAE properly and re-measure `scale_factor`; the default is a starting value.
+- [ ] Adversarial / perceptual reconstruction loss for the VAE (MSE alone blurs).
 - [ ] Caption enrichment pass over the training corpus; caption quality dominates prompt
       adherence.
 
