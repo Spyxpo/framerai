@@ -48,6 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`framer-2t-a49b`, the two-trillion-parameter all-modality flagship.** 1.96T
+  text backbone, 49.40B active per token, 31.88B across the vision and audio
+  encoders and the image, video, and audio decoders, for 1.99T in total.
+  `d_model=10240`, 84 layers, 80/8 heads, 16K context, 384 fine-grained experts
+  with top-4 routing and one shared expert. 384 is 3 x 128, so the experts shard
+  evenly across 8/16/32/64/128-way expert-parallel meshes. Sizing it allocates
+  nothing, so `--estimate` still runs on a laptop and in CI.
+- `MULTIMODAL_TOWERS` is exported from `model/utils/helpers.py` as the single
+  source of truth for the tower list, replacing three copies of the same tuple.
+  `estimate_params` and `estimate_multimodal_params` accept `strict=True` to
+  re-raise rather than degrade to "could not be sized"; the tests use it.
+- `tests/test_scale_config.py` pins the flagship's total, active budget,
+  per-tower floors, memory arithmetic, and expert-mesh divisibility, so the
+  decoder replacements that follow cannot silently drift the documented numbers.
 - Forward-pass tests for every multimodal tower (`tests/test_modality_forward.py`),
   attention parity tests for the SDPA conversion (`tests/test_attention_parity.py`),
   tokenizer save/load round-trip and id-layout tests (`tests/test_tokenizer.py`),
