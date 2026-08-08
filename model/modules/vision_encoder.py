@@ -17,6 +17,11 @@ class PatchEmbedding(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches + 1, d_model) * 0.02)
 
+    @torch.no_grad()
+    def reset_parameters(self):
+        self.cls_token.normal_(std=0.02)
+        self.pos_embed.normal_(std=0.02)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         x = self.proj(x)

@@ -1,5 +1,6 @@
 """Training infrastructure for FramerAI: schedules, precision, distribution."""
 
+from .checkpoint import gather_full_state_dict, load_sharded, save_full, save_sharded
 from .distributed import (
     cleanup_distributed,
     get_rank,
@@ -26,4 +27,8 @@ __all__ = [
     "get_world_size",
     "maybe_wrap_fsdp",
     "train_language_model",
+    "save_sharded",
+    "load_sharded",
+    "save_full",
+    "gather_full_state_dict",
 ]

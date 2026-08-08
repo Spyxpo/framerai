@@ -40,11 +40,15 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Optional safetensors export.
 - [~] Multi-GPU / distributed training via torch-native FSDP2 (guarded; validated single-device).
       Tensor / expert / pipeline parallelism for the 2T preset remain to be built.
-- [ ] Add a full state-dict gather for FSDP checkpoint save/load.
-- [ ] Add deferred (meta-device) initialisation, without which `framer-2t-a49b` cannot be
-      constructed at all: `_init_weights` calls `nn.init.normal_`, which fails on meta tensors.
-- [ ] Add expert-parallel sharding and sharded checkpoint save/load, without which the 2T
-      preset cannot be materialised across hosts.
+- [x] Add a full state-dict gather for FSDP checkpoint save/load (`gather_full_state_dict`).
+      The previous path wrote a single rank's shard under a filename claiming to be the
+      whole model.
+- [x] Add deferred (meta-device) initialisation (`FramerModel.from_config_meta`,
+      `init_weights_`, `reset_buffers`), without which `framer-2t-a49b` could not be
+      constructed at all.
+- [x] Add sharded checkpoint save/load (`model/training/checkpoint.py`).
+- [ ] Add expert-parallel sharding, without which the 2T preset's experts cannot be
+      distributed across hosts.
 - [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
 - [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the
       attention-factor compensation). It was accepted by the config and silently applied no

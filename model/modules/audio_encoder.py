@@ -49,8 +49,20 @@ class AudioFrontEnd(nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.n_mels = n_mels
+        self.sample_rate = sample_rate
         self.register_buffer("window", torch.hann_window(n_fft))
         self.register_buffer("fb", mel_filterbank(sample_rate, n_fft, n_mels))
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the derived buffers, for use after a meta-device build.
+
+        ``to_empty()`` allocates buffer storage without contents, so anything
+        derived rather than loaded has to be computed again.
+        """
+        device = device or self.window.device
+        self.window = torch.hann_window(self.n_fft, device=device)
+        self.fb = mel_filterbank(self.sample_rate, self.n_fft, self.n_mels).to(device)
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
         # waveform: (B, num_samples) -> log-mel (B, n_mels, frames)
@@ -95,6 +107,11 @@ class AudioEncoder(nn.Module):
             for _ in range(n_layers)
         ])
         self.norm = nn.LayerNorm(d_model)
+
+    @torch.no_grad()
+    def reset_parameters(self):
+        self.cls_token.normal_(std=0.02)
+        self.pos_embed.normal_(std=0.02)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         # audio: waveform (B, N) / (B, 1, N), or precomputed log-mel (B, n_mels, T)
