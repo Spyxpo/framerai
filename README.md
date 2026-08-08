@@ -398,15 +398,19 @@ framerai/
 
 ## Tests
 
-CI runs both suites on every change, and both run on CPU in seconds.
+CI runs all three suites on every change, and they all run on CPU in seconds.
 
 ```bash
-# Model: backbone, MoE routing, data pipeline, generation, presets, estimator
-pip install pytest
+# Model: backbone, MoE routing, multimodal towers, tokenizer, RoPE, data
+# pipeline, generation, presets, estimator
+pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest -q
 
 # Backend: routes and WebSocket
 cd backend && npm test
+
+# Website: components (Vitest + Testing Library)
+cd website && npm test
 ```
 
 The Python tests build tiny models on CPU, so no GPU or trained checkpoint is

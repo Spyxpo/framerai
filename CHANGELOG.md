@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI installs the model's dependencies from `requirements.txt` plus a new
+  `requirements-dev.txt` instead of a hand-maintained list, so the tested
+  dependency set is the shipped one. `torchvision` and `tqdm` are dropped from
+  the requirements entirely (nothing imports them) and `torchaudio` moves to the
+  optional extras, where its single lazy fallback in `model/data.py` belongs.
+- The full `ruff.toml` rule set is now blocking in CI rather than informational,
+  and the redundant error-subset step is gone.
+- The website gains an ESLint flat config and a Vitest + Testing Library suite,
+  both blocking in CI. It previously had neither, only `vite build`.
 - The vision, audio, temporal, and diffusion attention paths now use the fused
   `scaled_dot_product_attention` kernel instead of materializing an explicit
   attention matrix. The vision encoder is shared by the audio encoder, so both

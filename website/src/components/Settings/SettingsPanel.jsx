@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { X, RotateCcw } from "lucide-react";
 import { SETTING_FIELDS, RESOLUTIONS } from "../../hooks/useSettings";
 
