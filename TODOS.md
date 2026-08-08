@@ -37,7 +37,9 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [ ] Add expert-parallel sharding and sharded checkpoint save/load, without which the 1T
       preset cannot be materialised across hosts.
 - [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
-- [ ] Implement `yarn` RoPE scaling, which the config accepts but the code treats as linear.
+- [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the
+      attention-factor compensation). It was accepted by the config and silently applied no
+      extension at all; `validate()` now rejects an unrecognised `rope_scaling_type`.
 - [ ] Add instruction and preference post-training (chat template, SFT, DPO).
 - [ ] Add ONNX export and a safetensors round-trip validation test.
 
