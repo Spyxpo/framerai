@@ -63,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue and pull request templates, CODEOWNERS, and community health files.
 - Contributor guide, code of conduct, security policy, project guide, and roadmap.
 
+### Fixed
+
+- CI: the website job no longer runs on Node 18, which its build tooling cannot
+  support (Node `^20.19 || >=22.12` is required). The job had been failing on
+  every run. Both packages now declare `engines`, and the documented
+  requirements match what CI runs.
+
 ### Changed
 
 - `framer-160b-a16b` scales its multimodal towers on the same basis as the

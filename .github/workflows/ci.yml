@@ -117,7 +117,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["18", "20", "22"]
+        # Vite 8 requires Node ^20.19 || >=22.12, so the website cannot build on
+        # Node 18. The backend still supports it and keeps 18 in its matrix.
+        node-version: ["20", "22"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
