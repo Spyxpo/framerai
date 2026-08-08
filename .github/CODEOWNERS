@@ -1,0 +1,17 @@
+# Default owners for everything in the repository.
+* @mantreshkhurana
+
+# Model and training pipeline
+/model/         @mantreshkhurana
+/build.py       @mantreshkhurana
+/train.sh       @mantreshkhurana
+/requirements.txt @mantreshkhurana
+
+# Backend API
+/backend/       @mantreshkhurana
+
+# Web frontend
+/website/       @mantreshkhurana
+
+# CI, tooling, and project docs
+/.github/       @mantreshkhurana

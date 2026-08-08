@@ -1,0 +1,15 @@
+torch>=2.13.0
+numpy>=2.5.1
+Pillow>=12.3.0
+soundfile>=0.14.0
+
+# Optional extras (the core runs without them):
+#   torchaudio   - fallback audio loader when soundfile is unavailable
+#                  (model/data.py falls back to it, and resampling is hand-rolled
+#                  precisely so torchaudio stays optional)
+#   safetensors  - secure, portable weight export (build.py --mode export)
+#   flash-attn   - faster attention on supported CUDA GPUs (SDPA already uses
+#                  flash/mem-efficient kernels where available without it)
+# pip install torchaudio safetensors
+#
+# Development tooling lives in requirements-dev.txt.

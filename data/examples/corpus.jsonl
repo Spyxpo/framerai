@@ -1,0 +1,5 @@
+{"text": "FramerAI is a multimodal model that handles text, code, images, video, and audio."}
+{"prompt": "What can FramerAI do?", "response": "It generates text, code, images, video, and audio, and understands images and audio."}
+{"prompt": "How is FramerAI trained?", "response": "From scratch on a local corpus, with no external teacher models."}
+{"instruction": "Write a Python function that adds two numbers.", "output": "def add(a, b):\n    return a + b"}
+{"text": "The transformer backbone uses RoPE, SwiGLU, and RMSNorm for text and code."}
