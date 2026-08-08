@@ -80,7 +80,15 @@ class ResBlock(nn.Module):
 
 
 class SpatialAttention(nn.Module):
-    """Self-attention over spatial dimensions."""
+    """Self-attention over spatial dimensions.
+
+    Uses the fused SDPA kernel. The explicit ``(B, heads, HW, HW)`` softmax this
+    replaces was quadratic in pixel count: at 256x256 a single one of the three
+    full-resolution attention sites needed 137 GB in fp32, so the pixel-space
+    U-Net could not run at the resolution it was configured for. SDPA removes the
+    memory wall, though the compute stays quadratic - the latent path is what
+    makes high resolutions genuinely practical.
+    """
 
     def __init__(self, channels: int, n_heads: int = 8):
         super().__init__()
@@ -94,13 +102,11 @@ class SpatialAttention(nn.Module):
         B, C, H, W = x.shape
         h = self.norm(x).view(B, C, H * W)
         qkv = self.qkv(h).reshape(B, 3, self.n_heads, self.head_dim, H * W)
-        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        # SDPA wants (B, heads, seq, head_dim); the conv layout is channel-first.
+        q, k, v = (t.transpose(-2, -1) for t in (qkv[:, 0], qkv[:, 1], qkv[:, 2]))
 
-        scale = math.sqrt(self.head_dim)
-        attn = torch.einsum("bhdi,bhdj->bhij", q, k) / scale
-        attn = F.softmax(attn, dim=-1)
-        out = torch.einsum("bhij,bhdj->bhdi", attn, v)
-        out = out.reshape(B, C, H * W)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(-2, -1).reshape(B, C, H * W)
         out = self.out(out).view(B, C, H, W)
         return x + out
 
@@ -125,11 +131,11 @@ class CrossAttention(nn.Module):
         kv = self.kv(context).reshape(B, -1, 2, self.n_heads, self.head_dim).permute(2, 0, 3, 4, 1)
         k, v = kv[0], kv[1]
 
-        scale = math.sqrt(self.head_dim)
-        attn = torch.einsum("bhdi,bhdj->bhij", q, k) / scale
-        attn = F.softmax(attn, dim=-1)
-        out = torch.einsum("bhij,bhdj->bhdi", attn, v)
-        out = out.reshape(B, C, H * W)
+        # SDPA wants (B, heads, seq, head_dim); the conv layout is channel-first.
+        out = F.scaled_dot_product_attention(
+            q.transpose(-2, -1), k.transpose(-2, -1), v.transpose(-2, -1)
+        )
+        out = out.transpose(-2, -1).reshape(B, C, H * W)
         out = self.out(out).view(B, C, H, W)
         return x + out
 
