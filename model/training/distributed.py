@@ -59,8 +59,14 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def maybe_wrap_fsdp(model, config, device: torch.device):
-    """FSDP2-shard the transformer blocks when distributed; else return as-is."""
+def maybe_wrap_fsdp(model, config, device: torch.device, mesh=None):
+    """FSDP2-shard the transformer blocks when distributed; else return as-is.
+
+    ``mesh`` is an optional 2D ``(dp, ep)`` device mesh. Expert weights are
+    already split across the ``ep`` dimension by expert parallelism, so FSDP
+    must shard over ``dp`` only - sharding them again would divide them twice
+    and leave each rank holding a fragment of a fragment.
+    """
     if get_world_size() <= 1 or device.type != "cuda":
         return model
 
@@ -76,8 +82,13 @@ def maybe_wrap_fsdp(model, config, device: torch.device):
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(config.precision, torch.float32)
     mp_policy = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=torch.float32)
 
-    # Shard each transformer block, then the root module.
+    # Shard each transformer block, then the root module. With a 2D mesh the
+    # data-parallel dimension is the one to shard over.
+    shard_kwargs = {"mp_policy": mp_policy}
+    if mesh is not None:
+        shard_kwargs["mesh"] = mesh["dp"]
+
     for block in model.layers:
-        fully_shard(block, mp_policy=mp_policy)
-    fully_shard(model, mp_policy=mp_policy)
+        fully_shard(block, **shard_kwargs)
+    fully_shard(model, **shard_kwargs)
     return model

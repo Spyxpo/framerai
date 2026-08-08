@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Expert-parallel MoE sharding** (`model/training/expert_parallel.py`).
+  `ExpertParallelPlan` assigns each rank a contiguous slice of the experts and
+  `shard_experts` drops the rest, applied to the meta-device module so weights a
+  rank will never hold are never allocated. `MoEFeedForward` gains an
+  `expert_offset` so routing still uses global expert ids; at `ep_world == 1`
+  the path is byte-identical to before and a test asserts it. `build_device_mesh`
+  produces a 2D `(dp, ep)` mesh and `maybe_wrap_fsdp` shards over `dp` only,
+  since sharding expert weights that expert parallelism already split would
+  leave each rank with a fragment of a fragment.
 - **`model/eval/` evaluation harness.** Text perplexity, token accuracy, and
   bits per byte; image Frechet distance and text-image alignment; audio SI-SDR,
   mel distance, word and character error rate, and speaker similarity; video

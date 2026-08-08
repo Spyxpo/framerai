@@ -41,6 +41,11 @@ class MoEFeedForward(nn.Module):
         self.aux_loss_coef = aux_loss_coef
         self.router_z_loss_coef = router_z_loss_coef
 
+        # Expert parallelism replaces this list with the local slice and sets
+        # expert_offset; until then every rank holds every expert.
+        self.expert_offset = 0
+        self.ep_plan = None
+
         self.router = nn.Linear(d_model, n_experts, bias=False)
         self.experts = nn.ModuleList(
             [FeedForward(d_model, expert_d_ff, dropout) for _ in range(n_experts)]
@@ -61,7 +66,11 @@ class MoEFeedForward(nn.Module):
         topk_gates = (topk_probs / (topk_probs.sum(-1, keepdim=True) + 1e-9)).to(x.dtype)
 
         out = torch.zeros_like(x_flat)
-        for e, expert in enumerate(self.experts):
+        # Under expert parallelism this rank holds experts
+        # [expert_offset, expert_offset + len(self.experts)); the global id is
+        # what routing produced, so the loop indexes by it.
+        for local_e, expert in enumerate(self.experts):
+            e = local_e + self.expert_offset
             hit = (topk_idx == e)  # (N, k)
             if not hit.any():
                 continue
