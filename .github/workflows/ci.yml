@@ -29,19 +29,52 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Install lint tooling
         run: python -m pip install --upgrade pip ruff
 
       - name: Lint (blocking - real errors only)
-        run: ruff check --select=E9,F63,F7,F82 model build.py
+        run: ruff check --select=E9,F63,F7,F82 model build.py scripts tests conftest.py
 
       - name: Lint (full - informational)
         continue-on-error: true
-        run: ruff check model build.py
+        run: ruff check model build.py scripts tests conftest.py
 
       - name: Byte-compile sources
-        run: python -m compileall -q model build.py
+        run: python -m compileall -q model build.py scripts tests conftest.py
+
+  tests:
+    name: Model tests (Python 3.12, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # CPU-only wheels: the suite never needs a GPU, and the CUDA wheels do not
+      # fit on a default runner alongside the preinstalled toolchains.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy Pillow soundfile pytest safetensors
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      # Every preset, up to the trillion-parameter flagship, must be sizable on a
+      # 2-core runner: the estimator allocates nothing.
+      - name: Estimate presets without instantiating them
+        run: |
+          python build.py --list-presets
+          python build.py --preset framer-1t-a32b --estimate
+          python build.py --preset framer-200b-a20b --estimate
 
   backend:
     name: Backend (Node ${{ matrix.node-version }})
@@ -84,7 +117,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["18", "20", "22"]
+        # Vite 8 requires Node ^20.19 || >=22.12, so the website cannot build on
+        # Node 18. The backend still supports it and keeps 18 in its matrix.
+        node-version: ["20", "22"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
