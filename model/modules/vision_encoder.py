@@ -1,5 +1,6 @@
 """Vision encoder for processing image inputs."""
 
+import math
 
 import torch
 import torch.nn as nn
@@ -22,14 +23,102 @@ class PatchEmbedding(nn.Module):
         self.cls_token.normal_(std=0.02)
         self.pos_embed.normal_(std=0.02)
 
+    def interpolate_pos_encoding(self, height: int, width: int) -> torch.Tensor:
+        """Resample the learned position table to a different patch grid.
+
+        The table is trained at one resolution. Bicubic resampling of its 2D
+        reshape lets the same weights accept a different one, which is what a
+        tile of unusual shape needs. The class-token position is not part of the
+        grid and passes through untouched.
+        """
+        patches = height * width
+        if patches == self.num_patches:
+            return self.pos_embed
+
+        cls_pos, grid_pos = self.pos_embed[:, :1], self.pos_embed[:, 1:]
+        side = int(self.num_patches ** 0.5)
+        grid = grid_pos.reshape(1, side, side, -1).permute(0, 3, 1, 2)
+        grid = F.interpolate(grid, size=(height, width), mode="bicubic", align_corners=False)
+        grid = grid.permute(0, 2, 3, 1).reshape(1, patches, -1)
+        return torch.cat([cls_pos, grid], dim=1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         x = self.proj(x)
+        grid_h, grid_w = x.shape[-2], x.shape[-1]
         x = x.flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(B, -1, -1)
         x = torch.cat([cls, x], dim=1)
-        x = x + self.pos_embed
-        return x
+        return x + self.interpolate_pos_encoding(grid_h, grid_w)
+
+
+class DynamicTiler(nn.Module):
+    """Split a high-resolution image into encoder-sized tiles.
+
+    A fixed-resolution encoder either downsamples a large image until detail is
+    gone or runs at a resolution whose attention cost is prohibitive. Tiling
+    keeps the encoder at its trained size and processes several tiles instead:
+    ``max_tiles`` of ``tile_size`` covers roughly ``sqrt(max_tiles)`` times the
+    linear resolution at a fraction of a single large forward's cost, because
+    attention is quadratic within a tile but only linear across them.
+
+    A downscaled thumbnail is prepended so the model still sees global layout,
+    which tiles alone destroy.
+    """
+
+    def __init__(self, tile_size: int, max_tiles: int = 12, thumbnail: bool = True):
+        super().__init__()
+        self.tile_size = tile_size
+        self.max_tiles = max_tiles
+        self.thumbnail = thumbnail
+
+    def choose_grid(self, height: int, width: int) -> tuple:
+        """The (rows, cols) tiling whose aspect ratio best matches the image."""
+        target = width / height
+        best, best_error = (1, 1), float("inf")
+        for rows in range(1, self.max_tiles + 1):
+            for cols in range(1, self.max_tiles // rows + 1):
+                if rows * cols > self.max_tiles:
+                    continue
+                # Compared in log space so 2:1 and 1:2 are equally far from square.
+                error = abs(math.log((cols / rows) / target))
+                # Prefer more tiles on a tie: more coverage at the same shape.
+                if error < best_error - 1e-9 or (
+                    abs(error - best_error) < 1e-9 and rows * cols > best[0] * best[1]
+                ):
+                    best, best_error = (rows, cols), error
+        return best
+
+    def forward(self, image: torch.Tensor) -> tuple:
+        """``image`` is ``(B, C, H, W)``; returns ``(tiles, grid)``.
+
+        ``tiles`` is ``(B, n_tiles, C, tile, tile)``, thumbnail first when
+        enabled, so the caller can flatten it into one encoder batch.
+        """
+        B, C, height, width = image.shape
+        rows, cols = self.choose_grid(height, width)
+
+        resized = F.interpolate(
+            image,
+            size=(rows * self.tile_size, cols * self.tile_size),
+            mode="bicubic",
+            align_corners=False,
+        )
+        tiles = (
+            resized.unfold(2, self.tile_size, self.tile_size)
+            .unfold(3, self.tile_size, self.tile_size)
+            .permute(0, 2, 3, 1, 4, 5)
+            .reshape(B, rows * cols, C, self.tile_size, self.tile_size)
+        )
+
+        if self.thumbnail:
+            global_view = F.interpolate(
+                image, size=(self.tile_size, self.tile_size),
+                mode="bicubic", align_corners=False,
+            ).unsqueeze(1)
+            tiles = torch.cat([global_view, tiles], dim=1)
+
+        return tiles, (rows, cols)
 
 
 class VisionAttention(nn.Module):

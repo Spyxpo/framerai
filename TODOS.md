@@ -105,9 +105,14 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Understanding
 
-- [ ] Dynamic high-resolution tiling in the vision encoder (tiles plus a global thumbnail).
-- [ ] Interleaved multimodal token placement, replacing prefix concatenation.
-- [ ] Contrastive pretraining entry point for the vision tower.
+- [x] Dynamic high-resolution tiling in the vision encoder (tiles plus a global thumbnail),
+      with bicubic position-embedding resampling so one encoder accepts any tile shape.
+- [x] Interleaved multimodal token placement, replacing prefix concatenation
+      (`mm_token_placement="interleaved"`, `InterleavedSequenceBuilder`).
+- [x] Contrastive pretraining entry point for the vision tower
+      (`model/training/contrastive.py`).
+- [ ] Wire the contrastive trainer into `build.py` as a `--mode pretrain-vision` entry point.
+- [ ] Extend interleaved placement to the generation path, not just understanding.
 - [ ] Example image and audio caption datasets with real media.
 
 ### Evaluation

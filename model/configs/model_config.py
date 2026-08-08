@@ -10,6 +10,7 @@ ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 IMAGE_GEN_ARCHS = ("unet", "latent_dit")
 VIDEO_GEN_ARCHS = ("unet3d", "spacetime_dit")
 AUDIO_GEN_ARCHS = ("mel_diffusion", "rvq_lm")
+MM_TOKEN_PLACEMENTS = ("prefix", "interleaved")
 VOCODER_ARCHS = ("griffin_lim", "istft")
 
 # Aspect ratios a request may name. Kept here so validate() can check the
@@ -54,6 +55,17 @@ class FramerConfig:
     vision_d_model: int = 1024
     vision_n_heads: int = 16
     vision_n_layers: int = 12
+    # image_size is the encoder's input, and with tiling on it is the *tile*
+    # size: effective resolution comes from the tile count instead.
+    vision_tiling: bool = False
+    vision_max_tiles: int = 12
+    vision_thumbnail: bool = True
+
+    # How encoded modality embeddings enter the token sequence. "prefix"
+    # concatenates them ahead of the text, which loses their position relative
+    # to it; "interleaved" writes them into placeholder token positions, so an
+    # image can sit exactly where it was mentioned.
+    mm_token_placement: str = "prefix"  # "prefix" | "interleaved"
 
     # Diffusion config (image generation)
     # image_gen_arch selects the decoder family. "unet" is the original
@@ -278,6 +290,14 @@ class FramerConfig:
                 problems.append(
                     f"image_max_pixels ({self.image_max_pixels}) is below the smallest bucket"
                 )
+
+            if self.mm_token_placement not in MM_TOKEN_PLACEMENTS:
+                problems.append(
+                    f"mm_token_placement ('{self.mm_token_placement}') must be one of "
+                    f"{', '.join(MM_TOKEN_PLACEMENTS)}"
+                )
+            if self.vision_tiling and self.vision_max_tiles < 1:
+                problems.append("vision_tiling requires vision_max_tiles >= 1")
 
             if self.audio_gen_arch not in AUDIO_GEN_ARCHS:
                 problems.append(
