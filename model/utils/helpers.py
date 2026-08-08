@@ -22,21 +22,110 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def _human(n: float) -> str:
+def human_params(n: float) -> str:
     for unit, div in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if abs(n) >= div:
             return f"{n / div:.2f}{unit}"
     return str(int(n))
 
 
-def estimate_params(config) -> dict:
-    """Estimate the text-backbone parameter budget from a config alone.
+def _count_on_meta(factory) -> int:
+    """Parameter count of a module built on the meta device (allocates nothing).
 
-    Returns total vs active (per-token) parameter counts *without instantiating*
-    the model, so trillion-parameter presets can be sized on a laptop. Only the
-    transformer backbone is counted (the multimodal encoders/decoders are small
-    relative to a large LLM and are excluded here). Includes a human-readable
-    ``summary`` string.
+    ``torch.device("meta")`` materializes shapes without storage, so a tower with
+    billions of parameters can be counted on a laptop in milliseconds.
+    """
+    with torch.device("meta"):
+        module = factory()
+    return sum(p.numel() for p in module.parameters())
+
+
+def estimate_multimodal_params(config) -> dict:
+    """Count the multimodal towers of a config without allocating memory.
+
+    Mirrors what :class:`model.framer.FramerModel` builds when
+    ``config.text_only`` is False: the vision and audio encoders with their
+    projectors, and the image / video / audio diffusion decoders. Returns a
+    per-tower breakdown plus ``total``.
+
+    ``AudioGenerator`` is counted through its inner ``DiffusionModule``: every
+    other tensor it owns is a registered buffer (mel pseudo-inverse, windows),
+    which carries no trainable parameters.
+
+    Returns all-zero counts for a text-only config, and ``None`` if a tower
+    cannot be built on the meta device, so callers can degrade to a text-only
+    estimate instead of failing.
+    """
+    towers = (
+        "vision_encoder", "vision_projector", "audio_encoder", "audio_projector",
+        "image_diffusion", "video_diffusion", "audio_diffusion",
+    )
+    if config.text_only:
+        return {**{name: 0 for name in towers}, "total": 0}
+
+    from ..modules.audio_encoder import AudioEncoder
+    from ..modules.diffusion import DiffusionModule
+    from ..modules.multimodal_projector import MultimodalProjector
+    from ..modules.video_generator import VideoGenerator
+    from ..modules.vision_encoder import VisionEncoder
+
+    d = config.d_model
+    factories = {
+        "vision_encoder": lambda: VisionEncoder(
+            config.image_size, config.patch_size, config.vision_d_model,
+            config.vision_n_heads, config.vision_n_layers, config.dropout,
+        ),
+        "vision_projector": lambda: MultimodalProjector(config.vision_d_model, d),
+        "audio_encoder": lambda: AudioEncoder(
+            sample_rate=config.audio_sample_rate, n_fft=config.audio_n_fft,
+            hop_length=config.audio_hop_length, n_mels=config.audio_n_mels,
+            d_model=config.audio_d_model, n_heads=config.audio_n_heads,
+            n_layers=config.audio_n_layers, max_frames=config.audio_max_frames,
+            dropout=config.dropout,
+        ),
+        "audio_projector": lambda: MultimodalProjector(config.audio_d_model, d),
+        "image_diffusion": lambda: DiffusionModule(
+            in_channels=3, base_channels=config.diffusion_channels, context_dim=d,
+            num_steps=config.diffusion_steps,
+        ),
+        "video_diffusion": lambda: VideoGenerator(
+            frames=config.video_frames, resolution=config.video_resolution,
+            base_channels=config.diffusion_channels // 2, context_dim=d,
+            num_steps=config.diffusion_steps,
+        ),
+        # AudioGenerator's parameters all live in this inner diffusion module.
+        "audio_diffusion": lambda: DiffusionModule(
+            in_channels=1, base_channels=config.audio_gen_channels, context_dim=d,
+            num_steps=config.diffusion_steps,
+        ),
+    }
+
+    counts = {}
+    try:
+        for name, factory in factories.items():
+            counts[name] = _count_on_meta(factory)
+    except Exception:  # noqa: BLE001 - any tower that resists meta construction
+        return None
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def estimate_params(config) -> dict:
+    """Estimate a config's parameter budget without instantiating the model.
+
+    ``total`` and ``active`` cover the **text backbone**: total parameters versus
+    the parameters a single text token actually routes through (they differ only
+    for MoE). ``multimodal`` breaks down the encoders and diffusion decoders, and
+    ``model_total`` is the whole model - the number that describes FramerAI as a
+    multimodal system.
+
+    "Active" has two senses worth keeping straight: ``active`` is per-text-token
+    compute, while the vision and audio encoders run only on requests carrying an
+    image or audio, and each diffusion decoder runs only when generating that
+    modality. None of them are counted in ``active``.
+
+    Nothing here allocates memory, so a trillion-parameter preset can be sized on
+    a laptop.
     """
     d = config.d_model
     n_layers = config.n_layers
@@ -45,6 +134,8 @@ def estimate_params(config) -> dict:
 
     # Attention block: q(d*d) + out(d*d) + k(d*kv) + v(d*kv)
     attn = 2 * d * d + 2 * d * kv_dim
+    if config.use_qk_norm:
+        attn += 2 * head_dim  # per-head RMSNorm on q and k
     # Two RMSNorms per block.
     norm = 2 * d
 
@@ -73,15 +164,30 @@ def estimate_params(config) -> dict:
     total += embed + d  # + final norm
     active += embed + d
 
+    multimodal = estimate_multimodal_params(config)
+    mm_total = multimodal["total"] if multimodal else 0
+    model_total = total + mm_total
+
     return {
         "total": total,
         "active": active,
-        "total_h": _human(total),
-        "active_h": _human(active),
+        "total_h": human_params(total),
+        "active_h": human_params(active),
+        "multimodal": multimodal,
+        "multimodal_total": mm_total,
+        "multimodal_h": human_params(mm_total),
+        "model_total": model_total,
+        "model_total_h": human_params(model_total),
+        # Weight bytes in bf16, and the full AdamW training state: bf16 weights,
+        # an fp32 master copy, and two fp32 moments (2 + 4 + 4 + 4 = 14 bytes,
+        # rounded to 16 to leave room for gradients).
+        "bf16_bytes": 2 * model_total,
+        "adamw_bytes": 16 * model_total,
         "summary": (
-            f"{config.preset or 'custom'}: {_human(total)} total params, "
-            f"{_human(active)} active/token"
+            f"{config.preset or 'custom'}: {human_params(total)} text params, "
+            f"{human_params(active)} active/token"
             + (" (MoE)" if config.use_moe else " (dense)")
+            + (f" + {human_params(mm_total)} multimodal = {human_params(model_total)} total" if mm_total else "")
         ),
     }
 
