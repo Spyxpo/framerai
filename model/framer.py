@@ -29,7 +29,7 @@ class FramerModel(nn.Module):
     - Mel diffusion for audio/speech generation
     """
 
-    def __init__(self, config: FramerConfig):
+    def __init__(self, config: FramerConfig, init_weights: bool = True):
         super().__init__()
         self.config = config
 
@@ -64,7 +64,8 @@ class FramerModel(nn.Module):
         # text_only builds just the LLM core (no multimodal submodules).
         self.text_only = config.text_only
         if config.text_only:
-            self._init_weights()
+            if init_weights:
+                self.init_weights_()
             return
 
         # Vision encoder
@@ -120,9 +121,46 @@ class FramerModel(nn.Module):
             hop_length=config.audio_hop_length,
         )
 
-        self._init_weights()
+        if init_weights:
+            self.init_weights_()
 
-    def _init_weights(self):
+    @classmethod
+    def from_config_meta(cls, config) -> "FramerModel":
+        """Build the model's *shapes* on the meta device, allocating nothing.
+
+        A 2T preset is 3.6 TiB in bf16, so it cannot be constructed on one host
+        even to be sharded. The meta build gives the sharding machinery a module
+        tree to work from; materialize it per-rank afterwards::
+
+            model = FramerModel.from_config_meta(config)
+            # ... apply FSDP / expert-parallel sharding to the meta module ...
+            model.to_empty(device="cuda")
+            model.init_weights_(buffer_device="cuda")
+
+        Weight initialization is skipped here because ``nn.init.normal_`` fails
+        on meta tensors; call :meth:`init_weights_` once real storage exists.
+        """
+        with torch.device("meta"):
+            return cls(config, init_weights=False)
+
+    @torch.no_grad()
+    def init_weights_(self, buffer_device=None) -> "FramerModel":
+        """Initialize parameters and rebuild derived buffers, in place.
+
+        Safe to call after ``to_empty(device=...)``, which allocates storage
+        without contents: parameters get their distribution and every module
+        owning a derived buffer (RoPE frequencies, noise schedules, mel
+        filterbanks) recomputes it. Idempotent, so re-running it simply
+        reinitializes.
+        """
+        # Let every module that knows how to initialize itself do so first. On a
+        # normal build this repeats what __init__ already did; after to_empty()
+        # it is the only thing standing between the convolutions, norms, and
+        # positional parameters and uninitialized memory.
+        for module in self.modules():
+            if module is not self and hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -139,6 +177,22 @@ class FramerModel(nn.Module):
                 module.out_proj.weight.data.mul_(scale)
             elif isinstance(module, FeedForward):
                 module.w2.weight.data.mul_(scale)
+
+        self.reset_buffers(device=buffer_device)
+        return self
+
+    @torch.no_grad()
+    def reset_buffers(self, device=None) -> "FramerModel":
+        """Recompute every derived buffer in the tree.
+
+        Buffers are computed, not learned, so ``to_empty()`` leaves them holding
+        uninitialized memory. Each owning module implements ``reset_buffers``;
+        this walks the tree and calls them.
+        """
+        for module in self.modules():
+            if module is not self and hasattr(module, "reset_buffers"):
+                module.reset_buffers(device)
+        return self
 
     # ------------------------------------------------------------------
     # Transformer stack

@@ -49,6 +49,14 @@ class AudioGenerator(nn.Module):
         self.register_buffer("mel_pinv", torch.linalg.pinv(fb))  # (n_freq, n_mels)
         self.register_buffer("gl_window", torch.hann_window(n_fft))
 
+    @torch.no_grad()
+    def reset_buffers(self, device=None):
+        """Recompute the derived buffers, for use after a meta-device build."""
+        device = device or self.gl_window.device
+        fb = mel_filterbank(self.sample_rate, self.n_fft, self.n_mels)
+        self.mel_pinv = torch.linalg.pinv(fb).to(device)
+        self.gl_window = torch.hann_window(self.n_fft, device=device)
+
     def forward(self, target_mel: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
         """Training forward: diffusion loss over the target mel (B, 1, n_mels, n_frames)."""
         return self.diffusion(target_mel, context)

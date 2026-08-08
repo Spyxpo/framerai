@@ -48,6 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deferred initialization.** `FramerModel.from_config_meta(config)` builds the
+  model's shapes on the meta device, allocating nothing, and `init_weights_()` /
+  `reset_buffers()` materialize it afterwards. Without this `framer-2t-a49b`
+  could not be constructed at all: the old initializer called `nn.init.normal_`,
+  which fails on meta tensors. Modules owning derived buffers (RoPE frequencies,
+  noise schedules, mel filterbanks) implement `reset_buffers`, and modules with
+  hand-rolled parameters implement `reset_parameters`, so nothing is left holding
+  uninitialized memory after `to_empty()`.
+- **`model/training/checkpoint.py`**: `save_sharded`, `load_sharded`,
+  `gather_full_state_dict`, and `save_full`, built on
+  `torch.distributed.checkpoint`. Sharded checkpoints reshard on load, so a run
+  saved on N ranks resumes on M.
+- `build.py` refuses to instantiate a config that cannot fit in memory, naming
+  `--estimate` and `--force`, instead of being OOM-killed without explanation.
 - **`framer-2t-a49b`, the two-trillion-parameter all-modality flagship.** 1.96T
   text backbone, 49.40B active per token, 31.88B across the vision and audio
   encoders and the image, video, and audio decoders, for 1.99T in total.

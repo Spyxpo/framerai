@@ -169,6 +169,36 @@ which the estimator, `build.py`'s breakdown, and the tests all import. `estimate
 "could not be sized"; the tests use it so a tower that resists meta construction fails loudly
 rather than silently shrinking the reported model.
 
+### Constructing a model too large for one host
+
+`build.py` allocates the whole model on one device, which works up to a few billion
+parameters and not beyond. `framer-2t-a49b` needs roughly 7.4 TiB in fp32 to instantiate, so
+`--mode build` refuses it up front and points at `--estimate` rather than being OOM-killed.
+Pass `--force` to override.
+
+To actually materialise a model at that scale, build its shapes first and fill them in
+per-rank afterwards:
+
+```python
+model = FramerModel.from_config_meta(config)   # shapes only, allocates nothing
+# ... apply FSDP / expert-parallel sharding to the meta module ...
+model.to_empty(device="cuda")                  # storage, no contents
+model.init_weights_(buffer_device="cuda")      # parameters and derived buffers
+```
+
+`to_empty()` allocates without initialising, so `init_weights_` has to fill everything:
+parameters get their distribution, and every module owning a *derived* buffer (RoPE inverse
+frequencies, diffusion noise schedules, mel filterbanks) recomputes it through
+`reset_buffers`. Modules with hand-rolled parameters that torch cannot initialise generically
+(`RMSNorm`, the patch and frame position embeddings) implement `reset_parameters`.
+
+Checkpoints go through `model/training/checkpoint.py`. `save_sharded` writes one file per
+rank into a directory and `load_sharded` reassembles them, resharding if the world size
+changed. `gather_full_state_dict` collects the complete tensors on rank 0 for a portable
+single-file export, which is only possible when the model fits on one host. Under FSDP2 each
+rank holds a slice of every parameter, so the old single-file save was persisting one rank's
+shard under a name that claimed to be the whole model.
+
 `FramerConfig.validate()` runs whenever a preset is built and after CLI overrides are applied.
 It checks the invariants the modules assume: head divisibility for attention and GQA, patch
 size dividing image size, MoE routing width, and the `GroupNorm(32)` channel granularity that

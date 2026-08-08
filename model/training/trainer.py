@@ -126,13 +126,23 @@ def train_language_model(
 
 
 def _save(model, config, step, output_dir, filename):
-    """Save a checkpoint. Note: under FSDP2 this saves each rank's shard; a full
-    state-dict gather is a future extension (fine for single-device runs)."""
+    """Save a checkpoint.
+
+    Under FSDP2 each rank holds only a slice of every parameter, so writing
+    ``state_dict()`` straight to one file used to persist a single rank's shard
+    under a name that claimed to be the whole model. Distributed runs now gather
+    the full state dict on rank 0 instead. For a model too large to gather, call
+    ``save_sharded`` directly.
+    """
     from dataclasses import asdict
 
+    from .checkpoint import gather_full_state_dict
+
     os.makedirs(output_dir, exist_ok=True)
-    core = model.module if hasattr(model, "module") else model
+    state = gather_full_state_dict(model, cpu_offload=True)
+    if not state:  # non-zero rank under distributed; rank 0 does the writing
+        return
     torch.save(
-        {"model_state_dict": core.state_dict(), "config": asdict(config), "step": step},
+        {"model_state_dict": state, "config": asdict(config), "step": step},
         os.path.join(output_dir, filename),
     )
