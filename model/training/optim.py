@@ -6,7 +6,7 @@ import torch
 def build_optimizer(model, config):
     """AdamW with decay on 2D weights only (norms/biases/embeddings excluded).
 
-    This is the standard split used by GPT/Llama-family training: matrices get
+    This is the standard split used in transformer training: matrices get
     weight decay, 1-D parameters (RMSNorm gains, biases) do not.
     """
     decay, no_decay = [], []

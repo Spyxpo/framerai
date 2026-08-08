@@ -129,7 +129,7 @@ class FramerModel(nn.Module):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
         # Depth-scaled init: shrink residual-output projections so the residual
-        # stream stays well-conditioned as depth grows (GPT-2 / Llama style).
+        # stream stays well-conditioned as depth grows.
         scale = (2 * self.config.n_layers) ** -0.5
         for module in self.modules():
             if isinstance(module, CausalSelfAttention):
