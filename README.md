@@ -15,7 +15,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/node-18%2B-green.svg" alt="Node 18+" />
+  <img src="https://img.shields.io/badge/node-20%2B-green.svg" alt="Node 20+" />
 </p>
 
 ---
@@ -88,6 +88,9 @@ video, and audio in **one** model rather than a large language model with small 
 experiments, not what the flagship is.
 
 ## Quick start
+
+Requirements: Python 3.10 or newer for the model, Node 20.19 or newer for the website
+(the build tooling requires it), and Node 18 or newer for the backend.
 
 ### 1. Build the model
 
