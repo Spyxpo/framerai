@@ -307,6 +307,38 @@ patch embedding requires.
 Arbitrary ratios need `image_gen_arch="latent_dit"`. Under `unet` a non-square request raises a
 message naming the setting, rather than producing something misshapen.
 
+### Distributing the experts
+
+`framer-2t-a49b` has 384 experts per layer across 80 MoE layers. Every rank holding every
+expert is what makes the model 3.6 TiB per host; expert parallelism gives each rank
+`n_experts // ep_world` of them, so expert weights divide by the mesh size while the router and
+attention stay replicated.
+
+```python
+from model.training import build_device_mesh, plan_from_environment, shard_model_experts
+
+mesh = build_device_mesh(ep_size=8)
+model = FramerModel.from_config_meta(config)
+shard_model_experts(model, plan_from_environment(ep_size=8, group=mesh["ep"].get_group()))
+model.to_empty(device="cuda")
+model.init_weights_(buffer_device="cuda")
+model = maybe_wrap_fsdp(model, config, device, mesh=mesh)
+```
+
+Order matters: sharding happens on the meta module, *before* materialization, so the experts a
+rank will never hold are never allocated in the first place.
+
+The `(dp, ep)` mesh is what keeps FSDP and expert parallelism composable. FSDP shards over
+`dp`; expert weights are already split over `ep`, and sharding them again would divide them
+twice and leave each rank with a fragment of a fragment.
+
+Routing is unchanged — `n_experts` stays global and the router still scores all of them. What
+changes is where the expert lives, so a token routed off-rank is sent there, computed, and sent
+back, which is the all-to-all dispatch and combine.
+
+384 is `3 x 128` precisely so this divides evenly across 8, 16, 32, 64, and 128-way meshes, and
+a test asserts that for every one of them.
+
 ### Constructing a model too large for one host
 
 `build.py` allocates the whole model on one device, which works up to a few billion

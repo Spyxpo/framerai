@@ -9,6 +9,13 @@ from .distributed import (
     is_main_process,
     maybe_wrap_fsdp,
 )
+from .expert_parallel import (
+    ExpertParallelPlan,
+    build_device_mesh,
+    plan_from_environment,
+    shard_experts,
+    shard_model_experts,
+)
 from .optim import build_optimizer
 from .precision import autocast_context, resolve_precision
 from .schedule import build_scheduler, lr_at_step
@@ -31,4 +38,9 @@ __all__ = [
     "load_sharded",
     "save_full",
     "gather_full_state_dict",
+    "ExpertParallelPlan",
+    "plan_from_environment",
+    "shard_experts",
+    "shard_model_experts",
+    "build_device_mesh",
 ]

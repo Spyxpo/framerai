@@ -39,7 +39,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Streaming, packed token-shard data pipeline (`scripts/prepare_data.py`).
 - [x] Optional safetensors export.
 - [~] Multi-GPU / distributed training via torch-native FSDP2 (guarded; validated single-device).
-      Tensor / expert / pipeline parallelism for the 2T preset remain to be built.
+      Expert parallelism is built; tensor and pipeline parallelism remain.
 - [x] Add a full state-dict gather for FSDP checkpoint save/load (`gather_full_state_dict`).
       The previous path wrote a single rank's shard under a filename claiming to be the
       whole model.
@@ -47,8 +47,13 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       `init_weights_`, `reset_buffers`), without which `framer-2t-a49b` could not be
       constructed at all.
 - [x] Add sharded checkpoint save/load (`model/training/checkpoint.py`).
-- [ ] Add expert-parallel sharding, without which the 2T preset's experts cannot be
-      distributed across hosts.
+- [x] Add expert-parallel sharding (`model/training/expert_parallel.py`), so a MoE layer's
+      experts divide across a mesh instead of every rank holding all of them. Composes with
+      FSDP through a 2D `(dp, ep)` device mesh, so expert weights are not sharded twice.
+- [ ] Exercise expert parallelism on real multi-rank hardware; the placement arithmetic and
+      the single-rank path are tested, the collectives are not.
+- [ ] Replace the per-expert `index_add_` dispatch with grouped GEMM. At 384 experts across
+      80 MoE layers that loop runs 30,720 Python-level expert calls per forward.
 - [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
 - [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the
       attention-factor compensation). It was accepted by the config and silently applied no
