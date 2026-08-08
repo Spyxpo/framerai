@@ -8,6 +8,11 @@ ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 # Decoder families. Each modality keeps its original implementation as the
 # default so the small presets stay laptop-runnable, and opts in per preset.
 IMAGE_GEN_ARCHS = ("unet", "latent_dit")
+
+# Aspect ratios a request may name. Kept here so validate() can check the
+# configured default without importing the sizing helpers (and torch with them).
+ASPECT_RATIOS = ("1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9")
+
 DIFFUSION_OBJECTIVES = ("rectified_flow", "ddpm")
 SAMPLER_METHODS = ("euler", "heun")
 
@@ -55,9 +60,18 @@ class FramerConfig:
     image_gen_arch: str = "unet"  # "unet" | "latent_dit"
     diffusion_steps: int = 1000
     diffusion_channels: int = 256
-    diffusion_resolution: int = 256
+    # Resolution the image decoder is *trained* at. Distinct from image_size,
+    # which is the vision encoder's input, and from the per-request size below.
+    image_train_resolution: int = 512
     beta_start: float = 1e-4
     beta_end: float = 0.02
+
+    # Per-request image sizing. Requests pick an aspect ratio at a size tier, or
+    # give explicit dimensions; both are snapped to a legal multiple and capped.
+    image_size_tier: int = 512  # square-equivalent side length
+    image_default_aspect: str = "1:1"
+    image_max_pixels: int = 1024 * 1024
+    image_allow_custom_size: bool = True  # read sizing intent from the prompt
 
     # Latent diffusion (image_gen_arch="latent_dit")
     vae_latent_channels: int = 4
@@ -213,6 +227,16 @@ class FramerConfig:
                 problems.append(
                     f"audio_gen_channels ({self.audio_gen_channels}) must be a multiple of 32 "
                     "(GroupNorm(32))"
+                )
+
+            if self.image_default_aspect not in ASPECT_RATIOS:
+                problems.append(
+                    f"image_default_aspect ('{self.image_default_aspect}') must be one of "
+                    f"{', '.join(ASPECT_RATIOS)}"
+                )
+            if self.image_max_pixels < 64 * 64:
+                problems.append(
+                    f"image_max_pixels ({self.image_max_pixels}) is below the smallest bucket"
                 )
 
             if self.image_gen_arch not in IMAGE_GEN_ARCHS:

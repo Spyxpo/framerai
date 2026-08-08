@@ -8,6 +8,7 @@ from PIL import Image
 from .configs import FramerConfig
 from .framer import FramerModel
 from .tokenizer import FramerTokenizer
+from .utils.image_request import resolve_image_request
 
 
 def _filter_logits(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
@@ -110,19 +111,68 @@ class FramerGenerator:
         self,
         prompt: str,
         num_images: int = 1,
-        resolution: int = 256,
-    ) -> list:
-        """Generate images from text prompt."""
-        context = self._text_context(prompt).expand(num_images, -1, -1)
-        shape = (num_images, 3, resolution, resolution)
-        images = self.model.diffusion.sample(shape, context, self.device)
+        width: int = None,
+        height: int = None,
+        aspect: str = None,
+        tier: int = None,
+        seed: int = None,
+        resolution: int = None,
+        return_request: bool = False,
+    ):
+        """Generate images from a text prompt at a requested size.
+
+        Size comes from explicit ``width``/``height``, then an ``aspect`` at a
+        size ``tier``, then whatever the prompt itself asks for ("make it 16:9",
+        "1024x1024", "portrait"), then the configured default. ``resolution`` is
+        the old square-only parameter, still accepted.
+
+        Set ``return_request`` to also receive the resolved
+        :class:`~model.utils.image_request.ImageRequest`, which records what was
+        understood and where it came from.
+        """
+        if resolution is not None and width is None and height is None:
+            width = height = int(resolution)
+
+        request = resolve_image_request(
+            prompt,
+            width=width, height=height, aspect=aspect, tier=tier,
+            num_images=num_images, seed=seed, config=self.model.config,
+        )
+        self._require_size_support(request)
+
+        generator = None
+        if request.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(int(request.seed))
+
+        context = self._text_context(request.prompt).expand(request.num_images, -1, -1)
+        images = self._sample_images(request, context, generator)
 
         results = []
-        for i in range(num_images):
+        for i in range(request.num_images):
             img = images[i].cpu().permute(1, 2, 0).numpy()
             img = ((img + 1) * 127.5).clip(0, 255).astype(np.uint8)
             results.append(Image.fromarray(img))
-        return results
+        return (results, request) if return_request else results
+
+    def _require_size_support(self, request):
+        """The pixel U-Net only ever supported square output at small sizes."""
+        if self.model.config.image_gen_arch == "latent_dit":
+            return
+        if request.width != request.height:
+            raise ValueError(
+                f"image_gen_arch='unet' generates square images only; "
+                f"{request.width}x{request.height} was requested. "
+                "Set image_gen_arch='latent_dit' for arbitrary aspect ratios."
+            )
+
+    def _sample_images(self, request, context, generator):
+        """Sample, passing seed and guidance through when the decoder takes them."""
+        sampler = self.model.diffusion.sample
+        try:
+            return sampler(request.shape, context, self.device, generator=generator)
+        except TypeError:
+            # The pixel U-Net's sampler has no seed parameter.
+            return sampler(request.shape, context, self.device)
 
     @torch.no_grad()
     def generate_video(

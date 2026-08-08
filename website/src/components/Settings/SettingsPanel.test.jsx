@@ -3,7 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import SettingsPanel from "./SettingsPanel";
-import { DEFAULT_SETTINGS, RESOLUTIONS, SETTING_FIELDS } from "../../hooks/useSettings";
+import {
+  ASPECT_RATIOS,
+  DEFAULT_SETTINGS,
+  SETTING_FIELDS,
+  SIZE_TIERS,
+  resolveSize,
+} from "../../hooks/useSettings";
 
 function renderPanel(overrides = {}) {
   const props = {
@@ -37,11 +43,30 @@ describe("SettingsPanel", () => {
     }
   });
 
-  it("offers every supported resolution", () => {
-    renderPanel();
-    const select = screen.getByLabelText(/image resolution/i);
-    expect(select.options).toHaveLength(RESOLUTIONS.length);
-    expect(select.value).toBe(String(DEFAULT_SETTINGS.resolution));
+  it("offers every aspect ratio and size tier", () => {
+    const { container } = renderPanel();
+    const aspect = container.querySelector("#setting-aspect");
+    expect(aspect.options).toHaveLength(ASPECT_RATIOS.length);
+    expect(aspect.value).toBe(DEFAULT_SETTINGS.aspect);
+
+    const tier = container.querySelector("#setting-size-tier");
+    expect(tier.options).toHaveLength(SIZE_TIERS.length);
+    expect(tier.value).toBe(String(DEFAULT_SETTINGS.sizeTier));
+  });
+
+  it("previews the resolved pixel size for the chosen ratio", () => {
+    renderPanel({ settings: { ...DEFAULT_SETTINGS, aspect: "16:9", sizeTier: 512 } });
+    expect(screen.getByText("688 x 384")).toBeInTheDocument();
+  });
+
+  it("resolves every ratio to multiple-of-16 dimensions", () => {
+    for (const { value } of ASPECT_RATIOS) {
+      for (const tier of SIZE_TIERS) {
+        const { width, height } = resolveSize(value, tier);
+        expect(width % 16).toBe(0);
+        expect(height % 16).toBe(0);
+      }
+    }
   });
 
   it("reports the served model", () => {
@@ -49,10 +74,13 @@ describe("SettingsPanel", () => {
     expect(screen.getByText("framer-1t-a32b")).toBeInTheDocument();
   });
 
-  it("emits a numeric value when the resolution changes", async () => {
-    const { props } = renderPanel();
-    await userEvent.selectOptions(screen.getByLabelText(/image resolution/i), "512");
-    expect(props.onChange).toHaveBeenCalledWith("resolution", 512);
+  it("emits the ratio as a string and the tier as a number", async () => {
+    const { container, props } = renderPanel();
+    await userEvent.selectOptions(container.querySelector("#setting-aspect"), "16:9");
+    expect(props.onChange).toHaveBeenCalledWith("aspect", "16:9");
+
+    await userEvent.selectOptions(container.querySelector("#setting-size-tier"), "1024");
+    expect(props.onChange).toHaveBeenCalledWith("sizeTier", 1024);
   });
 
   it("closes on Escape", async () => {

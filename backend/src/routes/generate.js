@@ -18,7 +18,13 @@ const config = require("../config");
 const { readSettings } = require("../generationSettings");
 
 const MAX_PROMPT_LENGTH = 4000;
+// Square-only sizes, kept so existing clients keep working. Prefer
+// width/height or aspect + tier.
 const RESOLUTIONS = [64, 128, 256, 512];
+const ASPECT_RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9"];
+const SIZE_TIERS = [256, 512, 768, 1024];
+const MIN_DIMENSION = 64;
+const MAX_DIMENSION = 2048;
 const LANGUAGES = [
   "python",
   "javascript",
@@ -77,10 +83,26 @@ router.post(
     const v = validator(req.body);
     const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
     const numImages = v.integer("num_images", { min: 1, max: 4, fallback: 1 });
-    const resolution = v.oneOf("resolution", RESOLUTIONS, { fallback: 256 });
+    // Size is optional at every level. Width and height must be given together;
+    // otherwise an aspect ratio at a tier, otherwise whatever the prompt asks
+    // for, otherwise the model's default.
+    const width = v.integer("width", { min: MIN_DIMENSION, max: MAX_DIMENSION });
+    const height = v.integer("height", { min: MIN_DIMENSION, max: MAX_DIMENSION });
+    const aspect = v.oneOf("aspect", ASPECT_RATIOS);
+    const tier = v.oneOf("tier", SIZE_TIERS);
+    const seed = v.integer("seed", { min: 0, max: 2 ** 31 - 1 });
+    const resolution = v.oneOf("resolution", RESOLUTIONS);
     v.done();
 
-    res.json(await generateImage(prompt, numImages, resolution));
+    if ((width === undefined) !== (height === undefined)) {
+      throw ApiError.badRequest("Request validation failed", [
+        { field: width === undefined ? "width" : "height", message: "is required alongside the other" },
+      ]);
+    }
+
+    res.json(
+      await generateImage(prompt, numImages, { width, height, aspect, tier, seed, resolution })
+    );
   })
 );
 

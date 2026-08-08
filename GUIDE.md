@@ -202,6 +202,42 @@ The latent path brings three things the U-Net did not have:
 Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
 table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
 
+### Requesting a size
+
+`resolve_image_request` in `model/utils/image_request.py` turns a request into concrete
+dimensions. Precedence is explicit over implicit, always:
+
+| Source | Wins over | Example |
+|---|---|---|
+| `width` + `height` | everything | `{"width": 1024, "height": 768}` |
+| `aspect` + `tier` | prompt and default | `{"aspect": "16:9", "tier": 1024}` |
+| prompt intent | default | `"a widescreen shot of a valley"` |
+| config default | - | `image_default_aspect`, `image_size_tier` |
+
+Because an explicit parameter short-circuits parsing entirely, a sizing word in the prompt can
+never quietly override what the caller asked for. The resolved `ImageRequest` carries `source`,
+so a caller can distinguish an instruction from a guess, and `snapped`, so an off-bucket
+request is visibly adjusted rather than silently changed.
+
+Prompt parsing recognises explicit sizes (`1024x1024`, `1024 by 768`), ratios (`16:9`), named
+shapes (`widescreen`, `portrait`, `phone wallpaper`, `ultrawide`, `banner`), and tier words
+(`hd`, `4k`). Set `image_allow_custom_size=False` to turn it off and honour only explicit
+parameters.
+
+A recognised phrase is stripped from the conditioning text only when it reads as an
+instruction. `_SUBJECT_WORDS` lists the shape words that are just as likely to be describing
+the subject: "a portrait of a woman" still resolves to 2:3, because the guess is a good one,
+but the prompt is left intact, since removing the word would leave "a of a woman". "a woman in
+portrait orientation" is a directive and is stripped.
+
+Buckets are generated, not listed: for tier area `A` and ratio `r`, the size is
+`round16(sqrt(A * r))` by `round16(sqrt(A / r))`. Every ratio therefore costs about the same
+compute, and both dimensions divide `vae_downsample * dit_patch_size`, which is what the DiT
+patch embedding requires.
+
+Arbitrary ratios need `image_gen_arch="latent_dit"`. Under `unet` a non-square request raises a
+message naming the setting, rather than producing something misshapen.
+
 ### Constructing a model too large for one host
 
 `build.py` allocates the whole model on one device, which works up to a few billion

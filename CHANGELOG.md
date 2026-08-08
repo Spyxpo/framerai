@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Image generation defaults to 512x512 and accepts any aspect ratio.** It was
+  square-only at a hardcoded 256 pixels, with no width, no height, and no ratio.
+  A request now takes explicit `width`/`height`, or a named `aspect` at a size
+  `tier`, or sizing intent read from the prompt itself ("make it 16:9",
+  "1024x768", "a widescreen shot", "phone wallpaper", "a 4k panorama"), in that
+  order of precedence, falling back to the configured default. The response
+  reports the resolved size, the ratio, and whether it came from a parameter,
+  the prompt, or the default. `resolution` remains accepted as the deprecated
+  square-only alias. Arbitrary ratios require `image_gen_arch="latent_dit"`; the
+  pixel U-Net says so rather than producing something misshapen.
+  `diffusion_resolution` is renamed `image_train_resolution`, since it describes
+  what the decoder is trained at and never had anything to do with request size.
 - CI installs the model's dependencies from `requirements.txt` plus a new
   `requirements-dev.txt` instead of a hand-maintained list, so the tested
   dependency set is the shipped one. `torchvision` and `tqdm` are dropped from
