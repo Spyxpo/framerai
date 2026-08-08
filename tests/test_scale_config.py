@@ -38,16 +38,28 @@ def test_flagship_active_budget_stays_sparse(flagship):
 
 
 def test_flagship_counts_every_modality(flagship):
-    assert flagship["multimodal_total"] > 2e10
+    """Every modality carries real capacity, wherever its arch happens to put it.
+
+    Decoders are swappable, so the assertion is per *modality* rather than per
+    tower slot: the image budget may sit in a U-Net or in a VAE plus a
+    transformer, and the audio budget in mel diffusion or in a codec plus a
+    vocoder. What must not happen is a modality quietly falling back to the
+    defaults while the backbone grows around it.
+    """
+    towers = flagship["multimodal"]
+    assert flagship["multimodal_total"] > 3e10
     assert flagship["model_total"] == flagship["total"] + flagship["multimodal_total"]
-    for tower, floor in (
-        ("vision_encoder", 5e9),
-        ("audio_encoder", 2e9),
-        ("image_diffusion", 2e9),
-        ("video_diffusion", 5e8),
-        ("audio_diffusion", 5e8),
-    ):
-        assert flagship["multimodal"][tower] > floor, f"{tower} is not scaled with the backbone"
+
+    budgets = {
+        "vision understanding": (["vision_encoder", "vision_projector"], 5e9),
+        "audio understanding": (["audio_encoder", "audio_projector"], 2e9),
+        "image generation": (["image_vae", "image_diffusion"], 2e9),
+        "video generation": (["video_vae", "video_diffusion"], 1e9),
+        "audio generation": (["audio_codec", "audio_vocoder", "audio_diffusion"], 5e8),
+    }
+    for modality, (slots, floor) in budgets.items():
+        total = sum(towers[slot] for slot in slots)
+        assert total > floor, f"{modality} is not scaled with the backbone ({total:,})"
 
 
 def test_flagship_memory_arithmetic(flagship):

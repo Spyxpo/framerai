@@ -7,11 +7,11 @@ from torch.utils.checkpoint import checkpoint
 
 from .configs import FramerConfig
 from .modules.audio_encoder import AudioEncoder
-from .modules.audio_generator import AudioGenerator
 from .modules.latent_diffusion import build_image_generator
 from .modules.latent_video import build_video_generator
 from .modules.moe import build_ffn
 from .modules.multimodal_projector import MultimodalProjector
+from .modules.rvq_audio import build_audio_generator
 from .modules.transformer import CausalSelfAttention, FeedForward, RMSNorm, TransformerBlock
 from .modules.vision_encoder import VisionEncoder
 
@@ -100,17 +100,9 @@ class FramerModel(nn.Module):
         )
         self.audio_projector = MultimodalProjector(config.audio_d_model, config.d_model)
 
-        # Audio generator (text-to-audio / speech)
-        self.audio_gen = AudioGenerator(
-            n_mels=config.audio_n_mels,
-            n_frames=config.audio_gen_frames,
-            base_channels=config.audio_gen_channels,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-            sample_rate=config.audio_sample_rate,
-            n_fft=config.audio_n_fft,
-            hop_length=config.audio_hop_length,
-        )
+        # Audio generation: mel diffusion or RVQ acoustic tokens, selected by
+        # config.audio_gen_arch. Both expose forward(target, context) -> loss.
+        self.audio_gen = build_audio_generator(config)
 
         if init_weights:
             self.init_weights_()
