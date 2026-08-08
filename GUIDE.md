@@ -209,6 +209,38 @@ The latent path brings three things the U-Net did not have:
 Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
 table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
 
+### Evaluating a checkpoint
+
+`model/eval/` provides one suite per modality behind a small harness:
+
+```python
+from model.eval import default_harness
+
+report = default_harness(model).run(inputs={
+    "text": {"batches": [(input_ids, labels)]},
+    "image": {"real": real_images, "fake": generated, "captions": caption_ids},
+    "video": {"real": real_clips, "fake": generated_clips},
+    "audio": {"reference": waveform, "estimate": reconstructed},
+})
+print(report.summary())
+```
+
+A suite that cannot run is recorded as skipped **with its reason**, not omitted. A missing
+input is not the same as a good score, and a harness that conflates them is worse than no
+harness.
+
+Two caveats worth stating before the numbers are used:
+
+- **Frechet distance uses the model's own encoders**, not Inception or I3D. The scores are
+  therefore comparable across FramerAI checkpoints and meaningless against published FID or FVD
+  figures.
+- **A low Frechet distance with poor alignment** means the model makes plausible images of the
+  wrong thing. `alignment_score` is what measures prompt adherence, and the two should be read
+  together.
+
+`bits_per_byte` is tokenizer-independent, so two models with different vocabularies can be
+compared on the same corpus - which raw perplexity cannot do.
+
 ### Placing modalities in the sequence
 
 Under `prefix`, encoded image and audio embeddings are concatenated ahead of the tokens. That

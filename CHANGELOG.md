@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`model/eval/` evaluation harness.** Text perplexity, token accuracy, and
+  bits per byte; image Frechet distance and text-image alignment; audio SI-SDR,
+  mel distance, word and character error rate, and speaker similarity; video
+  Frechet distance and temporal consistency. No new dependency: the matrix
+  square root the Frechet distance needs comes from `torch.linalg.eigh` on the
+  symmetric PSD covariance rather than from scipy. Feature-based scores use the
+  model's own encoders, so they compare FramerAI checkpoints to each other and
+  **not** to published FID or FVD numbers, which the harness documentation says
+  plainly. A suite that cannot run is reported as skipped with its reason,
+  because a missing input is not the same as a good score.
 - **Interleaved multimodal token placement and dynamic high-resolution tiling.**
   `mm_token_placement="interleaved"` writes encoded modality embeddings into
   placeholder token positions with `masked_scatter` instead of concatenating

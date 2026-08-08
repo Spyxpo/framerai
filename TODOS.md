@@ -117,9 +117,12 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Evaluation
 
-- [ ] `model/eval/` harness: text perplexity and task accuracy, image contrastive-alignment
-      score and FID, audio mel-distance / speaker similarity / WER, video FVD and temporal
-      consistency. This is what turns architecture parity into a measurable claim.
+- [x] `model/eval/` harness: text perplexity, token accuracy, and bits per byte; image
+      Frechet distance and contrastive alignment; audio SI-SDR, mel distance, WER, CER, and
+      speaker similarity; video FVD and temporal consistency. Suites that cannot run report
+      why rather than reporting nothing.
+- [ ] Standard benchmark adapters so the numbers can be compared outside this repository.
+- [ ] A `build.py --mode eval` entry point wired to the harness.
 
 ## Backend
 
