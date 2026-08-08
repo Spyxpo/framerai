@@ -27,9 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unrecognised `rope_scaling_type` rather than ignoring it.
 - Removed a dead zero-initialisation in the MoE auxiliary-loss path.
 
+### Changed
+
+- The vision, audio, temporal, and diffusion attention paths now use the fused
+  `scaled_dot_product_attention` kernel instead of materializing an explicit
+  attention matrix. The vision encoder is shared by the audio encoder, so both
+  benefit. Parameter counts are unchanged; the memory cost stops being quadratic
+  in patch or pixel count, which is what put the large presets' configured
+  resolutions out of reach. Attention dropout is now correctly gated on training
+  mode, so eval-mode inference is deterministic.
+
 ### Added
 
 - Forward-pass tests for every multimodal tower (`tests/test_modality_forward.py`),
+  attention parity tests for the SDPA conversion (`tests/test_attention_parity.py`),
   tokenizer save/load round-trip and id-layout tests (`tests/test_tokenizer.py`),
   and RoPE context-extension tests (`tests/test_rope.py`). No test previously
   executed a vision, audio, image-diffusion, or video forward pass.
