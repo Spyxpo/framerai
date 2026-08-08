@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Latent diffusion transformer for image generation** (`image_gen_arch="latent_dit"`).
+  A KL-VAE compressing 8x into a latent grid (`model/modules/vae.py`), a diffusion
+  transformer denoiser with adaLN-zero timestep and text conditioning and
+  on-the-fly 2D sin-cos positions so any resolution and aspect ratio works
+  (`model/modules/dit.py`), a rectified-flow objective with a 20-50 step Euler or
+  Heun ODE sampler replacing the 1000-step ancestral chain
+  (`model/modules/flow.py`), and **classifier-free guidance against a learned
+  null-context embedding** (`model/modules/latent_diffusion.py`) - which the
+  README had advertised from the beginning without any such code existing.
+  `image_gen_arch` defaults to the original `unet`, so the laptop-scale presets
+  are unchanged; the four large MoE presets opt in. `framer-2t-a49b` is now
+  2.00T parameters.
 - **Deferred initialization.** `FramerModel.from_config_meta(config)` builds the
   model's shapes on the meta device, allocating nothing, and `init_weights_()` /
   `reset_buffers()` materialize it afterwards. Without this `framer-2t-a49b`

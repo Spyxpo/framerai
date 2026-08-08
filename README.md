@@ -50,7 +50,8 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 
 - **Text generation** - chat and Q&A with autoregressive decoding (top-k, top-p, temperature).
 - **Code generation** - lower-temperature sampling for more deterministic output.
-- **Image generation** - text-to-image via a cross-attention-conditioned diffusion U-Net.
+- **Image generation** - text-to-image via a latent diffusion transformer with rectified flow
+  and classifier-free guidance (the small presets keep a pixel-space U-Net).
 - **Video generation** - text-to-video with spatial-temporal attention.
 - **Audio generation** - text-to-audio and speech via mel diffusion with Griffin-Lim reconstruction.
 - **Image understanding** - a vision encoder processes uploaded images for multimodal chat.
@@ -72,7 +73,11 @@ FramerAI combines several neural architectures into one unified model:
   *active* per-token compute stays small. See [Model sizes](#model-sizes).
 - **Vision encoder** - ViT-style encoder with patch embeddings for image understanding.
 - **Audio encoder** - mel-spectrogram front-end and transformer for audio understanding.
-- **Diffusion module** - U-Net with cross-attention for text-conditioned image generation.
+- **Image decoder** - a KL-VAE compressing 8x into a latent grid plus a **diffusion
+  transformer** with adaLN-zero timestep and text conditioning, trained on a **rectified-flow**
+  objective and sampled with a 20-50 step ODE solver and **classifier-free guidance** against a
+  learned null-context embedding. Selected by `image_gen_arch`; `unet` keeps the original
+  pixel-space U-Net for the laptop-scale presets.
 - **Video generator** - spatial-temporal diffusion with a 3D U-Net for video synthesis.
 - **Audio generator** - text-conditioned mel diffusion with Griffin-Lim waveform reconstruction.
 - **Multimodal projector** - aligns vision and audio embeddings with the language model space.
@@ -198,12 +203,12 @@ model — the number that describes FramerAI as a multimodal system.
 | `framer-8b`        | 4096 | 32 | 32 / 8 | ~7.2B  | ~7.2B  | ~596M  | ~7.8B  |
 | `framer-tiny-moe`  | 256  | 6  | 8 / 4  | ~33M   | ~21M   | ~20M   | ~53M   |
 | `framer-30b-a3b`   | 2048 | 28 | 16 / 4 | ~34B   | ~3.0B  | ~536M  | ~34B   |
-| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~4.2B  | ~156B  |
-| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~8.2B  | ~202B  |
-| `framer-1t-a32b`   | 8192  | 64 | 64 / 8 | ~983B  | ~32B   | ~16.3B | ~999B  |
-| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~31.9B | **~1.99T** |
+| `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~4.6B  | ~157B  |
+| `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~9.2B  | ~203B  |
+| `framer-1t-a32b`   | 8192  | 64 | 64 / 8 | ~983B  | ~32B   | ~17.4B | ~1.00T |
+| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~33.1B | **~2.00T** |
 
-`framer-2t-a49b` is the all-modality flagship: ~2.0T parameters covering text, code, image,
+`framer-2t-a49b` is the all-modality flagship: 2.00T parameters covering text, code, image,
 video, and audio, of which ~49B are active for any given text token. The four largest
 presets scale their perception and generation towers with the backbone; the smaller ones
 keep laptop-sized towers.
@@ -231,14 +236,15 @@ Preset: framer-2t-a49b
     vision_projector     146.86M
     audio_encoder          5.45B
     audio_projector      136.38M
-    image_diffusion        9.17B
+    image_vae            126.03M
+    image_diffusion       10.23B
     video_diffusion        1.64B
     audio_diffusion        2.45B
-  Multimodal total      31.88B
+  Multimodal total      33.07B
 
-  MODEL TOTAL            1.99T parameters
-  Weights (bf16)        3713.9 GiB
-  Training state       29711.2 GiB (weights + fp32 master + AdamW moments)
+  MODEL TOTAL            2.00T parameters
+  Weights (bf16)        3716.1 GiB
+  Training state       29728.9 GiB (weights + fp32 master + AdamW moments)
 ```
 
 `python build.py --list-presets` prints the whole ladder, and `estimate_params(config)` returns

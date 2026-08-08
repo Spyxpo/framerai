@@ -5,6 +5,12 @@ from dataclasses import dataclass, fields
 # list instead of drifting apart.
 ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 
+# Decoder families. Each modality keeps its original implementation as the
+# default so the small presets stay laptop-runnable, and opts in per preset.
+IMAGE_GEN_ARCHS = ("unet", "latent_dit")
+DIFFUSION_OBJECTIVES = ("rectified_flow", "ddpm")
+SAMPLER_METHODS = ("euler", "heun")
+
 
 @dataclass
 class FramerConfig:
@@ -42,11 +48,30 @@ class FramerConfig:
     vision_n_layers: int = 12
 
     # Diffusion config (image generation)
+    # image_gen_arch selects the decoder family. "unet" is the original
+    # pixel-space U-Net, kept so the small presets stay laptop-runnable;
+    # "latent_dit" is VAE + diffusion transformer + rectified flow, which is
+    # what any real resolution needs.
+    image_gen_arch: str = "unet"  # "unet" | "latent_dit"
     diffusion_steps: int = 1000
     diffusion_channels: int = 256
     diffusion_resolution: int = 256
     beta_start: float = 1e-4
     beta_end: float = 0.02
+
+    # Latent diffusion (image_gen_arch="latent_dit")
+    vae_latent_channels: int = 4
+    vae_base_channels: int = 128
+    vae_downsample: int = 8  # power of two
+    dit_d_model: int = 1152
+    dit_n_layers: int = 28
+    dit_n_heads: int = 16
+    dit_patch_size: int = 2  # patches over the latent grid, not the image
+    diffusion_objective: str = "rectified_flow"  # "rectified_flow" | "ddpm"
+    sampler_steps: int = 50
+    sampler_method: str = "euler"  # "euler" | "heun"
+    cfg_dropout_prob: float = 0.1  # conditioning dropout during training
+    cfg_scale: float = 5.0  # default guidance strength at inference
 
     # Video generation config
     video_frames: int = 16
@@ -189,6 +214,41 @@ class FramerConfig:
                     f"audio_gen_channels ({self.audio_gen_channels}) must be a multiple of 32 "
                     "(GroupNorm(32))"
                 )
+
+            if self.image_gen_arch not in IMAGE_GEN_ARCHS:
+                problems.append(
+                    f"image_gen_arch ('{self.image_gen_arch}') must be one of "
+                    f"{', '.join(IMAGE_GEN_ARCHS)}"
+                )
+            if self.diffusion_objective not in DIFFUSION_OBJECTIVES:
+                problems.append(
+                    f"diffusion_objective ('{self.diffusion_objective}') must be one of "
+                    f"{', '.join(DIFFUSION_OBJECTIVES)}"
+                )
+            if self.sampler_method not in SAMPLER_METHODS:
+                problems.append(
+                    f"sampler_method ('{self.sampler_method}') must be one of "
+                    f"{', '.join(SAMPLER_METHODS)}"
+                )
+
+            if self.image_gen_arch == "latent_dit":
+                if self.vae_downsample < 1 or (self.vae_downsample & (self.vae_downsample - 1)):
+                    problems.append(
+                        f"vae_downsample ({self.vae_downsample}) must be a power of two"
+                    )
+                if self.dit_d_model % self.dit_n_heads:
+                    problems.append("dit_d_model must be divisible by dit_n_heads")
+                if self.dit_d_model % 4:
+                    problems.append(
+                        f"dit_d_model ({self.dit_d_model}) must be divisible by 4 "
+                        "(2D sin-cos positional embedding)"
+                    )
+                if self.sampler_steps < 1:
+                    problems.append(f"sampler_steps ({self.sampler_steps}) must be at least 1")
+                if not 0.0 <= self.cfg_dropout_prob < 1.0:
+                    problems.append(
+                        f"cfg_dropout_prob ({self.cfg_dropout_prob}) must be in [0, 1)"
+                    )
 
         if problems:
             raise ValueError(

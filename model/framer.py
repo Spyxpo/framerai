@@ -8,7 +8,7 @@ from torch.utils.checkpoint import checkpoint
 from .configs import FramerConfig
 from .modules.audio_encoder import AudioEncoder
 from .modules.audio_generator import AudioGenerator
-from .modules.diffusion import DiffusionModule
+from .modules.latent_diffusion import build_image_generator
 from .modules.moe import build_ffn
 from .modules.multimodal_projector import MultimodalProjector
 from .modules.transformer import CausalSelfAttention, FeedForward, RMSNorm, TransformerBlock
@@ -76,15 +76,10 @@ class FramerModel(nn.Module):
         )
         self.vision_projector = MultimodalProjector(config.vision_d_model, config.d_model)
 
-        # Diffusion for image generation
-        self.diffusion = DiffusionModule(
-            in_channels=3,
-            base_channels=config.diffusion_channels,
-            context_dim=config.d_model,
-            num_steps=config.diffusion_steps,
-            beta_start=config.beta_start,
-            beta_end=config.beta_end,
-        )
+        # Image generation: pixel U-Net or latent diffusion transformer,
+        # selected by config.image_gen_arch. Both expose the same
+        # forward(images, context) -> loss and sample(shape, context, device).
+        self.diffusion = build_image_generator(config)
 
         # Video generator
         self.video_gen = VideoGenerator(

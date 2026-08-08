@@ -71,6 +71,9 @@ _MOE = {
         audio_d_model=1536, audio_n_heads=12, audio_n_layers=24,
         audio_n_mels=128, audio_max_frames=2048,
         diffusion_channels=768, audio_gen_channels=384, audio_gen_frames=256,
+        image_gen_arch="latent_dit",
+        vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=1536, dit_n_layers=20, dit_n_heads=12,
     ),
     "framer-200b-a20b": dict(  # ~200B total across all modalities / ~20B active
         d_model=5120, n_layers=48, n_heads=40, n_kv_heads=8, d_ff=17920, max_seq_len=8192,
@@ -81,6 +84,9 @@ _MOE = {
         audio_d_model=2048, audio_n_heads=16, audio_n_layers=32,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=1024, audio_gen_channels=512, audio_gen_frames=256,
+        image_gen_arch="latent_dit",
+        vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=2048, dit_n_layers=24, dit_n_heads=16,
     ),
     "framer-1t-a32b": dict(  # ~1.0T total across all modalities / ~32B active (cluster-only)
         d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672, max_seq_len=8192,
@@ -91,6 +97,9 @@ _MOE = {
         audio_d_model=2560, audio_n_heads=20, audio_n_layers=40,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=1536, audio_gen_channels=768, audio_gen_frames=256,
+        image_gen_arch="latent_dit",
+        vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=2560, dit_n_layers=28, dit_n_heads=20,
     ),
     "framer-2t-a49b": dict(  # ~2.0T total across all modalities / ~49B active (cluster-only)
         # 384 experts is 3 * 128, so it divides evenly across 8/16/32/64/128-way
@@ -105,6 +114,12 @@ _MOE = {
         audio_d_model=3072, audio_n_heads=24, audio_n_layers=48,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=2048, audio_gen_channels=1024, audio_gen_frames=512,
+        # Latent diffusion transformer for image generation. The pixel U-Net is
+        # quadratic in pixel count and cannot run at the resolutions configured
+        # here; the small presets keep it, the flagship does not.
+        image_gen_arch="latent_dit",
+        vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=3072, dit_n_layers=32, dit_n_heads=24,
     ),
 }
 
