@@ -183,9 +183,17 @@ jobs:
         working-directory: website
         run: npm run lint
 
-      - name: Test
+      - name: Test with coverage
         working-directory: website
-        run: npm test
+        run: npm run test:coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-website
+          path: website/coverage/
+          if-no-files-found: warn
 
       - name: Build
         working-directory: website
