@@ -111,6 +111,23 @@ jobs:
           path: coverage.xml
           if-no-files-found: warn
 
+      # The artifact holds the raw report; Codecov is what the README badge and
+      # the pull request comment read from. Both halves of the repo report to
+      # the same Codecov project and are told apart by their flag.
+      #
+      # A pull request opened from a fork gets no secrets, so the token is empty
+      # there and the upload falls back to Codecov's tokenless path for public
+      # repositories. That path is best-effort, so a fork must not fail CI on an
+      # upload error; a branch pushed to this repository has the token and must.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: python
+          disable_search: true
+          fail_ci_if_error: ${{ github.event.pull_request.head.repo.fork != true }}
+
       # Every preset, up to the two-trillion-parameter flagship, must be sizable
       # on a 2-core runner: the estimator allocates nothing.
       - name: Estimate presets without instantiating them
@@ -187,13 +204,29 @@ jobs:
         working-directory: website
         run: npm run test:coverage
 
+      # Every leg of the matrix runs this step, so the name has to carry the Node
+      # version. Two uploads under one name land as two artifacts sharing it,
+      # and nothing downstream can then say which run produced which report.
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-website
+          name: coverage-website-node${{ matrix.node-version }}
           path: website/coverage/
           if-no-files-found: warn
+
+      # Codecov merges same-flag uploads for a commit, so sending every leg of
+      # the matrix would only re-send identical line hits under a slower build.
+      # One version reports; the rest still produce artifacts above.
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == '22'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: website/coverage/lcov.info
+          flags: website
+          disable_search: true
+          fail_ci_if_error: ${{ github.event.pull_request.head.repo.fork != true }}
 
       - name: Build
         working-directory: website
