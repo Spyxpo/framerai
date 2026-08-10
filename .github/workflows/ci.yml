@@ -115,18 +115,21 @@ jobs:
       # the pull request comment read from. Both halves of the repo report to
       # the same Codecov project and are told apart by their flag.
       #
-      # A pull request opened from a fork gets no secrets, so the token is empty
-      # there and the upload falls back to Codecov's tokenless path for public
-      # repositories. That path is best-effort, so a fork must not fail CI on an
-      # upload error; a branch pushed to this repository has the token and must.
+      # A pull request opened from a fork gets no secrets, so it cannot upload
+      # from here at all. Its artifact is picked up afterwards by
+      # coverage-upload.yml, which runs in this repository's context and does
+      # have the token. Skipping the step outright beats letting it run without
+      # one: Codecov's tokenless path is best-effort and would report a fork's
+      # coverage only sometimes, which is worse than never.
       - name: Upload coverage to Codecov
+        if: github.event.pull_request.head.repo.fork != true
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           flags: python
           disable_search: true
-          fail_ci_if_error: ${{ github.event.pull_request.head.repo.fork != true }}
+          fail_ci_if_error: true
 
       # Every preset, up to the two-trillion-parameter flagship, must be sizable
       # on a 2-core runner: the estimator allocates nothing.
@@ -217,16 +220,17 @@ jobs:
 
       # Codecov merges same-flag uploads for a commit, so sending every leg of
       # the matrix would only re-send identical line hits under a slower build.
-      # One version reports; the rest still produce artifacts above.
+      # One version reports; the rest still produce artifacts above. Forks have
+      # no token here and are handled by coverage-upload.yml instead.
       - name: Upload coverage to Codecov
-        if: matrix.node-version == '22'
+        if: matrix.node-version == '22' && github.event.pull_request.head.repo.fork != true
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: website/coverage/lcov.info
           flags: website
           disable_search: true
-          fail_ci_if_error: ${{ github.event.pull_request.head.repo.fork != true }}
+          fail_ci_if_error: true
 
       - name: Build
         working-directory: website
