@@ -8,4 +8,4 @@ ruff>=0.14.0
 
 # safetensors is an optional runtime extra, but the export path is covered by
 # CI, so it is not optional here.
-safetensors>=0.7.0
+safetensors>=0.8.0
