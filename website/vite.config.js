@@ -8,6 +8,13 @@ export default defineConfig({
     globals: true,
     setupFiles: "./src/test/setup.js",
     include: ["src/**/*.test.{js,jsx}"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov", "json-summary"],
+      reportsDirectory: "./coverage",
+      include: ["src/**/*.{js,jsx}"],
+      exclude: ["src/test/**", "src/main.jsx"],
+    },
   },
   server: {
     port: 5173,

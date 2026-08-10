@@ -1,0 +1,95 @@
+# Coverage for pull requests opened from a fork.
+#
+# GitHub withholds secrets from a workflow triggered by a fork, so the CI run
+# itself cannot reach Codecov: it only leaves the reports behind as artifacts.
+# workflow_run fires afterwards in this repository's own context, where the
+# token exists, and forwards those artifacts.
+#
+# Nothing here checks out or executes code from the fork. The checkout is of
+# this repository, and the only thing taken from the fork's run is the coverage
+# report, which is handed straight to the uploader.
+name: Coverage upload
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: coverage-upload-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  upload:
+    name: Forward fork coverage to Codecov
+    runs-on: ubuntu-latest
+    # A run from a branch in this repository has already uploaded from CI, and
+    # a failed run has no reports worth forwarding.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name != github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # workflow_run reports the head commit but not the pull request number:
+      # the pull_requests field is empty whenever the head is a fork, which is
+      # exactly the case this workflow exists for. Ask the API which pull
+      # request carries the commit instead.
+      - name: Resolve pull request number
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          number=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+            --jq '[.[] | select(.state == "open")][0].number // empty')
+          if [ -z "$number" ]; then
+            echo "::warning::no open pull request found for ${HEAD_SHA}; nothing to report"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Download coverage artifacts
+        if: steps.pr.outputs.number != ''
+        uses: actions/download-artifact@v7
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: coverage-*
+          path: artifacts
+
+      # Codecov derives the commit, branch and pull request from the event, and
+      # this event is a workflow_run against the default branch. Every one of
+      # them has to be overridden or the reports land on the wrong commit. The
+      # branch is namespaced with the fork's owner, which is how Codecov
+      # distinguishes a fork branch from one of ours.
+      - name: Upload Python coverage
+        if: steps.pr.outputs.number != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: artifacts/coverage-python/coverage.xml
+          flags: python
+          disable_search: true
+          fail_ci_if_error: true
+          override_commit: ${{ github.event.workflow_run.head_sha }}
+          override_pr: ${{ steps.pr.outputs.number }}
+          override_branch: ${{ github.event.workflow_run.head_repository.owner.login }}:${{ github.event.workflow_run.head_branch }}
+
+      - name: Upload website coverage
+        if: steps.pr.outputs.number != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: artifacts/coverage-website-node22/lcov.info
+          flags: website
+          disable_search: true
+          fail_ci_if_error: true
+          override_commit: ${{ github.event.workflow_run.head_sha }}
+          override_pr: ${{ steps.pr.outputs.number }}
+          override_branch: ${{ github.event.workflow_run.head_repository.owner.login }}:${{ github.event.workflow_run.head_branch }}
