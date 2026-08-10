@@ -56,7 +56,7 @@ jobs:
 
       - name: Download coverage artifacts
         if: steps.pr.outputs.number != ''
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
