@@ -24,24 +24,53 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 
 ## System overview
 
-FramerAI is a single multimodal model served through a small stack:
+FramerAI is a single multimodal model served through a modular web and inference stack:
 
-```txt
-+-----------+     HTTP / WebSocket     +-----------+     JSON over stdio      +-----------+
-|  Website  | <--------------------->  |  Backend  | <--------------------->  |  Worker   |
-| (React)   |                          | (Express) |                          | (Python)  |
-+-----------+                          +-----------+                          +-----------+
-                                                                                    |
-                                                                              FramerModel
+```mermaid
+flowchart TD
+    subgraph Frontend["Website (React SPA)"]
+        UI["Chat UI & Components<br/>(website/src/components/Chat/)"]
+        Client["REST Client & WS Client<br/>(website/src/services/api.js & website/src/services/websocket.js)"]
+        UI --> Client
+    end
+
+    subgraph Backend["Backend Server (Express)"]
+        Routes["REST Routes / WS Service<br/>(backend/src/routes/ & backend/src/services/websocket.js)"]
+        Validation["Validation & Rate Limiters<br/>(backend/src/middleware/limiters.js & backend/src/middleware/validate.js)"]
+        ModelService["Model Service<br/>(backend/src/services/model.js)"]
+        Bridge["Python Bridge<br/>(backend/src/services/pythonBridge.js)"]
+        Fallback["Mock Fallback Response<br/>(mockChat / mock functions)"]
+
+        Client -- "HTTP REST / WS /ws" --> Routes
+        Routes --> Validation
+        Validation --> ModelService
+        ModelService -- "MODEL_ENABLED=false<br/>or Worker Error" --> Fallback
+        ModelService -- "MODEL_ENABLED=true<br/>& Checkpoint Exists" --> Bridge
+    end
+
+    subgraph PythonWorker["Python Inference Worker"]
+        Serve["Inference Worker Daemon<br/>(model/serve.py)"]
+        Gen["FramerGenerator<br/>(model/generate.py)"]
+        Model["FramerModel<br/>(model/framer.py)"]
+        Uploads[("Generated Media Storage<br/>backend/uploads/generated/")]
+
+        Bridge -- "JSON lines over stdio" --> Serve
+        Serve --> Gen
+        Gen --> Model
+        Serve -- "Write PNG / GIF / WAV" --> Uploads
+    end
+
+    Fallback -- "Return JSON Response" --> Client
+    Uploads -- "Served via /uploads/generated/" --> Client
+    Bridge -- "Return Result JSON" --> ModelService
 ```
 
-- The model defines the architecture, tokenizer, and training and inference code.
-- The backend exposes REST endpoints and a WebSocket stream, and drives the model
-  through a Python inference worker.
-- The website is the chat and generation interface.
+**Request Lifecycle Across Layers**:
+1. **Website**: User input is sent via HTTP REST (`website/src/services/api.js`) or WebSocket frames (`website/src/services/websocket.js`).
+2. **Backend**: Express validates payload boundaries (`backend/src/middleware/validate.js`) and enforces rate limits (`backend/src/middleware/limiters.js`). Route handlers pass requests to `backend/src/services/model.js`.
+3. **Inference Bridge**: `backend/src/services/pythonBridge.js` manages a persistent sub-process running `python -m model.serve` over stdio JSON lines. If disabled (`MODEL_ENABLED=false`) or if no checkpoint exists, `backend/src/services/model.js` gracefully returns placeholder responses (`mockChat`).
+4. **Python Worker**: `model/serve.py` uses `FramerGenerator` ([model/generate.py](model/generate.py)) and `FramerModel` ([model/framer.py](model/framer.py)) to run inference, writing output media to `backend/uploads/generated/`.
 
-Each layer can be developed independently. During development you typically run
-all three at once.
 
 ## Repository layout
 
@@ -144,6 +173,60 @@ The four largest scale their vision, audio, and diffusion towers with the backbo
 language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
 `--preset NAME` selects any preset by name (also available on `train.sh`).
 
+### Transformer backbone and MoE
+
+The core language and code processing engine is implemented in [model/modules/transformer.py](model/modules/transformer.py) (`TransformerBlock`) and [model/modules/moe.py](model/modules/moe.py) (`MoEFeedForward`):
+
+```mermaid
+flowchart TD
+    Input["Input Tensor x (B, T, d_model)"] --> Norm1["RMSNorm (norm1)"]
+    
+    subgraph SelfAttn["CausalSelfAttention (attn)"]
+        Norm1 --> ProjQKV["q_proj, k_proj, v_proj (GQA)"]
+        ProjQKV --> QKNorm["Optional QK-Norm<br/>(q_norm, k_norm)"]
+        QKNorm --> RoPE["RotaryPositionalEmbedding (RoPE)<br/>(linear / ntk / yarn scaling)"]
+        RoPE --> KVCache["KV Cache append (past_kv)"]
+        KVCache --> RepeatKV["repeat_kv (Expand GQA K/V heads)"]
+        RepeatKV --> SDPA["Fused Scaled-Dot-Product Attention<br/>(F.scaled_dot_product_attention / Causal Mask)"]
+        SDPA --> OutProj["out_proj + resid_dropout"]
+    end
+    
+    OutProj --> Add1["Residual Add (+)"]
+    Input --> Add1
+    Add1 --> Norm2["RMSNorm (norm2)"]
+
+    subgraph FFNBranch["FFN Sub-Layer Selection (ffn)"]
+        Norm2 --> IsMoE{"is_moe?"}
+        
+        subgraph DensePath["Dense Path"]
+            IsMoE -- "False" --> SwiGLU["Dense SwiGLU FeedForward<br/>(w1, w2, w3)"]
+        end
+
+        subgraph MoEPath["Sparse MoE Path (MoEFeedForward)"]
+            IsMoE -- "True" --> Router["Router Linear Layer (d_model -> n_experts)"]
+            Router --> TopK["Softmax + topk (n_experts_per_tok)"]
+            TopK --> Experts["Routed SwiGLU Experts<br/>(Gather & index_add_)"]
+            Router --> AuxLoss["Load-Balancing Aux Loss<br/>+ Router z-loss"]
+            TopK --> SharedExperts["Optional Shared Experts<br/>(Always-on FeedForward)"]
+            Experts --> CombineMoE["Combine Gated Experts + Shared"]
+            SharedExperts --> CombineMoE
+        end
+    end
+
+    SwiGLU --> Add2["Residual Add (+)"]
+    CombineMoE --> Add2
+    Add1 --> Add2
+    Add2 --> Output["Output Dict (x, present, aux)"]
+```
+
+**Transformer & MoE Key Details**:
+- **Pre-Normalization**: Each block applies `RMSNorm` before attention and FFN sub-layers.
+- **Grouped-Query Attention (GQA)**: Query projection (`q_proj`) expands to `n_heads`, while key/value projections (`k_proj`, `v_proj`) expand to `n_kv_heads`. `repeat_kv` repeats key/value heads prior to attention calculation.
+- **Rotary Position Embeddings (RoPE)**: Applied via `RotaryPositionalEmbedding` with support for `linear` position interpolation, `ntk` base scaling, and `yarn` (NTK-by-parts interpolation with attention factor scaling `0.1 * ln(s) + 1`).
+- **Attention Execution & KV Cache**: Utilizes `F.scaled_dot_product_attention` for fast execution; when caching is enabled (`use_cache=True`), incoming query positions are rotated relative to past KV offsets.
+- **MoE Routing**: `build_ffn` constructs `MoEFeedForward` for MoE layers. The router scores all experts, selects top-k (`n_experts_per_tok`), computes token dispatch, and accumulates outputs alongside optional always-on shared experts. Auxiliary load-balancing and router z-loss are aggregated across layers.
+
+
 ### Why 384 fine-grained experts
 
 The flagship uses 384 experts of width 2048 rather than, say, 192 of width 4096. Total
@@ -209,6 +292,108 @@ The latent path brings three things the U-Net did not have:
 Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
 table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.
 
+#### Image diffusion module (`image_gen_arch`)
+
+Built via `build_image_generator(config)` in [model/modules/latent_diffusion.py](model/modules/latent_diffusion.py):
+
+```mermaid
+flowchart TD
+    ImgReq["Image Request / Conditioning Context"] --> ArchCheck{"image_gen_arch"}
+
+    subgraph LatentDiT["Latent Diffusion Transformer (latent_dit)"]
+        ImgReq --> VAE_Enc["KLVAE.encode_to_latent<br/>(8x spatial downsample)"]
+        VAE_Enc --> LatentGrid["Latent Tensor z (B, 4, H/8, W/8)"]
+        LatentGrid --> FlowInterpolate["RectifiedFlow Interpolation"]
+        
+        subgraph DiT_Denoiser["DiT Denoiser (model/modules/dit.py)"]
+            FlowInterpolate --> Patch2D["PatchEmbed2D + 2D sin-cos pos embed"]
+            Timestep["Timestep t"] --> TimeEmbed["TimestepEmbedder"]
+            TextCtx["Text Context"] --> ContextPool["context_pool (mean pooled)"]
+            TimeEmbed --> CondSum["Conditioning Vector"]
+            ContextPool --> CondSum
+            
+            Patch2D --> DiTBlocks["DiTBlock Stack"]
+            CondSum -- "adaLN-zero shift/scale/gate modulation" --> DiTBlocks
+            TextCtx -- "Cross-Attention" --> DiTBlocks
+            DiTBlocks --> Unpatchify["modulation_out -> proj_out -> _unpatchify"]
+        end
+
+        Unpatchify --> FlowVelocity["Predicted Velocity Field"]
+        DiT_Denoiser -- "20-50 ODE Steps + CFG null_context" --> SamplerODE["ODESampler"]
+        SamplerODE --> VAE_Dec["KLVAE.decode"]
+    end
+
+    subgraph PixelUNet["Pixel-Space U-Net (unet)"]
+        ImgReq --> UNet_Model["UNet (model/modules/diffusion.py)<br/>ResBlocks, SpatialAttention, CrossAttention"]
+        UNet_Model --> Scheduler["NoiseScheduler (1000-step DDPM)"]
+    end
+
+    ArchCheck -- "latent_dit (Large Presets)" --> LatentDiT
+    ArchCheck -- "unet (Small Presets)" --> PixelUNet
+    VAE_Dec --> OutputImg["Generated Image (B, 3, H, W)"]
+    Scheduler --> OutputImg
+```
+
+**Image Diffusion Overview**:
+- **`latent_dit`**: Encodes images to an 8x downsampled latent space via `KLVAE` ([model/modules/vae.py](model/modules/vae.py)). Denoising is performed by `DiT` ([model/modules/dit.py](model/modules/dit.py)) using `DiTBlock` layers modulated by adaLN-zero shift/scale/gate parameters. Trains on `RectifiedFlow` ([model/modules/flow.py](model/modules/flow.py)) velocity prediction and samples via `ODESampler` in 20-50 steps with Classifier-Free Guidance (`null_context`).
+- **`unet`**: Pixel-space `UNet` ([model/modules/diffusion.py](model/modules/diffusion.py)) utilizing 1000-step DDPM ancestral sampling.
+
+#### Video diffusion module (`video_gen_arch`)
+
+Built via `build_video_generator(config)` in [model/modules/latent_video.py](model/modules/latent_video.py):
+
+```mermaid
+flowchart TD
+    VideoReq["Video Request / Context"] --> ArchCheck{"video_gen_arch"}
+
+    subgraph SpacetimeDiTPath["Spacetime Latent Diffusion Transformer (spacetime_dit)"]
+        VideoReq --> VideoVAE_Enc["CausalVideoVAE.encode_to_latent<br/>(4x temporal, 8x spatial compression)"]
+        VideoVAE_Enc --> LatentVol["Latent Volume z (B, C_lat, T/4, H/8, W/8)"]
+        LatentVol --> FlowInterp["RectifiedFlow Interpolation"]
+        
+        subgraph SpacetimeDiT_Denoiser["SpacetimeDiT Denoiser (model/modules/spacetime_dit.py)"]
+            FlowInterp --> Patch3D["PatchEmbed3D + 3D sin-cos pos embed"]
+            Timestep["Timestep t"] --> TimeEmb["TimestepEmbedder"]
+            TextCtx["Text Context"] --> CtxPool["context_pool"]
+            FPS["Frame Rate (fps)"] --> FPSEmb["fps_embed"]
+            TimeEmb --> CondVec["Conditioning Vector"]
+            CtxPool --> CondVec
+            FPSEmb --> CondVec
+
+            Patch3D --> STBlocks["SpacetimeDiTBlock Stack"]
+            CondVec -- "adaLN-zero modulation (12 params)" --> STBlocks
+            
+            subgraph FactorizedAttn["Factorized Spacetime Attention"]
+                SpatialAttn["Spatial Attention: Reshape (B*T, S, C)<br/>Attend within each frame"]
+                TemporalAttn["Temporal Attention: Reshape (B*S, T, C)<br/>Attend across frames at location"]
+                CrossAttn["Text Cross-Attention"]
+                SwiGLUFFN["SwiGLU FFN"]
+                SpatialAttn --> TemporalAttn --> CrossAttn --> SwiGLUFFN
+            end
+            
+            STBlocks --- FactorizedAttn
+            STBlocks --> Unpatch3D["modulation_out -> proj_out -> _unpatchify"]
+        end
+
+        Unpatch3D --> VelPred["Predicted Velocity Field"]
+        SpacetimeDiT_Denoiser -- "20-50 ODE Steps + CFG" --> ODESolver["ODESampler"]
+        ODESolver --> VideoVAE_Dec["CausalVideoVAE.decode"]
+    end
+
+    subgraph UNet3DPath["3D U-Net (unet3d)"]
+        VideoReq --> VideoUNet["VideoGenerator (model/modules/video_generator.py)<br/>3D U-Net with temporal attention loops"]
+    end
+
+    ArchCheck -- "spacetime_dit (Large Presets)" --> SpacetimeDiTPath
+    ArchCheck -- "unet3d (Small Presets)" --> UNet3DPath
+    VideoVAE_Dec --> OutputVideo["Generated Video Clip (B, C, T, H, W)"]
+    VideoUNet --> OutputVideo
+```
+
+**Video Diffusion Overview**:
+- **`spacetime_dit`**: Compresses clips using `CausalVideoVAE` ([model/modules/video_vae.py](model/modules/video_vae.py)) with 4x temporal and 8x spatial downsampling. `SpacetimeDiT` ([model/modules/spacetime_dit.py](model/modules/spacetime_dit.py)) conditions on timestep, text context, and FPS, factorizing attention into spatial (`B*T, S, C`) and temporal (`B*S, T, C`) passes to eliminate quadratic 3D attention complexity.
+- **`unet3d`**: Legacy pixel-space 3D U-Net ([model/modules/video_generator.py](model/modules/video_generator.py)) running explicit temporal loops.
+
 ### Evaluating a checkpoint
 
 `model/eval/` provides one suite per modality behind a small harness:
@@ -270,6 +455,51 @@ the patch grid differs from the trained one, so the same weights accept a tile o
 signal of its own: symmetric InfoNCE between pooled image and text embeddings with a learned
 temperature. Without it the encoder learns only from whatever gradient reaches it through the
 language-model loss, which is weak and indirect.
+
+#### Vision encoder architecture and modality placement
+
+Implemented in [model/modules/vision_encoder.py](model/modules/vision_encoder.py) (`VisionEncoder`, `DynamicTiler`) and [model/framer.py](model/framer.py) (`encode_image_tiles`, `_scatter_modality_embeds`):
+
+```mermaid
+flowchart TD
+    InputImg["Input Image (B, C, H, W)"] --> TilingCheck{"vision_tiling enabled?"}
+
+    subgraph TilingSub["Dynamic High-Resolution Tiling (DynamicTiler)"]
+        TilingCheck -- "True" --> ChooseGrid["choose_grid(H, W)<br/>Find best (rows, cols) ratio"]
+        ChooseGrid --> UnfoldTiles["Resample & Unfold into tiles<br/>(B, n_tiles, C, tile_size, tile_size)"]
+        ChooseGrid --> Thumbnail["Prepend downscaled global thumbnail"]
+        Thumbnail --> BatchedTiles["Batched Tile Grid"]
+        UnfoldTiles --> BatchedTiles
+    end
+
+    TilingCheck -- "False" --> PatchPrep["Standard Image Input"]
+    BatchedTiles --> PatchPrep
+
+    subgraph EncoderSub["VisionEncoder Stack"]
+        PatchPrep --> PatchEmbed["PatchEmbedding (Conv2d stride=patch_size)"]
+        PatchEmbed --> AddCLS["Prepend cls_token"]
+        AddCLS --> InterpPos["Add pos_embed via interpolate_pos_encoding"]
+        InterpPos --> VBlocks["VisionBlock Stack<br/>(LayerNorm -> VisionAttention with fused SDPA -> GELU MLP)"]
+        VBlocks --> LayerNormOut["LayerNorm"]
+    end
+
+    LayerNormOut --> Projector["MultimodalProjector<br/>(Linear d_vision -> d_model)"]
+
+    subgraph PlacementSub["Modality Sequence Placement"]
+        Projector --> PlacementCheck{"mm_token_placement"}
+        PlacementCheck -- "interleaved" --> InterleavedScatter["_scatter_modality_embeds:<br/>Write embeddings into IMAGE_PLACEHOLDER_ID (271)<br/>via masked_scatter"]
+        PlacementCheck -- "prefix" --> PrefixCat["Prefix Concatenation:<br/>Prepend embeddings ahead of token sequence"]
+    end
+
+    InterleavedScatter --> LMInput["Transformer Backbone Core"]
+    PrefixCat --> LMInput
+```
+
+**Vision Encoder Details**:
+- **Dynamic Tiling**: `DynamicTiler` dynamically selects a grid `(rows, cols)` matching the image aspect ratio up to `vision_max_tiles`. A global downscaled thumbnail tile is prepended to preserve macro layout.
+- **Patch Embedding**: `PatchEmbedding` computes conv projections and prepends a `cls_token`. `interpolate_pos_encoding` uses 2D bicubic interpolation to dynamically adjust position embeddings to non-standard tile shapes.
+- **Encoder Blocks**: `VisionEncoder` runs a series of `VisionBlock` layers with `VisionAttention` (fused SDPA) and GELU MLPs.
+- **Sequence Placement**: Encoded vision tokens pass through `MultimodalProjector`. Under `mm_token_placement="interleaved"`, tokens overwrite reserved `IMAGE_PLACEHOLDER_ID` (271) positions in-place, maintaining text-image alignment. Under `"prefix"`, embeddings concatenate at sequence start.
 
 ### Requesting a size
 
