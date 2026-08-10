@@ -30,13 +30,13 @@ FramerAI is a single multimodal model served through a modular web and inference
 flowchart TD
     subgraph Frontend["Website (React SPA)"]
         UI["Chat UI & Components<br/>(website/src/components/Chat/)"]
-        Client["REST Client & WS Client<br/>(website/src/services/api.js & websocket.js)"]
+        Client["REST Client & WS Client<br/>(website/src/services/api.js & website/src/services/websocket.js)"]
         UI --> Client
     end
 
     subgraph Backend["Backend Server (Express)"]
-        Routes["REST Routes / WS Service<br/>(backend/src/routes/ & services/websocket.js)"]
-        Validation["Validation & Rate Limiters<br/>(middleware/limiters.js & validate.js)"]
+        Routes["REST Routes / WS Service<br/>(backend/src/routes/ & backend/src/services/websocket.js)"]
+        Validation["Validation & Rate Limiters<br/>(backend/src/middleware/limiters.js & backend/src/middleware/validate.js)"]
         ModelService["Model Service<br/>(backend/src/services/model.js)"]
         Bridge["Python Bridge<br/>(backend/src/services/pythonBridge.js)"]
         Fallback["Mock Fallback Response<br/>(mockChat / mock functions)"]
@@ -66,10 +66,10 @@ flowchart TD
 ```
 
 **Request Lifecycle Across Layers**:
-1. **Website**: User input is sent via HTTP REST (`api.js`) or WebSocket frames (`websocket.js`).
-2. **Backend**: Express validates payload boundaries (`validate.js`) and enforces rate limits (`limiters.js`). Route handlers pass requests to `services/model.js`.
-3. **Inference Bridge**: `services/pythonBridge.js` manages a persistent sub-process running `python -m model.serve` over stdio JSON lines. If disabled (`MODEL_ENABLED=false`) or if no checkpoint exists, `services/model.js` gracefully returns placeholder responses (`mockChat`).
-4. **Python Worker**: `model/serve.py` uses `FramerGenerator` ([model/generate.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/generate.py)) and `FramerModel` ([model/framer.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/framer.py)) to run inference, writing output media to `backend/uploads/generated/`.
+1. **Website**: User input is sent via HTTP REST (`website/src/services/api.js`) or WebSocket frames (`website/src/services/websocket.js`).
+2. **Backend**: Express validates payload boundaries (`backend/src/middleware/validate.js`) and enforces rate limits (`backend/src/middleware/limiters.js`). Route handlers pass requests to `backend/src/services/model.js`.
+3. **Inference Bridge**: `backend/src/services/pythonBridge.js` manages a persistent sub-process running `python -m model.serve` over stdio JSON lines. If disabled (`MODEL_ENABLED=false`) or if no checkpoint exists, `backend/src/services/model.js` gracefully returns placeholder responses (`mockChat`).
+4. **Python Worker**: `model/serve.py` uses `FramerGenerator` ([model/generate.py](model/generate.py)) and `FramerModel` ([model/framer.py](model/framer.py)) to run inference, writing output media to `backend/uploads/generated/`.
 
 
 ## Repository layout
@@ -175,7 +175,7 @@ language model alone. `--size tiny|small|medium|large` remains as a legacy alias
 
 ### Transformer backbone and MoE
 
-The core language and code processing engine is implemented in [model/modules/transformer.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/transformer.py) (`TransformerBlock`) and [model/modules/moe.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/moe.py) (`MoEFeedForward`):
+The core language and code processing engine is implemented in [model/modules/transformer.py](model/modules/transformer.py) (`TransformerBlock`) and [model/modules/moe.py](model/modules/moe.py) (`MoEFeedForward`):
 
 ```mermaid
 flowchart TD
@@ -294,7 +294,7 @@ table, so one set of weights denoises any resolution and aspect ratio the VAE ca
 
 #### Image diffusion module (`image_gen_arch`)
 
-Built via `build_image_generator(config)` in [model/modules/latent_diffusion.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/latent_diffusion.py):
+Built via `build_image_generator(config)` in [model/modules/latent_diffusion.py](model/modules/latent_diffusion.py):
 
 ```mermaid
 flowchart TD
@@ -335,12 +335,12 @@ flowchart TD
 ```
 
 **Image Diffusion Overview**:
-- **`latent_dit`**: Encodes images to an 8x downsampled latent space via `KLVAE` ([model/modules/vae.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/vae.py)). Denoising is performed by `DiT` ([model/modules/dit.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/dit.py)) using `DiTBlock` layers modulated by adaLN-zero shift/scale/gate parameters. Trains on `RectifiedFlow` ([model/modules/flow.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/flow.py)) velocity prediction and samples via `ODESampler` in 20-50 steps with Classifier-Free Guidance (`null_context`).
-- **`unet`**: Pixel-space `UNet` ([model/modules/diffusion.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/diffusion.py)) utilizing 1000-step DDPM ancestral sampling.
+- **`latent_dit`**: Encodes images to an 8x downsampled latent space via `KLVAE` ([model/modules/vae.py](model/modules/vae.py)). Denoising is performed by `DiT` ([model/modules/dit.py](model/modules/dit.py)) using `DiTBlock` layers modulated by adaLN-zero shift/scale/gate parameters. Trains on `RectifiedFlow` ([model/modules/flow.py](model/modules/flow.py)) velocity prediction and samples via `ODESampler` in 20-50 steps with Classifier-Free Guidance (`null_context`).
+- **`unet`**: Pixel-space `UNet` ([model/modules/diffusion.py](model/modules/diffusion.py)) utilizing 1000-step DDPM ancestral sampling.
 
 #### Video diffusion module (`video_gen_arch`)
 
-Built via `build_video_generator(config)` in [model/modules/latent_video.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/latent_video.py):
+Built via `build_video_generator(config)` in [model/modules/latent_video.py](model/modules/latent_video.py):
 
 ```mermaid
 flowchart TD
@@ -391,8 +391,8 @@ flowchart TD
 ```
 
 **Video Diffusion Overview**:
-- **`spacetime_dit`**: Compresses clips using `CausalVideoVAE` ([model/modules/video_vae.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/video_vae.py)) with 4x temporal and 8x spatial downsampling. `SpacetimeDiT` ([model/modules/spacetime_dit.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/spacetime_dit.py)) conditions on timestep, text context, and FPS, factorizing attention into spatial (`B*T, S, C`) and temporal (`B*S, T, C`) passes to eliminate quadratic 3D attention complexity.
-- **`unet3d`**: Legacy pixel-space 3D U-Net ([model/modules/video_generator.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/video_generator.py)) running explicit temporal loops.
+- **`spacetime_dit`**: Compresses clips using `CausalVideoVAE` ([model/modules/video_vae.py](model/modules/video_vae.py)) with 4x temporal and 8x spatial downsampling. `SpacetimeDiT` ([model/modules/spacetime_dit.py](model/modules/spacetime_dit.py)) conditions on timestep, text context, and FPS, factorizing attention into spatial (`B*T, S, C`) and temporal (`B*S, T, C`) passes to eliminate quadratic 3D attention complexity.
+- **`unet3d`**: Legacy pixel-space 3D U-Net ([model/modules/video_generator.py](model/modules/video_generator.py)) running explicit temporal loops.
 
 ### Evaluating a checkpoint
 
@@ -458,7 +458,7 @@ language-model loss, which is weak and indirect.
 
 #### Vision encoder architecture and modality placement
 
-Implemented in [model/modules/vision_encoder.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/modules/vision_encoder.py) (`VisionEncoder`, `DynamicTiler`) and [model/framer.py](file:///Users/kunaldeo/Desktop/Spryxo/framerai%20new/framerai/model/framer.py) (`encode_image_tiles`, `_scatter_modality_embeds`):
+Implemented in [model/modules/vision_encoder.py](model/modules/vision_encoder.py) (`VisionEncoder`, `DynamicTiler`) and [model/framer.py](model/framer.py) (`encode_image_tiles`, `_scatter_modality_embeds`):
 
 ```mermaid
 flowchart TD
