@@ -14,6 +14,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  commit-messages:
+    name: Commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A co-author trailer naming an AI vendor attaches that name to the commit
+      # and to every pull request that carries it, and a pull request ref is
+      # frozen once the pull request merges - GitHub Support is then the only
+      # way to remove it. Far cheaper to fail here, while the branch can still
+      # be rewritten.
+      - name: Reject AI co-author trailers
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            range="origin/$BASE_REF..HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            range="$BEFORE..HEAD"
+          else
+            range="HEAD~1..HEAD"
+          fi
+          if git log --format='%H%n%B' "$range" | grep -inE 'co-authored-by:.*(anthropic|claude)'; then
+            echo "::error::a commit message in $range carries an AI co-author trailer; strip it and force-push"
+            exit 1
+          fi
+          echo "clean: $range"
+
   model:
     name: Model (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
