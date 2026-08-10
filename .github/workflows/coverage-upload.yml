@@ -70,7 +70,7 @@ jobs:
       # distinguishes a fork branch from one of ours.
       - name: Upload Python coverage
         if: steps.pr.outputs.number != ''
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: artifacts/coverage-python/coverage.xml
@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload website coverage
         if: steps.pr.outputs.number != ''
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: artifacts/coverage-website-node22/lcov.info
