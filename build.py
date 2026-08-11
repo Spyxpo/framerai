@@ -43,6 +43,7 @@ from model.training import (
 )
 from model.utils import (
     MULTIMODAL_TOWERS,
+    apply_seed,
     count_parameters,
     estimate_params,
     get_device,
@@ -362,7 +363,8 @@ def print_estimate(config: FramerConfig):
           f"(weights + fp32 master + AdamW moments)")
 
 
-def main():
+def _make_parser() -> argparse.ArgumentParser:
+    """Return the argument parser. Extracted so tests can invoke it directly."""
     parser = argparse.ArgumentParser(description="FramerAI Model Builder")
     parser.add_argument("--mode", choices=["build", "train", "export", "all"], default="build", help="Operation mode")
     parser.add_argument("--output-dir", default="checkpoints", help="Output directory")
@@ -381,6 +383,9 @@ def main():
     parser.add_argument("--max-steps", type=int, default=None, help="Max training steps")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="LR warmup steps")
+    parser.add_argument("--grad-accum", type=int, default=None,
+                        help="Gradient accumulation steps (effective batch = batch-size × grad-accum)")
     parser.add_argument("--device", type=str, default=None, help="Device (auto, cpu, cuda, mps)")
 
     # Size presets (named registry, scaling from ~15M to 1T-MoE)
@@ -402,27 +407,26 @@ def main():
     parser.add_argument("--grad-checkpointing", action="store_true",
                         help="Enable activation checkpointing to save memory")
 
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=None,
+                        help="RNG seed for reproducible runs (default: config.seed, usually 42)")
+
     # Context extension
     parser.add_argument("--rope-scaling", type=float, default=None,
                         help="RoPE scaling factor for extended context (e.g., 8.0 for 8x)")
 
-    args = parser.parse_args()
+    return parser
 
-    if args.list_presets:
-        print(f"  {'preset':<18s} {'text':>9s} {'active/tok':>11s} {'multimodal':>11s} {'model total':>12s}")
-        for name in list_presets():
-            est = estimate_params(FramerConfig.from_preset(name))
-            print(
-                f"  {name:<18s} {est['total_h']:>9s} {est['active_h']:>11s} "
-                f"{est['multimodal_h']:>11s} {est['model_total_h']:>12s}"
-            )
-        return
 
-    # Build config from a preset (default framer-medium), then apply CLI overrides.
+def _build_config_from_args(args: argparse.Namespace) -> FramerConfig:
+    """Build and return a FramerConfig from parsed CLI args (no I/O, no seeding).
+
+    Extracted from main() so tests can exercise the full override path without
+    running training, building, or exporting anything.
+    """
     preset_name = args.preset or args.size or "framer-medium"
     config = FramerConfig.from_preset(preset_name)
 
-    # Apply CLI overrides
     if args.text_only:
         config.text_only = True
     if args.shard_dir:
@@ -443,17 +447,45 @@ def main():
         config.batch_size = args.batch_size
     if args.lr:
         config.learning_rate = args.lr
+    if args.warmup_steps:
+        config.warmup_steps = args.warmup_steps
+    if args.grad_accum:
+        config.gradient_accumulation_steps = args.grad_accum
     if args.device:
         config.device = args.device
     if args.rope_scaling:
         config.rope_scaling_factor = args.rope_scaling
+    if args.seed is not None:
+        config.seed = args.seed
 
     config.validate()
+    return config
+
+
+def main():
+    args = _make_parser().parse_args()
+
+    if args.list_presets:
+        print(f"  {'preset':<18s} {'text':>9s} {'active/tok':>11s} {'multimodal':>11s} {'model total':>12s}")
+        for name in list_presets():
+            est = estimate_params(FramerConfig.from_preset(name))
+            print(
+                f"  {name:<18s} {est['total_h']:>9s} {est['active_h']:>11s} "
+                f"{est['multimodal_h']:>11s} {est['model_total_h']:>12s}"
+            )
+        return
+
+    config = _build_config_from_args(args)
 
     if args.estimate:
         print_estimate(config)
         return
 
+    # Seed Python / NumPy / PyTorch RNGs before any model is instantiated so
+    # that weight initialization is reproducible regardless of which mode runs.
+    apply_seed(config.seed)
+
+    preset_name = args.preset or args.size or "framer-medium"
     logger.info("=" * 60)
     logger.info(f"FramerAI Model Builder | preset={resolve_preset_name(preset_name)}")
     logger.info("=" * 60)

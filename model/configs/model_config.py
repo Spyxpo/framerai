@@ -175,6 +175,7 @@ class FramerConfig:
     batch_size: int = 8
     gradient_accumulation_steps: int = 4
     grad_clip: float = 1.0
+    seed: int = 42  # RNG seed applied before model init and training for reproducibility
 
     # Paths
     checkpoint_dir: str = "checkpoints"

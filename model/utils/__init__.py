@@ -8,6 +8,7 @@ from .helpers import (
     load_checkpoint,
     save_checkpoint,
 )
+from .seed import apply_seed
 
 __all__ = [
     "MULTIMODAL_TOWERS",
@@ -18,4 +19,5 @@ __all__ = [
     "human_params",
     "save_checkpoint",
     "load_checkpoint",
+    "apply_seed",
 ]

@@ -13,6 +13,7 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [The model](#the-model)
 - [Modalities](#modalities)
 - [The training pipeline](#the-training-pipeline)
+- [Reproducible training](#reproducible-training)
 - [Training on your own data](#training-on-your-own-data)
 - [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
@@ -648,6 +649,76 @@ python build.py --mode all --size tiny --data-dir data --max-steps 10000
 
 `train.sh` wraps install, build/train/export, and serving. Run `./train.sh --help`
 for options.
+
+## Reproducible training
+
+Every training run is reproducible when you fix the preset, the seed, and the
+data. Pass `--seed` to override the default (42); the seed is applied before
+model initialization so weight init and data shuffling are both covered.
+
+`model/configs/training_configs.py` provides a ready-to-use configuration for
+each of the four main presets. The table below lists all training values.
+All fields map directly to `FramerConfig` and are surfaced as CLI flags on
+`build.py`.
+
+| Preset | Seed | Batch | Grad accum | Eff. batch | LR | Warmup | Max steps | Precision | Grad ckpt | Hardware |
+|--------|------|-------|------------|------------|------|--------|-----------|-----------|-----------|----------|
+| `framer-tiny` | 42 | 8 | 1 | 8 | 3e-4 | 500 | 10 000 | fp32 | no | CPU or any GPU |
+| `framer-small` | 42 | 8 | 4 | 32 | 3e-4 | 1 000 | 20 000 | bf16 | no | Single consumer GPU recommended |
+| `framer-medium` | 42 | 8 | 8 | 64 | 3e-4 | 2 000 | 100 000 | bf16 | no | Single GPU with sufficient VRAM |
+| `framer-large` | 42 | 8 | 16 | 128 | 3e-4 | 2 000 | 100 000 | bf16 | yes | High-memory GPU recommended |
+
+Hardware notes are recommendations. `framer-tiny` is designed as a CPU
+smoke-test; `framer-small` and `framer-medium` can train on a single consumer
+GPU or CPU (per `presets.py`). No specific VRAM figures are stated because they
+depend on sequence length, accumulation depth, and whether gradient
+checkpointing is on.
+
+### Copy-paste training commands
+
+Each command passes every non-default training override explicitly so the
+command is self-contained and fully reproduces the documented configuration.
+
+```bash
+# framer-tiny — CPU smoke-test
+# (fp32 is the default on CPU; --grad-accum 1 disables accumulation)
+python build.py --mode train --preset framer-tiny --seed 42 \
+  --precision fp32 --max-steps 10000 --warmup-steps 500 --grad-accum 1
+
+# framer-small — single consumer GPU or CPU
+python build.py --mode train --preset framer-small --seed 42 \
+  --precision bf16 --max-steps 20000 --warmup-steps 1000 --grad-accum 4
+
+# framer-medium — single GPU with sufficient VRAM
+python build.py --mode train --preset framer-medium --seed 42 \
+  --precision bf16 --max-steps 100000 --warmup-steps 2000 --grad-accum 8
+
+# framer-large — high-memory GPU recommended
+python build.py --mode train --preset framer-large --seed 42 \
+  --precision bf16 --max-steps 100000 --warmup-steps 2000 --grad-accum 16 \
+  --grad-checkpointing
+```
+
+### How to reproduce a run
+
+1. Use the exact command for your preset from the section above.
+2. Use the same data directory and shard layout.
+3. The seed covers Python, NumPy, and PyTorch (CPU and CUDA) RNGs, including
+   weight initialization. CUDA atomic operations in backward passes are not
+   forced deterministic (that would disable several CUDA kernels and hurt
+   throughput); bit-exact replay across CUDA runs is therefore not guaranteed,
+   but results will be statistically equivalent.
+4. Resume from a checkpoint with `--resume checkpoints/checkpoint_N.pt` to
+   continue from a known step.
+
+### Loading a training config programmatically
+
+```python
+from model.configs import FramerConfig, get_training_config
+
+tc = get_training_config("framer-small")   # or alias "small"
+config = FramerConfig.from_preset("framer-small", **tc)
+```
 
 ## Training on your own data
 
