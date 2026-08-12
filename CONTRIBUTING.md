@@ -16,6 +16,7 @@ By participating you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - [Running checks locally](#running-checks-locally)
 - [Pull requests](#pull-requests)
 - [Reporting bugs and requesting features](#reporting-bugs-and-requesting-features)
+- [Discussions](#discussions)
 
 ## Ways to contribute
 
@@ -148,3 +149,20 @@ Use the issue templates:
 - Feature requests should describe the problem before the proposed solution.
 
 For security issues, do not open a public issue. Follow [SECURITY.md](SECURITY.md).
+
+## Discussions
+
+Issues track defects and specified work. Everything else belongs in
+[Discussions](https://github.com/Spyxpo/framerai/discussions):
+
+| Category | Use it for |
+|----------|------------|
+| [Q&A](https://github.com/Spyxpo/framerai/discussions/new?category=q-a) | Setup, training runs, configuration, and API behavior. |
+| [Ideas](https://github.com/Spyxpo/framerai/discussions/new?category=ideas) | Proposals that are not yet specified enough to be a feature request. |
+| [Show and tell](https://github.com/Spyxpo/framerai/discussions/new?category=show-and-tell) | Trained checkpoints, dataset recipes, deployments, and integrations. |
+| [General](https://github.com/Spyxpo/framerai/discussions/new?category=general) | Topics that do not fit the categories above. |
+| [Announcements](https://github.com/Spyxpo/framerai/discussions/categories/announcements) | Maintainer posts on releases, breaking changes, and roadmap updates. |
+
+Each category has a form that asks for the details needed to respond. An idea that
+gains support and has a concrete design can be promoted to a feature request; a Q&A
+thread that turns out to be a defect should be filed as a bug report.

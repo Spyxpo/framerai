@@ -505,6 +505,10 @@ with supertest and stub the model service, so no Python worker is needed.
 Contributions are welcome. Read the [contributing guide](CONTRIBUTING.md) and the
 [code of conduct](CODE_OF_CONDUCT.md) before opening a pull request.
 
+For questions, proposals, and project showcases, use
+[Discussions](https://github.com/Spyxpo/framerai/discussions). Issues are reserved for
+defects and specified work.
+
 ## License
 
 Open source under the [MIT License](LICENSE).

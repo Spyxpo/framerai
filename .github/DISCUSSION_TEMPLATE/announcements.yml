@@ -1,0 +1,43 @@
+title: "[Announcement]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Maintainer announcements: releases, breaking changes, roadmap updates, and
+        governance decisions. Keep entries factual and link to the relevant commits,
+        pull requests, or issues.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - Release
+        - Breaking change
+        - Deprecation
+        - Roadmap update
+        - Governance or process
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What changed and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Notable changes, with links to pull requests or issues.
+  - type: textarea
+    id: action
+    attributes:
+      label: Action required
+      description: Migration steps for users, or state that no action is required.
+  - type: input
+    id: reference
+    attributes:
+      label: Reference
+      description: Release tag, changelog entry, or milestone.
