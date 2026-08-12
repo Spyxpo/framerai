@@ -23,6 +23,10 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 
 - [x] Publish reproducible size presets (registry in `model/configs/presets.py`,
       `framer-tiny` … `framer-2t-a49b`) with a parameter estimator.
+- [x] Provide ready-to-use, reproducible training configurations for the four main presets
+      (`framer-tiny`, `framer-small`, `framer-medium`, `framer-large`): fixed seed (42),
+      documented hyperparameters, hardware expectations, and a `--seed` CLI flag. See
+      `model/configs/training_configs.py` and the "Reproducible training" section in GUIDE.md.
 - [x] Scale every modality on the large presets, so `framer-2t-a49b` is ~2T parameters of
       text, code, image, video, and audio in one model, and report the whole-model number
       (`--estimate`, `--list-presets`) without instantiating anything.
