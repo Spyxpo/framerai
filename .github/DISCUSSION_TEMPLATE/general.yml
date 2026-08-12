@@ -1,0 +1,21 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this category for topics that do not fit elsewhere. For usage questions use
+        Q&A, for proposals use Ideas, and report defects as
+        [issues](https://github.com/Spyxpo/framerai/issues/new/choose).
+        Report security vulnerabilities privately through a
+        [security advisory](https://github.com/Spyxpo/framerai/security/advisories/new).
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic
+      description: What you would like to discuss.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Background, links, or prior discussion that helps others respond.

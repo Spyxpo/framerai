@@ -1,0 +1,64 @@
+title: "[Idea]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this category to explore a change before it is specified. Once an idea has
+        support and a concrete design, it can be promoted to a
+        [feature request](https://github.com/Spyxpo/framerai/issues/new?template=feature_request.yml).
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched existing discussions and issues and did not find a duplicate.
+          required: true
+        - label: I checked TODOS.md to see whether this is already planned.
+          required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target area
+      options:
+        - Model (Python)
+        - Backend (Node)
+        - Website (React)
+        - Training / data pipeline
+        - Docker / deployment
+        - Documentation
+        - Other / cross-cutting
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What limitation or pain point does this address? Describe the problem before the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Outline the change. Include interfaces, configuration, or training implications if known.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Costs and trade-offs
+      description: Compute cost, added dependencies, breaking changes, or maintenance burden.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to implement this?
+      options:
+        - "Yes, I can open a pull request"
+        - "Yes, with guidance from a maintainer"
+        - "No, I am proposing it for someone else to pick up"
+    validations:
+      required: true

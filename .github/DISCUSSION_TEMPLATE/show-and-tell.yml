@@ -1,0 +1,54 @@
+title: "[Show and tell]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share something you built with FramerAI: a trained checkpoint, a dataset recipe,
+        a deployment setup, or an integration. Include enough detail for others to
+        reproduce the result.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What you built and what it does.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type of work
+      options:
+        - Trained model or checkpoint
+        - Dataset or data pipeline
+        - Deployment or infrastructure setup
+        - Integration with another project
+        - Benchmark or evaluation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Link
+      description: Repository, demo, or write-up, if public.
+  - type: textarea
+    id: setup
+    attributes:
+      label: Configuration
+      description: Model size, modalities trained, dataset size, hardware, and training steps.
+      placeholder: |
+        Size: small
+        Modalities: text, image
+        Dataset: 2.4 GB local corpus
+        Hardware: 1x RTX 4090
+        Steps: 40000
+  - type: textarea
+    id: results
+    attributes:
+      label: Results and observations
+      description: What worked, what did not, and anything you would do differently.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Commands to reproduce
+      render: shell

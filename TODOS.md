@@ -162,7 +162,6 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ## Community and governance
 
-- [ ] Enable GitHub Discussions and seed categories for questions and ideas.
 - [ ] Add a curated list of good first issues for new contributors.
 - [ ] Add a maintainers file describing review ownership and release duties.
 
@@ -179,3 +178,4 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Add Dependabot for pip, npm, and GitHub Actions.
 - [x] Add issue and pull request templates and CODEOWNERS.
 - [x] Add contributor guide, code of conduct, and security policy.
+- [x] Enable GitHub Discussions, seed categories, and add category forms.

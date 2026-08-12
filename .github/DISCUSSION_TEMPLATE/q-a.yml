@@ -1,0 +1,61 @@
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this category for usage questions: setup, training runs, configuration, and
+        API behavior. If you are reporting a defect, open a
+        [bug report](https://github.com/Spyxpo/framerai/issues/new?template=bug_report.yml) instead.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched existing discussions and issues and did not find an answer.
+          required: true
+        - label: I read the relevant sections of the README and GUIDE.
+          required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - Model (Python)
+        - Backend (Node)
+        - Website (React)
+        - Training / data pipeline
+        - Docker / deployment
+        - Documentation
+        - Other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State what you are trying to do and where you are stuck.
+    validations:
+      required: true
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What you have already tried
+      description: Commands you ran, settings you changed, and documentation you followed.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Command output, logs, or stack traces. Trim to the relevant part.
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, Node version, GPU / VRAM, and relevant package versions.
+      placeholder: |
+        OS: Ubuntu 22.04
+        Python: 3.11
+        Node: 20
+        GPU: RTX 4090 24GB
