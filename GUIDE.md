@@ -14,6 +14,7 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [Modalities](#modalities)
 - [The training pipeline](#the-training-pipeline)
 - [Training on your own data](#training-on-your-own-data)
+- [Single-GPU training tutorial](#single-gpu-training-tutorial)
 - [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
 - [Running with Docker](#running-with-docker)
@@ -438,6 +439,208 @@ python build.py --mode all --size small --data-dir data --train-modalities
 
 The loaders live in `model/data.py`; the data layout is documented in
 [data/README.md](data/README.md).
+
+## Single-GPU training tutorial
+
+This step-by-step tutorial walks through setting up your environment, preparing local training data, training a FramerAI model from scratch on a single GPU (or CPU/MPS), and exporting the trained checkpoint.
+
+### 1. Prerequisites and hardware
+
+- **Python**: 3.10 or newer.
+- **Compute device**: An NVIDIA CUDA-capable GPU is recommended for speed. Apple Silicon Macs (`--device mps`) and CPU (`--device cpu`) are supported for small models and testing.
+- **VRAM / RAM recommendations**:
+  - `framer-tiny` (~39M total, ~19M text): ~2–4 GB VRAM / RAM.
+  - `framer-small` (~236M total, ~142M text): ~8–12 GB VRAM.
+  - `framer-medium` (~941M total, ~429M text): ~16–24 GB VRAM.
+  - `framer-large` (~3.7B total, ~1.2B text): ~24 GB+ VRAM with `--grad-checkpointing` and `--precision bf16`.
+
+`build.py` automatically checks if the model memory footprint fits available system memory up front (`check_buildable()`) before allocating parameters.
+
+### 2. Environment setup
+
+Clone the repository and install the Python dependencies:
+
+```bash
+# Clone the repository
+git clone https://github.com/Spyxpo/framerai.git
+cd framerai
+
+# Create and activate a Python virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install required packages (PyTorch, soundfile, torchaudio, Pillow, etc.)
+pip install -r requirements.txt
+```
+
+### 3. Preparing a small local text corpus under data/
+
+FramerAI learns entirely from local files placed under `data/` (or any subfolder, scanned recursively).
+
+Supported text formats (`model/data.py`):
+- `*.txt`: Plain text files, split into training samples on blank lines (`\n\n`).
+- `*.jsonl`: JSON Lines records with one of the following schema formats:
+  - Plain text: `{"text": "Sample text line..."}`
+  - Conversational turn: `{"prompt": "User question", "response": "Assistant response"}` (formatted internally as `<user>prompt<assistant>response`)
+  - Instruction: `{"instruction": "Task description", "input": "Optional context", "output": "Expected output"}` (formatted internally as `<user>instruction\ninput<assistant>output`)
+
+Create a local corpus file under `data/`:
+
+```bash
+cat << 'EOF' > data/corpus.jsonl
+{"text": "FramerAI is an open-source, self-contained multimodal architecture trained from scratch."}
+{"prompt": "How is FramerAI trained?", "response": "It trains on local text and caption corpora without external teacher models."}
+{"instruction": "Write a Python helper to calculate factorial.", "output": "def factorial(n):\n    return 1 if n <= 1 else n * factorial(n - 1)"}
+EOF
+```
+
+### 4. Optional image and audio caption-pair preparation
+
+If you wish to train the image and audio diffusion generators alongside the language model, add caption pair records under `data/`:
+
+- **Image caption pairs**: `*.jsonl` files containing `image` (path) and `caption` (or `text`):
+  ```json
+  {"image": "media/sunset.png", "caption": "a sunset over the ocean with orange clouds"}
+  ```
+  Image paths are resolved relative to the directory containing the `.jsonl` file.
+- **Audio caption pairs**: `*.jsonl` files containing `audio` (path) and `text` (or `caption`):
+  ```json
+  {"audio": "media/greeting.wav", "text": "hello and welcome to framerai"}
+  ```
+  Audio is loaded via `soundfile` or `torchaudio` and resampled automatically to the model's target sample rate (24 kHz).
+
+### 5. Building and preparing the dataset
+
+- **In-memory loader (default)**: `build.py` automatically scans `--data-dir` recursively and constructs a `TextCorpusDataset`.
+- **Streaming packed token shards (optional for large corpora)**: To scale past in-memory buffering, pre-tokenize the corpus into packed `.bin` shards:
+  ```bash
+  python -m scripts.prepare_data --data-dir data --tokenizer checkpoints/tokenizer --out-dir data/shards --shard-tokens 1000000
+  ```
+  Then pass `--shard-dir data/shards` to `build.py`.
+
+### 6. Starting a from-scratch training run
+
+Run `build.py` in `--mode all` to build architecture weights, train the BPE tokenizer, train the language model, and export the checkpoint in one command:
+
+```bash
+python build.py --mode all --preset framer-small --data-dir data --max-steps 1000 --batch-size 8 --lr 3e-4 --device cuda
+```
+
+Key `build.py` arguments:
+- `--mode {build,train,export,all}`: Operation mode (default: `build`).
+- `--preset NAME`: Select a size preset (`framer-tiny`, `framer-small`, `framer-medium`, `framer-large`) or legacy `--size {tiny,small,medium,large}`.
+- `--data-dir DIR`: Directory containing training data (default: `data`).
+- `--max-steps N`: Number of optimization steps.
+- `--batch-size N`: Training batch size.
+- `--lr RATE`: Learning rate (default: `3e-4`).
+- `--precision {bf16,fp16,fp32}`: Mixed precision autocast type (default: `bf16`).
+- `--grad-checkpointing`: Enable activation checkpointing to reduce VRAM usage.
+- `--device DEVICE`: Target device (`auto`, `cuda`, `mps`, `cpu`).
+
+Alternatively, use the shell wrapper `./train.sh`:
+
+```bash
+./train.sh --size small --max-steps 1000 --batch-size 8 --data-dir data
+```
+
+### 7. Model size and batch-size recommendations
+
+#### Single-GPU presets
+
+| Preset | Parameters | Recommended VRAM | Recommended Batch Size | Notes |
+|--------|------------|------------------|------------------------|-------|
+| `framer-tiny` | ~39M total (~19M text) | 2–4 GB | 16–32 | Fast testing & iteration on laptop GPU / CPU |
+| `framer-small` | ~236M total (~142M text) | 8–12 GB | 8–16 | Baseline preset for single consumer GPU |
+| `framer-medium` | ~941M total (~429M text) | 16–24 GB | 4–8 | Default preset in `build.py` |
+| `framer-large` | ~3.7B total (~1.2B text) | 24 GB+ | 2–4 | Use `--grad-checkpointing` and `--precision bf16` |
+
+#### Estimating memory without allocating
+
+To inspect parameters and memory requirements without instantiating the model:
+
+```bash
+python build.py --preset framer-small --estimate
+```
+
+> **Note on MoE presets**: Trillion-parameter MoE presets (`framer-30b-a3b` through `framer-2t-a49b`) require multi-node hardware with torch-native FSDP2 and expert-parallel meshes. Single-GPU from-scratch training should use dense presets (`framer-tiny` to `framer-large`).
+
+### 8. How to use `--train-modalities`
+
+`--train-modalities` is a **boolean CLI flag** (`store_true` in `build.py`), not a key-value argument taking modality string parameters.
+
+When passed, it enables `train_modality_generators()`, which trains:
+1. The **image generator** (latent DiT or pixel-space U-Net) on `ImageCaptionDataset` pairs (`target_images`).
+2. The **audio generator** (RVQ codec/vocoder or mel diffusion) on `AudioCaptionDataset` pairs (`target_audio`).
+
+Usage:
+
+```bash
+python build.py --mode all --preset framer-small --data-dir data --train-modalities
+```
+
+If no image or audio caption pairs are present under `--data-dir`, modality generator training is safely skipped with an informative log message.
+
+### 9. Expected timing guidance
+
+> **Note**: Timings below are estimates for 1,000 steps on a modern single GPU (e.g. NVIDIA RTX 3090/4090 or A10G). Actual runtime depends on hardware, batch size, sequence length, and precision.
+
+- **`framer-tiny` (1,000 steps)**: ~1–3 minutes (estimate)
+- **`framer-small` (1,000 steps)**: ~5–15 minutes (estimate)
+- **`framer-medium` (1,000 steps)**: ~15–30 minutes (estimate)
+- **Modality generators (`--train-modalities`, 200 steps each)**: ~1–3 minutes per modality (estimate)
+
+During training, the logger outputs real-time step speed:
+`Step 100/1000 | loss 3.4215 | lr 3.00e-04 | 14.2 it/s`
+
+### 10. Exporting the trained model
+
+`--mode all` automatically exports the model upon completion. To export an existing checkpoint manually:
+
+```bash
+python build.py --mode export --output-dir checkpoints --export-dir checkpoints/export
+```
+
+Exported files in `checkpoints/export/`:
+- `framerai_model.pt`: PyTorch model state dict and config dictionary.
+- `framerai_model.safetensors`: Portable safetensors file (if `safetensors` is installed).
+- `tokenizer/`: Vocabulary and tokenizer state.
+- `model_info.json`: Parameter counts, preset configuration, and supported modalities metadata.
+
+To serve the exported model via the backend, configure `backend/.env`:
+
+```env
+MODEL_ENABLED=true
+MODEL_PATH=../checkpoints/export/framerai_model.pt
+```
+
+### 11. Complete end-to-end tutorial example
+
+Here is a complete, copy-pasteable script to run a from-scratch training pipeline and verify serving:
+
+```bash
+# 1. Activate environment
+source venv/bin/activate
+
+# 2. Create local corpus directory and sample data
+mkdir -p data
+cat << 'EOF' > data/my_corpus.jsonl
+{"text": "FramerAI models are trained locally without third-party APIs."}
+{"prompt": "Hello FramerAI!", "response": "Hello! How can I help you today?"}
+EOF
+
+# 3. Build, train, and export a tiny model (100 steps smoke test)
+python build.py --mode all --preset framer-tiny --data-dir data --max-steps 100 --batch-size 4
+
+# 4. Confirm export files exist
+ls -la checkpoints/export/
+
+# 5. Configure backend to use the trained model and start server
+cd backend
+cp -n .env.example .env
+sed -i.bak 's|MODEL_ENABLED=.*|MODEL_ENABLED=true|' .env
+sed -i.bak 's|MODEL_PATH=.*|MODEL_PATH=../checkpoints/export/framerai_model.pt|' .env
+npm run dev
+```
 
 ## The backend and the inference bridge
 
