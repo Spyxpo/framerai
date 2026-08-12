@@ -197,7 +197,7 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     seq_len = min(config.max_seq_len, 1024)
 
     # Prefer streaming packed shards; fall back to the in-memory corpus loader.
-    packed = build_packed_dataset(shard_dir, seq_len, rank=rank, world_size=world) if shard_dir else None
+    packed = build_packed_dataset(shard_dir, seq_len, rank=rank, world_size=world, seed=config.seed) if shard_dir else None
     if packed is not None:
         logger.info(f"Streaming packed shards from '{shard_dir}' (seq_len={seq_len})")
         loader = DataLoader(packed, batch_size=config.batch_size, num_workers=2, pin_memory=(device.type == "cuda"))

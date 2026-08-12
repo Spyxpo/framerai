@@ -217,12 +217,12 @@ class PackedTokenDataset(IterableDataset):
 
 
 def build_packed_dataset(shard_dir: str, seq_len: int, rank: int = 0, world_size: int = 1,
-                         shuffle_buffer: int = 1024):
+                         shuffle_buffer: int = 1024, seed: int = 0):
     """Return a PackedTokenDataset if a prepared shard dir exists, else None."""
     if not os.path.isfile(os.path.join(shard_dir, SHARD_META)):
         return None
     return PackedTokenDataset(shard_dir, seq_len, rank=rank, world_size=world_size,
-                              shuffle_buffer=shuffle_buffer)
+                              shuffle_buffer=shuffle_buffer, seed=seed)
 
 
 # ---------------------------------------------------------------------------
