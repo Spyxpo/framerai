@@ -48,3 +48,19 @@ def test_rank_sharding_is_disjoint(tmp_path):
     # Two ranks partition the blocks: together they cover the single-rank stream.
     total = list(PackedTokenDataset(str(out), seq_len, rank=0, world_size=1))
     assert len(a) + len(b) == len(total)
+
+
+def test_build_packed_dataset_threads_seed(tmp_path):
+    """build_packed_dataset forwards its seed argument to PackedTokenDataset."""
+    from model.data import build_packed_dataset
+
+    data_dir = tmp_path / "corpus"
+    data_dir.mkdir()
+    (data_dir / "a.txt").write_text("\n\n".join(f"document {i} content here" for i in range(50)))
+    out = tmp_path / "shards"
+    tok = _tokenizer()
+    prepare_shards(str(data_dir), tok, str(out), shard_tokens=500)
+
+    ds = build_packed_dataset(str(out), seq_len=16, seed=123)
+    assert ds is not None, "build_packed_dataset returned None for a valid shard dir"
+    assert ds.seed == 123
