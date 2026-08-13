@@ -770,7 +770,7 @@ cd framerai
 python3 -m venv venv
 source venv/bin/activate
 
-# Install required packages (PyTorch, soundfile, torchaudio, Pillow, etc.)
+# Install required packages (PyTorch, soundfile, Pillow, etc.; torchaudio is an optional fallback)
 pip install -r requirements.txt
 ```
 
@@ -808,7 +808,7 @@ If you wish to train the image and audio diffusion generators alongside the lang
   ```json
   {"audio": "media/greeting.wav", "text": "hello and welcome to framerai"}
   ```
-  Audio is loaded via `soundfile` or `torchaudio` and resampled automatically to the model's target sample rate (24 kHz).
+  Audio is loaded via `soundfile` or `torchaudio` and resampled automatically to the model's target sample rate (16 kHz).
 
 ### 5. Building and preparing the dataset
 
