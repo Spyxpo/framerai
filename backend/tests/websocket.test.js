@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 
 const { mockModel, startServer } = require("./helpers");
 
+// Default mock for most tests
 mockModel();
 
 /**
@@ -150,4 +151,26 @@ test("a frame that is not JSON does not take the connection down", async (t) => 
 
   assert.equal(pong.type, "pong");
   ws.close();
+});
+
+test("existing text streaming still works after audio changes", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const messages = await exchange(server.wsUrl, {
+    type: "chat",
+    content: "hello there",
+    conversationId: "text-test",
+  });
+
+  const types = messages.map((m) => m.type);
+  assert.ok(types.includes("ack"), "should acknowledge");
+  assert.ok(types.includes("typing"), "should show typing");
+
+  const streamed = messages.filter((m) => m.type === "stream");
+  assert.ok(streamed.length > 0, "should stream text");
+
+  const final = streamed[streamed.length - 1];
+  assert.equal(final.done, true);
+  assert.equal(final.responseType, "text");
 });

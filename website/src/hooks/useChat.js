@@ -45,6 +45,43 @@ export function useChat(settings) {
         return;
       }
 
+      // Handle audio streaming chunks
+      if (data.responseType === "audio") {
+        if (data.done) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              last.type = "audio";
+              last.metadata = data.metadata;
+              last.audioComplete = true;
+            }
+            return [...updated];
+          });
+        } else {
+          // Accumulate audio chunks
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              last.type = "audio";
+              last.content = data.content || last.content;
+              last.audioChunks = last.audioChunks || [];
+              last.audioChunks.push(data.metadata.chunkData);
+              last.audioMetadata = {
+                sampleRate: data.metadata.sampleRate,
+                channels: data.metadata.channels,
+                bitsPerSample: data.metadata.bitsPerSample,
+                totalChunks: data.metadata.totalChunks,
+              };
+            }
+            return [...updated];
+          });
+        }
+        return;
+      }
+
       if (data.done) {
         setStreaming(false);
         setMessages((prev) => {

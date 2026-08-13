@@ -7,8 +7,50 @@
  */
 
 const request = require("supertest");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const MODEL_MODULE = require.resolve("../src/services/model");
+
+/**
+ * Create a minimal valid WAV file for testing audio streaming.
+ * Returns a Buffer containing a mono 16-bit PCM WAV file with the specified duration.
+ */
+function createTestWav(durationSec = 1.0, sampleRate = 24000) {
+  const numSamples = Math.floor(sampleRate * durationSec);
+  const dataSize = numSamples * 2; // 16-bit = 2 bytes per sample
+  const fileSize = 36 + dataSize;
+
+  const buffer = Buffer.alloc(44 + dataSize);
+
+  // RIFF header
+  buffer.write("RIFF", 0);
+  buffer.writeUInt32LE(fileSize, 4);
+  buffer.write("WAVE", 8);
+
+  // fmt chunk
+  buffer.write("fmt ", 12);
+  buffer.writeUInt32LE(16, 16); // fmt chunk size
+  buffer.writeUInt16LE(1, 20);  // audio format (1 = PCM)
+  buffer.writeUInt16LE(1, 22);  // channels (mono)
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  buffer.writeUInt16LE(2, 32);  // block align
+  buffer.writeUInt16LE(16, 34); // bits per sample
+
+  // data chunk
+  buffer.write("data", 36);
+  buffer.writeUInt32LE(dataSize, 40);
+
+  // PCM data: simple sine wave at 440 Hz
+  for (let i = 0; i < numSamples; i++) {
+    const sample = Math.sin(2 * Math.PI * 440 * i / sampleRate);
+    const value = Math.floor(sample * 16384); // Scale to 16-bit range
+    buffer.writeInt16LE(value, 44 + i * 2);
+  }
+
+  return buffer;
+}
 
 /**
  * Install a stub in place of src/services/model. Returns the call log so a
@@ -105,4 +147,4 @@ async function newConversation(app) {
   return res.body.id;
 }
 
-module.exports = { mockModel, loadApp, startServer, newConversation };
+module.exports = { mockModel, loadApp, startServer, newConversation, createTestWav };

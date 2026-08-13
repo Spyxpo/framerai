@@ -273,3 +273,50 @@ describe("Chat — send flow", () => {
     expect(onOpenSettings).toHaveBeenCalledOnce();
   });
 });
+
+  it("renders streaming audio player when audioChunks are present", () => {
+    // jsdom doesn't support Web Audio API, component will show error or loading
+    // The important thing is that it recognizes streaming audio data
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Here is your audio",
+      audioChunks: ["Y2h1bmsx", "Y2h1bmsy"], // base64 chunks
+      audioMetadata: {
+        sampleRate: 24000,
+        channels: 1,
+        bitsPerSample: 16,
+        totalChunks: 2,
+      },
+    });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    // The streaming audio player component should be rendered
+    // (it will show an error in jsdom, but the component structure exists)
+    const streamingPlayer = container.querySelector('.streaming-audio-player, .streaming-audio-error, .streaming-audio-loading');
+    expect(streamingPlayer).toBeInTheDocument();
+  });
+
+  it("renders standard audio element when only URL is present (fallback)", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Here is your audio",
+      metadata: { url: "/uploads/generated/audio.wav" },
+    });
+    render(<MessageBubble message={msg} />);
+    const audioElement = screen.getByLabelText(/generated audio/i);
+    expect(audioElement).toBeInTheDocument();
+    expect(audioElement.tagName).toBe("AUDIO");
+  });
+
+  it("does not render audio when type is audio but no chunks or URL", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Audio generation in progress",
+    });
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByLabelText(/generated audio/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/streaming audio/i)).not.toBeInTheDocument();
+  });
