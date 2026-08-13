@@ -1,8 +1,11 @@
 """Streaming packed-data tests: shard prep, block packing, rank sharding."""
 
+import os
+
 import torch
 
-from model.data import PackedTokenDataset, prepare_shards
+from model.configs import FramerConfig
+from model.data import AudioCaptionDataset, ImageCaptionDataset, PackedTokenDataset, prepare_shards
 from model.tokenizer import FramerTokenizer
 
 
@@ -48,3 +51,28 @@ def test_rank_sharding_is_disjoint(tmp_path):
     # Two ranks partition the blocks: together they cover the single-rank stream.
     total = list(PackedTokenDataset(str(out), seq_len, rank=0, world_size=1))
     assert len(a) + len(b) == len(total)
+
+
+def test_image_caption_dataset_examples():
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "examples")
+    tok = _tokenizer()
+    ds = ImageCaptionDataset(data_dir, tok, resolution=128, caption_len=32)
+    assert len(ds) == 2
+    item = ds[0]
+    assert "input_ids" in item and "target_images" in item
+    assert item["input_ids"].shape == (32,)
+    assert item["target_images"].shape == (3, 128, 128)
+    assert item["target_images"].min() >= -1.0 and item["target_images"].max() <= 1.0
+
+
+def test_audio_caption_dataset_examples():
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "examples")
+    tok = _tokenizer()
+    config = FramerConfig()
+    ds = AudioCaptionDataset(data_dir, tok, config, caption_len=32)
+    assert len(ds) == 2
+    item = ds[0]
+    assert "input_ids" in item and "target_audio" in item
+    assert item["input_ids"].shape == (32,)
+    assert item["target_audio"].dim() == 3  # (1, n_mels, frames)
+    assert item["target_audio"].shape[1] == config.audio_n_mels
