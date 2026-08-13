@@ -97,7 +97,7 @@ flowchart TD
 - Python 3.10 or newer.
 - Node.js 18 or newer and npm.
 - A CUDA-capable GPU is recommended for training. CPU works for small models and inference but is slow.
-- Optional: `soundfile` or `torchaudio` for reading and writing audio files (installed by `requirements.txt`).
+- Audio file support: `soundfile` is installed by `requirements.txt`. `torchaudio` is an optional fallback loader listed under the optional extras and must be installed separately.
 
 ## End-to-end setup
 
@@ -1046,7 +1046,7 @@ cd website && npm ci && npm run build
 ## Troubleshooting
 
 - Out of memory during training: lower `--batch-size`, use a smaller `--size`, or train on CPU with `--device cpu`.
-- Audio file loading fails: install `soundfile` or `torchaudio` (both are in `requirements.txt`).
+- Audio file loading fails: `soundfile` comes from `requirements.txt`; if it is unavailable, install the optional fallback loader with `pip install torchaudio`.
 - Backend returns placeholders: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
 - Website shows connection errors: confirm the backend is running on the expected port.
 
