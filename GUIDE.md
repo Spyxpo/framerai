@@ -731,14 +731,16 @@ Put files under `data/` (scanned recursively):
 - image-caption `*.jsonl` - `{"image": path, "caption": ...}`.
 - audio-caption `*.jsonl` - `{"audio": path, "text": ...}`.
 
+Ready-to-use example datasets with real text, image, and audio media are available under `data/examples/`.
+
 The tokenizer and language model train on all text sources. To also train the
 image and audio generators on caption pairs:
 
 ```bash
-python build.py --mode all --size small --data-dir data --train-modalities
+python build.py --mode all --size tiny --data-dir data/examples --train-modalities
 ```
 
-The loaders live in `model/data.py`; the data layout is documented in
+The loaders live in `model/data.py`; the full data layout, schema, and path resolution rules are documented in
 [data/README.md](data/README.md).
 
 ## Single-GPU training tutorial
