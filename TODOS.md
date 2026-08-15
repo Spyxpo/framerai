@@ -133,6 +133,29 @@ it. Training compute and licensed data remain a separate, external problem.
 - [ ] Standard benchmark adapters so the numbers can be compared outside this repository.
 - [ ] A `build.py --mode eval` entry point wired to the harness.
 
+## Cognition layer
+
+- [x] Add a persistent cognitive layer (`model/cognition/`): episodic and semantic memory
+      with decay, recall-strengthening, and weakest-first eviction; curiosity from RND
+      novelty plus per-topic learning progress; a five-dimensional affective homeostat that
+      modulates decoding; a self-model; and sleep-time replay, consolidation, and forgetting.
+- [x] Stream live camera and microphone into the same loop, gated by change so a static
+      scene does not flood memory, with video remembered as one event rather than N stills.
+- [x] Identify script and language for every experience, track competence per language and
+      per sense, and ask for the reply in the language the input was in.
+- [x] Expose it from the inference worker behind `--mind PATH`, leaving the default path
+      byte-identical.
+- [ ] Wire the trace (recalled memories, affect, sampling) into the backend and the website,
+      so a user can see why an answer came out the way it did.
+- [ ] Implement a real `train_step` for sleep: LoRA or a small-LR update over replayed
+      episodes, with a guard against catastrophic forgetting, and measure it.
+- [ ] Replace the fixed random projection in the experience encoder with a learned one
+      trained on retrieval quality, once there is a checkpoint worth measuring against.
+- [ ] Benchmark retrieval on a held-out episode set (recall@k against a known-relevant set)
+      instead of relying on unit tests of the scoring formula.
+- [ ] Extend language profiles beyond the current set, and report per-language competence
+      against a real multilingual eval rather than the mind's own error estimate.
+
 ## Backend
 
 - [x] Add request validation and consistent error responses across all routes.

@@ -60,6 +60,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cognition layer** (`model/cognition/`), optional and off by default. A
+  checkpoint answers every prompt from its weights and the current context and
+  keeps nothing; this wraps it in a persistent mind. `EpisodicMemory` stores each
+  experience with its embedding, salience, and the affect at the time, decays
+  traces with disuse, strengthens what recall returns, and evicts the weakest
+  rather than the oldest. `SemanticMemory` collapses recurring episodes into
+  concepts online. `CuriosityEngine` blends random-network-distillation novelty
+  (which habituates, so the familiar stops being interesting) with per-topic
+  learning progress (so the drive follows what is being learned rather than what
+  is merely unpredictable). `AffectState` is a five-dimensional homeostat -
+  valence, arousal, confidence, curiosity, fatigue - that decays toward its
+  setpoints, responds to appraisal, and modulates temperature, top-p, and top-k,
+  so the state reaches the decoder instead of decorating a log. `Consolidator`
+  sleeps once fatigue passes threshold: prioritised replay, concept formation,
+  forgetting, a first-person reflection, and an optional `train_step` callback
+  that carries replayed experience into the weights. `SelfModel` tracks
+  competence, interests, self-authored goals, and a bounded narrative. `Mind`
+  runs the tick loop and saves and reloads the whole state, so a restart is not
+  a new mind. No new dependencies, and nothing else in the model, training
+  pipeline, or backend depends on it.
+- **Live camera and microphone perception** (`model/cognition/perception.py`).
+  `LiveSession` polls sensory sources on a schedule, in the foreground or on a
+  background thread, and feeds what it sees and hears through the same tick
+  loop. A `ChangeGate` attends only to readings that differ from the last
+  attended one, with a forced check-in after `max_skip` polls, so a static scene
+  produces one memory instead of thousands; a 2 fps camera writes only what
+  changed. `CameraSource` takes a device index or a video path, so live watching
+  and clip watching are one code path, and `perceive_video` pools keyframes into
+  a single episode. OpenCV and sounddevice are optional and imported lazily;
+  `CallableSource` drives the same pipeline with no hardware. On a text-only or
+  untrained build, readings are pooled rather than understood, and
+  `session.grounded` says which path is in use rather than implying the towers
+  ran.
+- **Script and language identification** (`model/cognition/language.py`). Script
+  detection covers the world's writing systems - Latin, Cyrillic, Greek, Arabic,
+  Hebrew, Devanagari, Bengali, Tamil, Telugu, Kannada, Malayalam, Sinhala, Thai,
+  Lao, Khmer, Myanmar, Georgian, Armenian, Ethiopic, Cherokee, Hangul, kana,
+  Han, and more - and function-word profiles resolve the languages that share a
+  script. Unresolved input returns its script with low confidence rather than
+  defaulting to English. Every episode remembers the language it arrived in,
+  competence is tracked per language and per sense alongside per subject, topic
+  labelling works for scripts that do not space their words, and a confident
+  identification asks for the reply in the same language. The byte-level
+  tokenizer already admits every script; what the model understands still
+  follows its training corpus, and the layer makes that gap visible.
+- **Cognition ops in the inference worker.** `python -m model.serve --mind PATH`
+  (or `MIND_PATH`) attaches the layer, routes chat through it, returns the
+  trace - what was recalled, how it felt, what sampling that produced - with
+  each reply, and adds `see`, `hear`, `watch`, `live`, `wonder`, `reflect`,
+  `feedback`, and `introspect`. The mind is saved after every request. Without
+  the flag the worker's behaviour is unchanged.
 - **Expert-parallel MoE sharding** (`model/training/expert_parallel.py`).
   `ExpertParallelPlan` assigns each rank a contiguous slice of the experts and
   `shard_experts` drops the rest, applied to the meta-device module so weights a

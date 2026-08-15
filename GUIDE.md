@@ -16,6 +16,7 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [Reproducible training](#reproducible-training)
 - [Training on your own data](#training-on-your-own-data)
 - [Single-GPU training tutorial](#single-gpu-training-tutorial)
+- [Cognition layer](#cognition-layer)
 - [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
 - [Running with Docker](#running-with-docker)
@@ -84,6 +85,7 @@ flowchart TD
 | `model/configs/` | Model size and hyperparameter configuration. |
 | `model/data.py` | Local-corpus datasets (text, image-caption, audio-caption). |
 | `model/generate.py` | Inference and sampling utilities. |
+| `model/cognition/` | Optional persistent mind: memory, curiosity, affect, live senses, sleep. |
 | `model/serve.py` | Inference worker driven by the backend over stdin/stdout. |
 | `build.py` | Command line entry point to build, train, and export models. |
 | `train.sh` | Convenience wrapper around the full pipeline. |
@@ -943,6 +945,224 @@ cp -n .env.example .env
 sed -i.bak 's|MODEL_ENABLED=.*|MODEL_ENABLED=true|' .env
 sed -i.bak 's|MODEL_PATH=.*|MODEL_PATH=../checkpoints/export/framerai_model.pt|' .env
 npm run dev
+```
+
+## Cognition layer
+
+`model/cognition/` is optional. Nothing in the model, training pipeline, or
+backend depends on it, and a worker started without `--mind` behaves exactly as
+it did before. What it adds is the machinery a checkpoint does not have: a
+history that persists between prompts and between restarts.
+
+### What is and is not being claimed
+
+There is no evidence that any of this produces experience, and the code does not
+assert otherwise. What it implements are functional analogues, each of which is
+observable in a trace and tested on its own:
+
+- autobiographical memory that decays, is strengthened by use, and forgets;
+- intrinsic motivation that habituates and prefers what it is currently learning;
+- an affective state that measurably changes the model's output distribution;
+- a self-model the mind can be wrong about;
+- offline consolidation that turns episodes into concepts.
+
+Call it a mind if you like. The tests only check the mechanisms.
+
+### The tick loop
+
+Every experience - a prompt, a reply, a camera frame, a spoken sentence - runs
+through the same cycle in `mind.py`:
+
+1. **Encode.** Text goes through the LM's hidden states, images through the
+   vision tower, audio through the audio tower, all projected into one shared
+   vector space (`encoder.py`). With no model attached, a seeded hashing encoder
+   stands in so the loop is testable without a checkpoint.
+2. **Appraise.** `curiosity.py` returns novelty (random network distillation),
+   surprise (expectation for this topic violated), and learning progress.
+3. **Recall.** Episodes and concepts are retrieved *before* the new experience is
+   stored, so a cue returns the past rather than itself.
+4. **Feel.** The appraisal moves the affective homeostat in `affect.py`.
+5. **Act.** Decoding parameters are bent by the current state, then the model
+   generates.
+6. **Record.** Both the prompt and the model's own reply are stored - which is
+   what makes the history autobiographical rather than a log of inputs.
+7. **Sleep.** Past a fatigue threshold, `consolidation.py` replays, generalises,
+   and forgets.
+
+```python
+from model.cognition import Mind
+from model.generate import FramerGenerator
+
+gen = FramerGenerator.from_checkpoint("model.pt", "tokenizer.json")
+mind = Mind.from_generator(gen)
+
+reply, trace = mind.converse("what is a rectified flow?")
+print(trace.novelty, trace.surprise, trace.feeling)
+print(trace.recalled)          # what it brought to mind, with scores
+print(trace.sampling)          # the decoder settings its state produced
+```
+
+### Memory
+
+| Store | Behaviour |
+|-------|-----------|
+| `WorkingMemory` | The few items in play. Bounded, and it drops the least salient rather than the oldest. |
+| `EpisodicMemory` | Every experience with its embedding, salience, and affect. Retrieval blends similarity, recency, and salience; recall strengthens what it returns; disuse halves a trace every `strength_half_life` ticks; eviction takes the weakest, not the oldest. |
+| `SemanticMemory` | Online concept formation. An episode joins the nearest concept it is close enough to (moving that centroid like a running mean) or starts a new one. |
+
+Salience is computed from novelty, surprise, and the magnitude of any reward -
+so being punished is as memorable as being rewarded, and a flat corpus of
+unremarkable episodes does not crowd out the one that mattered.
+
+### Curiosity
+
+Two signals, because neither works alone:
+
+- **Novelty** (RND): a predictor chases a frozen random target on the same
+  embedding. Training it on everything it sees is habituation - repeat an input
+  and its novelty falls; show something genuinely new and it jumps.
+- **Learning progress**: the *slope* of error in a topic, not its level. Novelty
+  alone drags a mind toward noise, which stays unpredictable forever. Learning
+  progress pulls it toward what it is currently getting better at.
+
+`mind.wonder()` samples the frontier and asks itself a question, records it as an
+episode, and raises a goal. Bookkeeping axes (`lang:xx`, `sense:xx`) are excluded
+from the frontier - they are how the mind rates itself, not subjects to explore.
+
+### Affect
+
+Five dimensions - valence, arousal, confidence, curiosity, fatigue - each
+decaying toward a setpoint and pushed by appraisal. Surprise raises arousal and
+lowers confidence; reward raises valence; effort accumulates as fatigue and only
+sleep clears it. `AffectState.modulate()` turns that state into decoder settings:
+
+```python
+AffectState(arousal=0.95, curiosity=0.95, confidence=0.1).modulate(0.7, top_p=0.9, top_k=50)
+# {'temperature': 0.9158, 'top_p': 0.9548, 'top_k': 65}   - aroused, exploring
+
+AffectState(arousal=0.05, curiosity=0.1, confidence=0.95, fatigue=0.9).modulate(0.7, top_p=0.9, top_k=50)
+# {'temperature': 0.4637, 'top_p': 0.84, 'top_k': 33}     - settled, converging
+```
+
+### Sleep, replay, and learning from experience
+
+Fatigue rises with every tick. Past `sleep_threshold`, the mind consolidates:
+episodes are sampled in proportion to salience and trace strength, rehearsed
+through the novelty predictor, folded into concepts, and thinned out; then it
+writes a first-person reflection and clears fatigue.
+
+The `train_step` hook is where experience reaches the weights:
+
+```python
+def train_step(batch):                      # batch: list[Experience]
+    texts = [e.text for e in batch]
+    ...                                     # your optimiser step
+    return {"loss": loss}
+
+report = mind.rest(train_step=train_step)
+```
+
+### Live senses
+
+`perception.py` streams a camera and a microphone into the same loop. The
+important part is the attention gate: a camera at 2 fps produces 7,200 frames an
+hour, nearly all identical, and storing them would bury every real memory. A
+reading is attended only when it differs enough from the last attended one, or
+when `max_skip` polls have passed and a check-in is due anyway.
+
+```python
+from model.cognition import CameraSource, LiveSession, MicrophoneSource
+
+session = LiveSession(
+    mind,
+    [CameraSource(0), MicrophoneSource(seconds=1.5)],
+    fps=2, change_threshold=0.15, describe=True, transcribe=True,
+)
+session.start()             # background thread; the mind keeps its lock
+...
+session.stop()
+print(session.summary())    # {'polls': 240, 'attended': 11, 'attention_rate': 0.045, ...}
+```
+
+`CameraSource` takes a device index or a path, so "watch the room" and "watch
+this clip" are the same code path. Hardware needs `pip install opencv-python
+sounddevice`; `CallableSource` feeds the same pipeline from anything, which is
+how the tests drive full sessions with no hardware. On a text-only or untrained
+build the towers are unavailable, so readings are pooled rather than understood -
+`session.grounded` reports which path is in use.
+
+Video is remembered as one event rather than N stills:
+
+```python
+mind.perceive_video(frames, describe=True, keyframes=4)   # (T, C, H, W)
+```
+
+### Languages
+
+`language.py` identifies the script of any UTF-8 text - Latin, Cyrillic, Arabic,
+Devanagari, Tamil, Ge'ez, Hangul, Han, Khmer, Cherokee, and the rest - and
+resolves the language itself where it has a function-word profile. Where it does
+not, it says so: unresolved Cyrillic comes back as `und-Cyrl` with low
+confidence, never as English.
+
+The mind uses that three ways: every episode remembers the language it arrived
+in; competence is tracked per language (`mind.competence_by("lang")`) as well as
+per sense (`mind.competence_by("sense")`); and when identification is confident
+the context preamble asks for a reply in the same language.
+
+The tokenizer is byte-level BPE, so no script is architecturally excluded. What
+the model actually *understands* still follows its training corpus - FramerAI
+trains from scratch on local data, so covering a language means putting it in
+`data/`. The cognition layer makes the gap visible rather than hiding it.
+
+### Persistence
+
+```python
+mind.save("mind.pt")
+mind = Mind.load("mind.pt", generator=gen)
+```
+
+The saved state includes episodes and their embeddings, concepts, the novelty
+predictor and its optimiser, per-topic error history, affect, goals, and the
+narrative. Without this, every restart is a new mind.
+
+### Serving it
+
+```bash
+python -m model.serve --model model.pt --tokenizer tokenizer.json --mind mind.pt
+```
+
+Chat then routes through the mind and returns its trace with the reply, and these
+ops become available:
+
+| Op | Purpose |
+|----|---------|
+| `see` | Perceive an image file; captions it by default. |
+| `hear` | Perceive an audio file; transcribes it by default. |
+| `watch` | Perceive a video file as one event. |
+| `live` | Run camera/microphone for `seconds` and return what was attended to. |
+| `wonder` | Ask itself a question from the curiosity frontier. |
+| `reflect` | Force a consolidation pass now. |
+| `feedback` | Report reward for the last exchange (`value`, `note`). |
+| `introspect` | Full state: affect, memory stats, interests, goals, languages, senses. |
+
+The mind is saved after every request, so a worker that dies does not lose its
+day. The backend needs no changes - set `MIND_PATH` in its environment.
+
+### Configuration
+
+`CognitionConfig` holds every knob (capacities, half-lives, retrieval weights,
+curiosity weights, affect gains, sleep thresholds) and `validate()` rejects
+impossible combinations up front:
+
+```python
+from model.cognition import CognitionConfig, Mind
+
+config = CognitionConfig(
+    d_embed=256, episodic_capacity=8192,
+    strength_half_life=1200.0, sleep_threshold=0.8,
+).validate()
+mind = Mind(config, generator=gen)
 ```
 
 ## The backend and the inference bridge
