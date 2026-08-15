@@ -40,6 +40,7 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - [Model sizes](#model-sizes)
 - [API endpoints](#api-endpoints)
 - [Inference bridge](#inference-bridge)
+- [Cognition layer](#cognition-layer)
 - [build.py usage](#buildpy-usage)
 - [Project structure](#project-structure)
 - [Tests](#tests)
@@ -64,6 +65,14 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - **Streaming** - WebSocket-based real-time token streaming.
 - **BPE tokenizer** - byte-level tokenizer with multimodal special tokens.
 - **From-scratch training** - trains on a local corpus you provide; no API keys, no teacher models.
+- **Cognition layer** *(optional)* - a persistent mind around the model: episodic and semantic
+  memory that decays and consolidates, curiosity from novelty and learning progress, an
+  affective state that changes how it decodes, a self-model, and sleep. See
+  [Cognition layer](#cognition-layer).
+- **Live senses** *(optional)* - camera and microphone streamed into the same loop, gated by
+  change so a static scene does not flood memory.
+- **Language-aware** - script detection across the world's writing systems, per-language
+  memory and competence, and replies asked for in the language it was addressed in.
 
 ## Architecture
 
@@ -403,6 +412,56 @@ TOKENIZER_PATH=../checkpoints/export/tokenizer
 PYTHON_BIN=python3
 ```
 
+## Cognition layer
+
+A checkpoint answers every prompt from its weights and the current context, and
+nothing else. `model/cognition/` is an optional layer that gives it a history:
+
+| Part | What it does |
+| --- | --- |
+| **Episodic memory** | Stores each experience with its embedding, salience, and the affect at the time. Traces decay with disuse, are strengthened by recall, and the weakest are evicted first. |
+| **Semantic memory** | Repeated episodes collapse into concepts - a centroid, a visit count, an exemplar - so generalities accrete without being trained in. |
+| **Curiosity** | Novelty from random network distillation (so the familiar stops being interesting) blended with learning progress (so it chases what it is *getting better at*, not what is merely unpredictable). |
+| **Affect** | A five-dimensional homeostat - valence, arousal, confidence, curiosity, fatigue - that decays toward setpoints, responds to appraisal, and modulates temperature, top-p, and top-k. |
+| **Self-model** | Competence and interest per subject, per language, and per sense; goals it raises for itself; a first-person narrative it writes during sleep. |
+| **Sleep** | Fatigue accumulates with effort. Past threshold, prioritised replay rehearses episodes, forms concepts, forgets weak traces, and can run a real gradient step through a `train_step` callback. |
+| **Live senses** | Camera and microphone stream into the same loop, gated by change so a static scene produces one memory instead of thousands. |
+
+```python
+from model.cognition import Mind
+from model.generate import FramerGenerator
+
+gen = FramerGenerator.from_checkpoint("model.pt", "tokenizer.json")
+mind = Mind.from_generator(gen)
+
+reply, trace = mind.converse("what is a rectified flow?")
+print(trace.feeling, trace.novelty, trace.recalled)
+
+print(mind.wonder())        # a question it asked itself
+mind.rest()                 # consolidate now instead of waiting for fatigue
+mind.save("mind.pt")        # continuity across restarts
+```
+
+Live camera and microphone (needs `pip install opencv-python sounddevice`):
+
+```python
+from model.cognition import CameraSource, LiveSession, MicrophoneSource
+
+session = LiveSession(mind, [CameraSource(0), MicrophoneSource()], fps=2, describe=True)
+session.run(seconds=30)
+print(session.summary())    # polls, attended, attention_rate
+```
+
+Serving it: start the worker with `--mind PATH` (or `MIND_PATH`) and chat runs
+through the mind, returning its trace alongside the reply, plus the `see`,
+`hear`, `watch`, `live`, `wonder`, `reflect`, `feedback`, and `introspect` ops.
+Without the flag the worker behaves exactly as before.
+
+This is not a claim that FramerAI is conscious, and the code says so where it
+matters. These are functional analogues - memory, intrinsic motivation, affect
+that changes behaviour, offline consolidation - each observable in the trace and
+tested in isolation. [GUIDE.md](GUIDE.md#cognition-layer) covers the details.
+
 ## build.py usage
 
 ```bash
@@ -449,6 +508,15 @@ framerai/
 │   │   └── multimodal_projector.py
 │   ├── tokenizer/              # BPE tokenizer with special tokens
 │   ├── configs/                # Model configuration
+│   ├── cognition/              # Optional mind: memory, curiosity, affect, sleep
+│   │   ├── mind.py             # The tick loop tying it together
+│   │   ├── memory.py           # Episodic, semantic, and working memory
+│   │   ├── curiosity.py        # Novelty (RND) + learning progress
+│   │   ├── affect.py           # Affective homeostat, modulates decoding
+│   │   ├── perception.py       # Live camera/microphone streams + attention gate
+│   │   ├── language.py         # Script and language identification
+│   │   ├── self_model.py       # Competence, interests, goals, narrative
+│   │   └── consolidation.py    # Sleep: replay, concept formation, forgetting
 │   ├── data.py                 # Local-corpus datasets
 │   ├── framer.py               # Unified FramerModel
 │   ├── generate.py             # Inference & generation utilities
@@ -475,7 +543,7 @@ CI runs all three suites on every change, and they all run on CPU in seconds.
 
 ```bash
 # Model: backbone, MoE routing, multimodal towers, tokenizer, RoPE, data
-# pipeline, generation, presets, estimator
+# pipeline, generation, presets, estimator, cognition layer
 pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest -q
 

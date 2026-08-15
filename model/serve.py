@@ -9,11 +9,16 @@ real inference. It loads an exported checkpoint once, then answers requests:
 
 Ops: chat, code, image, video, audio, transcribe, understand.
 
+With --mind PATH (or MIND_PATH) the worker also carries a persistent cognitive
+layer - memory, curiosity, affect, self-model - across requests and restarts.
+Chat then runs through it, and these ops become available: see, hear, watch,
+live, wonder, reflect, feedback, introspect. Without the flag nothing changes.
+
 Generated media (image/video/audio) is written into the directory passed as
 params.out_dir and the response returns the file name so the backend can serve it.
 
 Usage:
-    python -m model.serve --model PATH --tokenizer PATH [--device auto]
+    python -m model.serve --model PATH --tokenizer PATH [--device auto] [--mind PATH]
 """
 
 import argparse
@@ -70,14 +75,67 @@ def _sampling(params):
     return {k: params[k] for k in keys if params.get(k) is not None}
 
 
-def handle(gen, op, params):
+def _load_image(path, size):
+    """Load an image file as a (3, size, size) tensor in the model's range."""
+    import numpy as np
     import torch
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB").resize((size, size))
+    return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
+
+
+def _load_frames(path, size, limit=32):
+    """Load a video file as a (T, 3, size, size) tensor. Needs opencv-python."""
+    import torch
+
+    from .cognition.perception import frame_to_tensor
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("video input needs opencv-python: pip install opencv-python") from exc
+
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        raise RuntimeError(f"could not open video {path!r}")
+    frames = []
+    try:
+        while len(frames) < limit:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            rgb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (size, size))
+            frames.append(frame_to_tensor(rgb))
+    finally:
+        capture.release()
+    if not frames:
+        raise RuntimeError(f"no frames decoded from {path!r}")
+    return torch.stack(frames)
+
+
+def _require_mind(mind, op):
+    if mind is None:
+        raise ValueError(f"op '{op}' needs the cognition layer; start the worker with --mind PATH")
+    return mind
+
+
+def handle(gen, op, params, mind=None):
 
     out_dir = params.get("out_dir", ".")
     os.makedirs(out_dir, exist_ok=True)
     prompt = params.get("prompt", "")
 
     if op in ("chat", "text"):
+        if mind is not None:
+            reply, trace = mind.converse(
+                prompt,
+                max_new_tokens=params.get("max_new_tokens", 256),
+                **_sampling(params),
+            )
+            # The trace travels with the reply so a client can show what was
+            # recalled and how the model felt, rather than guessing.
+            return {"content": reply, "trace": trace.to_dict()}
         return {
             "content": gen.generate_text(
                 prompt,
@@ -85,6 +143,9 @@ def handle(gen, op, params):
                 **_sampling(params),
             )
         }
+
+    if op in ("see", "hear", "watch", "wonder", "reflect", "feedback", "introspect", "live"):
+        return _handle_mind(gen, op, params, _require_mind(mind, op))
 
     if op == "code":
         # generate_code fixes top_k / top_p itself; only temperature is exposed.
@@ -141,16 +202,99 @@ def handle(gen, op, params):
         return {"content": gen.transcribe(wav)}
 
     if op == "understand":
-        import numpy as np
-        from PIL import Image
-
-        img = Image.open(params["image_path"]).convert("RGB").resize(
-            (gen.model.config.image_size, gen.model.config.image_size)
-        )
-        tensor = torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
+        tensor = _load_image(params["image_path"], gen.model.config.image_size)
         return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
 
     raise ValueError(f"Unknown op: {op}")
+
+
+def _handle_mind(gen, op, params, mind):
+    """Ops that only exist when the cognition layer is running."""
+    from .data import load_waveform
+
+    config = gen.model.config
+
+    if op == "see":
+        image = _load_image(params["image_path"], config.image_size)
+        trace = mind.perceive_image(
+            image, caption=params.get("caption", ""), describe=params.get("describe", True)
+        )
+        return trace.to_dict()
+
+    if op == "hear":
+        waveform = load_waveform(params["audio_path"], config.audio_sample_rate)
+        trace = mind.perceive_audio(
+            waveform, caption=params.get("caption", ""),
+            transcribe=params.get("transcribe", True),
+        )
+        return trace.to_dict()
+
+    if op == "watch":
+        frames = _load_frames(
+            params["video_path"], config.image_size, limit=params.get("max_frames", 32)
+        )
+        trace = mind.perceive_video(
+            frames, caption=params.get("caption", ""),
+            describe=params.get("describe", True), keyframes=params.get("keyframes", 4),
+        )
+        return trace.to_dict()
+
+    if op == "live":
+        return _handle_live(params, mind)
+
+    if op == "wonder":
+        return {"content": mind.wonder()}
+
+    if op == "reflect":
+        return mind.rest()
+
+    if op == "feedback":
+        trace = mind.reward(float(params.get("value", 0.0)), note=params.get("note", ""))
+        return trace.to_dict()
+
+    if op == "introspect":
+        return mind.introspect()
+
+    raise ValueError(f"Unknown op: {op}")
+
+
+def _handle_live(params, mind):
+    """Watch and listen to real hardware for a bounded stretch of time."""
+    from .cognition.perception import CameraSource, LiveSession, MicrophoneSource
+
+    sources = []
+    if params.get("camera", True):
+        sources.append(CameraSource(params.get("camera_device", 0), size=params.get("size", 256)))
+    if params.get("microphone", False):
+        sources.append(MicrophoneSource(seconds=params.get("chunk_seconds", 1.5)))
+    if not sources:
+        raise ValueError("live needs at least one of camera or microphone enabled")
+
+    session = LiveSession(
+        mind, sources,
+        fps=params.get("fps", 2.0),
+        change_threshold=params.get("change_threshold", 0.15),
+        describe=params.get("describe", True),
+        transcribe=params.get("transcribe", True),
+    )
+    try:
+        events = session.run(seconds=float(params.get("seconds", 10.0)))
+    finally:
+        session.close()
+
+    return {
+        **session.summary(),
+        "attended": [e.to_dict() for e in events if e.attended],
+    }
+
+
+def load_mind(generator, path):
+    """Attach the cognition layer, resuming the saved mind when there is one."""
+    from .cognition import Mind
+
+    if path and os.path.exists(path):
+        return Mind.load(path, generator=generator)
+    return Mind.from_generator(generator)
 
 
 def main():
@@ -158,6 +302,10 @@ def main():
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH"))
     parser.add_argument("--tokenizer", default=os.environ.get("TOKENIZER_PATH"))
     parser.add_argument("--device", default=os.environ.get("DEVICE", "auto"))
+    parser.add_argument(
+        "--mind", default=os.environ.get("MIND_PATH"),
+        help="path to a saved mind; enables the cognition layer and persists it there",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -172,7 +320,18 @@ def main():
         _print({"ready": False, "error": str(exc)})
         sys.exit(1)
 
-    _print({"ready": True})
+    mind, mind_error = None, None
+    if args.mind:
+        try:
+            mind = load_mind(gen, args.mind)
+        except Exception as exc:  # noqa: BLE001 - a broken mind must not block serving
+            mind_error = str(exc)
+
+    # One ready line, always: the bridge waits for exactly one.
+    ready = {"ready": True, "mind": mind is not None}
+    if mind_error:
+        ready["mind_error"] = mind_error
+    _print(ready)
 
     for line in sys.stdin:
         line = line.strip()
@@ -184,7 +343,11 @@ def main():
             continue
         req_id = req.get("id")
         try:
-            result = handle(gen, req.get("op", "chat"), req.get("params", {}))
+            result = handle(gen, req.get("op", "chat"), req.get("params", {}), mind=mind)
+            if mind is not None and args.mind:
+                # Persist after every request: a mind that only survives a clean
+                # shutdown is a mind that loses its day whenever the worker dies.
+                mind.save(args.mind)
             _print({"id": req_id, "ok": True, "result": result})
         except Exception as exc:  # noqa: BLE001 - never let one request kill the worker
             _print({"id": req_id, "ok": False, "error": str(exc)})
