@@ -12,6 +12,9 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
   const sourceNodesRef = useRef([]); // Track all scheduled sources for proper cleanup
   const scheduledTimeRef = useRef(0);
   const chunksProcessedRef = useRef(0);
+  const playbackOffsetRef = useRef(0); // Track cumulative playback position
+  const playbackStartTimeRef = useRef(0); // When current playback session started
+  const chunkDurationsRef = useRef([]); // Actual duration of each decoded chunk
 
   useEffect(() => {
     // Initialize AudioContext on first chunk
@@ -34,7 +37,7 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
     const audioContext = audioContextRef.current;
     if (!audioContext || !isPlaying) return;
 
-    const processChunk = async (chunkData) => {
+    const processChunk = async (chunkData, chunkIndex) => {
       try {
         // Decode base64 PCM data
         const binaryString = atob(chunkData);
@@ -46,6 +49,22 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
         // Convert PCM bytes to AudioBuffer
         const numSamples = bytes.length / (bitsPerSample / 8) / channels;
         const audioBuffer = audioContext.createBuffer(channels, numSamples, sampleRate);
+        const chunkDuration = audioBuffer.duration;
+
+        // Store actual duration for this chunk (don't assume all chunks are equal)
+        chunkDurationsRef.current[chunkIndex] = chunkDuration;
+
+        // Calculate cumulative time up to this chunk using actual durations
+        let chunkStart = 0;
+        for (let i = 0; i < chunkIndex; i++) {
+          chunkStart += chunkDurationsRef.current[i] || 0;
+        }
+        const chunkEnd = chunkStart + chunkDuration;
+
+        // Skip this chunk entirely if it's before our playback offset
+        if (chunkEnd <= playbackOffsetRef.current) {
+          return;
+        }
 
         // Decode 16-bit PCM (currently mono only, matching serve.py output)
         if (bitsPerSample === 16) {
@@ -57,14 +76,24 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
           }
         }
 
+        // Determine if we need to skip part of this chunk
+        let offset = 0;
+        let duration = chunkDuration;
+
+        if (chunkStart < playbackOffsetRef.current && playbackOffsetRef.current < chunkEnd) {
+          // Playback offset falls inside this chunk - skip the initial portion
+          offset = playbackOffsetRef.current - chunkStart;
+          duration = chunkDuration - offset;
+        }
+
         // Schedule playback
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(audioContext.destination);
 
         const startTime = Math.max(audioContext.currentTime, scheduledTimeRef.current);
-        source.start(startTime);
-        scheduledTimeRef.current = startTime + audioBuffer.duration;
+        source.start(startTime, offset, duration);
+        scheduledTimeRef.current = startTime + duration;
 
         // Track this source for cleanup
         sourceNodesRef.current.push(source);
@@ -84,7 +113,7 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
 
     // Process any new chunks that haven't been processed yet
     for (let i = chunksProcessedRef.current; i < chunks.length; i++) {
-      processChunk(chunks[i]);
+      processChunk(chunks[i], i);
       chunksProcessedRef.current = i + 1;
     }
   }, [chunks, isPlaying, sampleRate, channels, bitsPerSample]);
@@ -113,7 +142,11 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
     if (!audioContextRef.current) return;
 
     if (isPlaying) {
-      // Pause: stop all scheduled sources and reset state
+      // Pause: calculate elapsed time and update offset
+      const elapsedInCurrentSession = audioContextRef.current.currentTime - playbackStartTimeRef.current;
+      playbackOffsetRef.current += elapsedInCurrentSession;
+
+      // Stop all scheduled sources
       sourceNodesRef.current.forEach(source => {
         try {
           source.stop();
@@ -123,15 +156,16 @@ export default function StreamingAudioPlayer({ chunks, sampleRate, channels, bit
       });
       sourceNodesRef.current = [];
 
-      // Reset playback state but NOT chunksProcessedRef
-      // This allows resume to skip already-processed chunks
+      // Reset scheduling state to allow resume to re-process chunks
       scheduledTimeRef.current = 0;
+      chunksProcessedRef.current = 0;
       setIsPlaying(false);
     } else {
       // Play/Resume: start from current time
       if (audioContextRef.current.state === "suspended") {
         audioContextRef.current.resume();
       }
+      playbackStartTimeRef.current = audioContextRef.current.currentTime;
       scheduledTimeRef.current = audioContextRef.current.currentTime;
       setIsPlaying(true);
     }

@@ -54,6 +54,11 @@ export function useChat(settings) {
             const last = updated[updated.length - 1];
             if (last?.role === "assistant") {
               last.type = "audio";
+              // Push final chunk data if present
+              if (data.metadata?.chunkData) {
+                last.audioChunks = last.audioChunks || [];
+                last.audioChunks.push(data.metadata.chunkData);
+              }
               last.metadata = data.metadata;
               last.audioComplete = true;
             }
