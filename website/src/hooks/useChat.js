@@ -54,10 +54,11 @@ export function useChat(settings) {
             const last = updated[updated.length - 1];
             if (last?.role === "assistant") {
               last.type = "audio";
-              // Push final chunk data if present
+              last.content = data.content || last.content;
+              // Push final chunk data if present (create new array for reactivity)
               if (data.metadata?.chunkData) {
-                last.audioChunks = last.audioChunks || [];
-                last.audioChunks.push(data.metadata.chunkData);
+                const existingChunks = last.audioChunks || [];
+                last.audioChunks = [...existingChunks, data.metadata.chunkData];
               }
               last.metadata = data.metadata;
               last.audioComplete = true;
@@ -65,15 +66,15 @@ export function useChat(settings) {
             return [...updated];
           });
         } else {
-          // Accumulate audio chunks
+          // Accumulate audio chunks (create new array for reactivity)
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last?.role === "assistant") {
               last.type = "audio";
               last.content = data.content || last.content;
-              last.audioChunks = last.audioChunks || [];
-              last.audioChunks.push(data.metadata.chunkData);
+              const existingChunks = last.audioChunks || [];
+              last.audioChunks = [...existingChunks, data.metadata.chunkData];
               last.audioMetadata = {
                 sampleRate: data.metadata.sampleRate,
                 channels: data.metadata.channels,
