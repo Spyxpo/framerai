@@ -22,7 +22,7 @@ _DENSE = {
         d_model=256, n_layers=6, n_heads=8, n_kv_heads=4, d_ff=1024, max_seq_len=1024,
         vision_d_model=256, vision_n_heads=4, vision_n_layers=4,
         audio_d_model=256, audio_n_heads=4, audio_n_layers=4,
-        diffusion_channels=64, audio_gen_channels=32,
+        diffusion_channels=64, audio_gen_channels=32, image_train_resolution=64,
     ),
     "framer-small": dict(  # ~120M
         d_model=768, n_layers=12, n_heads=12, n_kv_heads=4, d_ff=3072, max_seq_len=2048,
@@ -55,7 +55,7 @@ _MOE = {
         expert_d_ff=512, moe_layer_freq=1, first_dense_layers=1,
         vision_d_model=256, vision_n_heads=4, vision_n_layers=4,
         audio_d_model=256, audio_n_heads=4, audio_n_layers=4,
-        diffusion_channels=64, audio_gen_channels=32,
+        diffusion_channels=64, audio_gen_channels=32, image_train_resolution=64,
     ),
     "framer-30b-a3b": dict(  # ~30B total / ~3B active
         d_model=2048, n_layers=28, n_heads=16, n_kv_heads=4, d_ff=8192, max_seq_len=4096,

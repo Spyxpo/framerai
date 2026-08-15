@@ -29,6 +29,11 @@ def test_size_aliases():
     assert FramerConfig.from_preset("small").preset == "framer-small"
 
 
+def test_tiny_preset_image_train_resolution():
+    assert FramerConfig.from_preset("framer-tiny").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-tiny-moe").image_train_resolution == 64
+
+
 def test_trillion_preset_is_about_1t_without_instantiation():
     cfg = FramerConfig.from_preset("framer-1t-a32b")
     est = estimate_params(cfg)
