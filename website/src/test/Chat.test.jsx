@@ -149,6 +149,243 @@ describe("MessageBubble", () => {
     render(<MessageBubble message={msg} />);
     expect(screen.getByText("framerai-text")).toBeInTheDocument();
   });
+
+  it("renders streaming audio player when audioChunks are present", () => {
+    // jsdom doesn't support Web Audio API, component will show error or loading
+    // The important thing is that it recognizes streaming audio data
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Here is your audio",
+      audioChunks: ["Y2h1bmsx", "Y2h1bmsy"], // base64 chunks
+      audioMetadata: {
+        sampleRate: 24000,
+        channels: 1,
+        bitsPerSample: 16,
+        totalChunks: 2,
+      },
+    });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    // The streaming audio player component should be rendered
+    // (it will show an error in jsdom, but the component structure exists)
+    const streamingPlayer = container.querySelector('.streaming-audio-player, .streaming-audio-error, .streaming-audio-loading');
+    expect(streamingPlayer).toBeInTheDocument();
+  });
+
+  it("renders standard audio element when only URL is present (fallback)", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Here is your audio",
+      metadata: { url: "/uploads/generated/audio.wav" },
+    });
+    render(<MessageBubble message={msg} />);
+    const audioElement = screen.getByLabelText(/generated audio/i);
+    expect(audioElement).toBeInTheDocument();
+    expect(audioElement.tagName).toBe("AUDIO");
+  });
+
+  it("does not render audio when type is audio but no chunks or URL", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      type: "audio",
+      content: "Audio generation in progress",
+    });
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByLabelText(/generated audio/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/streaming audio/i)).not.toBeInTheDocument();
+  });
+
+  it("regression: final audio chunk preserved when done=true", async () => {
+    // This test uses the REAL useChat hook with a mocked WebSocketClient
+    // to verify that ALL chunks (including the final one) are preserved.
+    //
+    // CRITICAL: This test MUST FAIL if the chunk push in useChat.js is broken
+
+    // Set up isolated mock for this test only
+    let mockStreamHandler = null;
+
+    const MockWebSocketClient = class {
+      constructor() {
+        this.ws = { readyState: 1 };
+        this.listeners = new Map();
+      }
+      connect() {
+        return Promise.resolve();
+      }
+      on(type, handler) {
+        if (!this.listeners.has(type)) {
+          this.listeners.set(type, []);
+        }
+        this.listeners.get(type).push(handler);
+        if (type === "stream") {
+          mockStreamHandler = handler;
+        }
+        return () => {};
+      }
+      send() {}
+      disconnect() {}
+    };
+
+    // Mock the API module as well
+    vi.doMock("../services/api", () => ({
+      api: {
+        createConversation: vi.fn(() => Promise.resolve({ id: "test-conv-id", title: "Test" })),
+        listConversations: vi.fn(() => Promise.resolve([])),
+      },
+    }));
+
+    // Use doMock for test-specific mocking
+    vi.doMock("../services/websocket", () => ({
+      WebSocketClient: MockWebSocketClient,
+    }));
+
+    // Dynamic imports after mock setup
+    const { renderHook, act, waitFor } = await import("@testing-library/react");
+    const useChatModule = await import("../hooks/useChat?t=" + Date.now());
+    const { useChat } = useChatModule;
+
+    // Render the hook
+    const { result } = renderHook(() => useChat({}));
+
+    // Wait for WebSocket initialization
+    await waitFor(() => {
+      expect(mockStreamHandler).not.toBeNull();
+    }, { timeout: 1000 });
+
+    // Create test chunks
+    const sampleRate = 24000;
+    const channels = 1;
+    const bitsPerSample = 16;
+    const samplesPerChunk = sampleRate * 0.5;
+    const bytesPerChunk = samplesPerChunk * channels * (bitsPerSample / 8);
+
+    const createPCMChunk = (chunkIndex) => {
+      const buffer = new ArrayBuffer(bytesPerChunk);
+      const view = new DataView(buffer);
+      for (let i = 0; i < samplesPerChunk; i++) {
+        const sample = Math.sin(i * 0.1 + chunkIndex * 100) * 32767;
+        view.setInt16(i * 2, sample, true);
+      }
+      return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+    };
+
+    const chunk1 = createPCMChunk(0);
+    const chunk2 = createPCMChunk(1);
+    const chunk3 = createPCMChunk(2);
+    const totalSourceBytes = bytesPerChunk * 3;
+
+    // Trigger message creation - this creates user + assistant placeholder messages
+    await act(async () => {
+      result.current.sendMessage("generate audio", "audio");
+    });
+
+    // CRITICAL: Wait for the assistant placeholder message to exist in state
+    // sendMessage creates: 1) user message, 2) assistant placeholder
+    await waitFor(() => {
+      const messages = result.current.messages;
+      const assistantMsg = messages.find(m => m.role === "assistant");
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg.role).toBe("assistant");
+    }, { timeout: 1000 });
+
+    // NOW feed chunk 1 through the REAL stream handler
+    await act(async () => {
+      mockStreamHandler({
+        type: "stream",
+        content: "Generating audio...",
+        done: false,
+        responseType: "audio",
+        metadata: {
+          chunk: 0,
+          totalChunks: 3,
+          chunkData: chunk1,
+          sampleRate,
+          channels,
+          bitsPerSample,
+        },
+      });
+    });
+
+    // Wait for chunk 1 to be processed
+    await waitFor(() => {
+      const audioMsg = result.current.messages.find(m => m.role === "assistant" && m.type === "audio");
+      expect(audioMsg?.audioChunks?.length).toBe(1);
+    }, { timeout: 1000 });
+
+    // Feed chunk 2
+    await act(async () => {
+      mockStreamHandler({
+        type: "stream",
+        content: "",
+        done: false,
+        responseType: "audio",
+        metadata: {
+          chunk: 1,
+          totalChunks: 3,
+          chunkData: chunk2,
+          sampleRate,
+          channels,
+          bitsPerSample,
+        },
+      });
+    });
+
+    // Wait for chunk 2 to be processed
+    await waitFor(() => {
+      const audioMsg = result.current.messages.find(m => m.role === "assistant" && m.type === "audio");
+      expect(audioMsg?.audioChunks?.length).toBe(2);
+    }, { timeout: 1000 });
+
+    // Feed chunk 3 (FINAL) - THE CRITICAL TEST
+    await act(async () => {
+      mockStreamHandler({
+        type: "stream",
+        content: "",
+        done: true,
+        responseType: "audio",
+        metadata: {
+          chunk: 2,
+          totalChunks: 3,
+          chunkData: chunk3, // THIS MUST BE PUSHED BY THE REAL useChat CODE
+          sampleRate,
+          channels,
+          bitsPerSample,
+          url: "/uploads/generated/audio.wav",
+          model: "framerai-audio",
+          durationSec: 1.5,
+        },
+      });
+    });
+
+    // Wait for completion
+    await waitFor(() => {
+      const audioMsg = result.current.messages.find(m => m.role === "assistant" && m.type === "audio");
+      expect(audioMsg?.audioComplete).toBe(true);
+    }, { timeout: 1000 });
+
+    // CRITICAL ASSERTIONS - verify the REAL useChat state
+    const audioMsg = result.current.messages.find(m => m.role === "assistant" && m.type === "audio");
+
+    expect(audioMsg).toBeDefined();
+    expect(audioMsg.audioChunks).toBeDefined();
+
+    // This is the key assertion: if the done branch doesn't push chunkData,
+    // this will be 2 instead of 3, causing the test to FAIL
+    expect(audioMsg.audioChunks.length).toBe(3);
+
+    // Verify total byte count matches source
+    let reassembledBytes = 0;
+    audioMsg.audioChunks.forEach(chunkData => {
+      reassembledBytes += atob(chunkData).length;
+    });
+    expect(reassembledBytes).toBe(totalSourceBytes);
+
+    // Cleanup mocks for this test
+    vi.doUnmock("../services/websocket");
+    vi.doUnmock("../services/api");
+  });
 });
 
 // ── Chat — send flow ───────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import React from "react";
 import { User, Bot, Copy, Check, AlertCircle, RefreshCw } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
+import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
 
 export default function MessageBubble({ message, isStreaming, onRetry }) {
   const [copied, setCopied] = React.useState(false);
@@ -55,6 +56,20 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
 
   const renderMedia = () => {
     if (isError) return null;
+
+    // Handle streaming audio
+    if (message.type === "audio" && message.audioChunks && message.audioMetadata) {
+      return (
+        <StreamingAudioPlayer
+          chunks={message.audioChunks}
+          sampleRate={message.audioMetadata.sampleRate}
+          channels={message.audioMetadata.channels}
+          bitsPerSample={message.audioMetadata.bitsPerSample}
+        />
+      );
+    }
+
+    // Handle complete audio URL (fallback or REST response)
     const url = message.metadata?.url;
     if (!url) return null;
     if (message.type === "image") {

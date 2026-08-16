@@ -1195,3 +1195,63 @@ body {
   outline: 2px solid #fff;
   outline-offset: 2px;
 }
+
+/* ============================================
+   Streaming Audio Player
+   ============================================ */
+
+.streaming-audio-player {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-top: 8px;
+}
+
+.audio-play-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-full);
+  color: white;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.audio-play-button:hover {
+  background: var(--accent-hover);
+}
+
+.audio-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.streaming-audio-loading,
+.streaming-audio-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.streaming-audio-error {
+  color: var(--error);
+  border-color: var(--error);
+}

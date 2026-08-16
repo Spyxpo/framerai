@@ -45,6 +45,49 @@ export function useChat(settings) {
         return;
       }
 
+      // Handle audio streaming chunks
+      if (data.responseType === "audio") {
+        if (data.done) {
+          setStreaming(false);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              last.type = "audio";
+              last.content = data.content || last.content;
+              // Push final chunk data if present (create new array for reactivity)
+              if (data.metadata?.chunkData) {
+                const existingChunks = last.audioChunks || [];
+                last.audioChunks = [...existingChunks, data.metadata.chunkData];
+              }
+              last.metadata = data.metadata;
+              last.audioComplete = true;
+            }
+            return [...updated];
+          });
+        } else {
+          // Accumulate audio chunks (create new array for reactivity)
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              last.type = "audio";
+              last.content = data.content || last.content;
+              const existingChunks = last.audioChunks || [];
+              last.audioChunks = [...existingChunks, data.metadata.chunkData];
+              last.audioMetadata = {
+                sampleRate: data.metadata.sampleRate,
+                channels: data.metadata.channels,
+                bitsPerSample: data.metadata.bitsPerSample,
+                totalChunks: data.metadata.totalChunks,
+              };
+            }
+            return [...updated];
+          });
+        }
+        return;
+      }
+
       if (data.done) {
         setStreaming(false);
         setMessages((prev) => {
