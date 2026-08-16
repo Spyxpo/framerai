@@ -90,6 +90,7 @@ jobs:
               echo "Release $TAG already exists; skipping release creation."
             else
               gh release create "$TAG" --title "Release $TAG" --generate-notes $FLAGS --target "$GITHUB_SHA"
+            fi
           fi
 
   publish-containers:
