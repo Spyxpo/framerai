@@ -18,7 +18,6 @@ from model.modules.audio_encoder import AudioEncoder, AudioFrontEnd
 from model.modules.audio_generator import AudioGenerator
 from model.tokenizer import FramerTokenizer
 
-
 # --------------------------------------------------------------------------
 # AudioFrontEnd unit tests
 # --------------------------------------------------------------------------
