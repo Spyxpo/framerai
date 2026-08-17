@@ -14,8 +14,133 @@ from conftest import tiny_config
 from model.configs import build_preset_config
 from model.framer import FramerModel
 from model.generate import FramerGenerator
+from model.modules.audio_encoder import AudioEncoder, AudioFrontEnd
 from model.modules.audio_generator import AudioGenerator
 from model.tokenizer import FramerTokenizer
+
+
+# --------------------------------------------------------------------------
+# AudioFrontEnd unit tests
+# --------------------------------------------------------------------------
+
+
+def test_audio_frontend_returns_correct_mel_shape():
+    """AudioFrontEnd converts waveform to log-mel with correct dimensions."""
+    frontend = AudioFrontEnd(sample_rate=16000, n_fft=64, hop_length=16, n_mels=16)
+
+    # 0.25 seconds at 16kHz = 4000 samples
+    # With hop_length=16 and centered STFT: frames = samples // hop_length + 1 = 251
+    waveform = torch.randn(2, 4000)
+    mel = frontend(waveform)
+
+    assert mel.shape[0] == 2, "batch dimension should match"
+    assert mel.shape[1] == 16, "n_mels dimension should match"
+    expected_frames = 4000 // 16 + 1
+    assert mel.shape[2] == expected_frames, f"frame count should be {expected_frames}"
+    assert torch.isfinite(mel).all(), "mel should be finite"
+
+
+def test_audio_frontend_accepts_3d_input():
+    """AudioFrontEnd handles 3D input (B, 1, N) by squeezing."""
+    frontend = AudioFrontEnd(sample_rate=16000, n_fft=64, hop_length=16, n_mels=16)
+    waveform = torch.randn(2, 1, 4000)
+
+    mel = frontend(waveform)
+
+    assert mel.shape[0] == 2
+    assert mel.shape[1] == 16
+    assert torch.isfinite(mel).all()
+
+
+def test_audio_frontend_produces_log_mel():
+    """AudioFrontEnd output is log-scale (negative values expected)."""
+    frontend = AudioFrontEnd(sample_rate=16000, n_fft=64, hop_length=16, n_mels=16)
+    waveform = torch.randn(1, 1600)
+
+    mel = frontend(waveform)
+
+    # Log of small values should produce negative numbers
+    assert mel.min() < 0, "log-mel should contain negative values"
+
+
+# --------------------------------------------------------------------------
+# AudioEncoder unit tests
+# --------------------------------------------------------------------------
+
+
+def test_audio_encoder_forward_shape():
+    """AudioEncoder returns (B, T+1, d_model) where T is the mel frame count."""
+    encoder = AudioEncoder(
+        sample_rate=16000,
+        n_fft=64,
+        hop_length=16,
+        n_mels=16,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        max_frames=256,
+        dropout=0.0,
+    )
+
+    # 0.25 seconds at 16kHz = 4000 samples
+    # Mel frames = 4000 // 16 + 1 = 251
+    # AudioEncoder prepends 1 CLS token, so output is (B, 251+1, d_model)
+    waveform = torch.randn(2, 4000)
+    out = encoder(waveform)
+
+    expected_mel_frames = 4000 // 16 + 1
+    expected_seq_len = expected_mel_frames + 1  # +1 for CLS token
+
+    assert out.shape == (2, expected_seq_len, 32), \
+        f"shape should be (2, {expected_seq_len}, 32) but got {out.shape}"
+    assert torch.isfinite(out).all(), "output should be finite"
+
+
+def test_audio_encoder_truncates_long_audio():
+    """AudioEncoder respects max_frames and truncates long sequences."""
+    encoder = AudioEncoder(
+        sample_rate=16000,
+        n_fft=64,
+        hop_length=16,
+        n_mels=16,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        max_frames=32,  # deliberately small limit
+        dropout=0.0,
+    )
+
+    # Long audio that would produce more than 32 frames
+    waveform = torch.randn(1, 8000)
+    out = encoder(waveform)
+
+    # Should be truncated to max_frames + 1 CLS token
+    assert out.shape == (1, 33, 32), "should truncate to max_frames + 1"
+    assert torch.isfinite(out).all()
+
+
+def test_audio_encoder_accepts_precomputed_mel():
+    """AudioEncoder can accept precomputed mel spectrograms."""
+    encoder = AudioEncoder(
+        sample_rate=16000,
+        n_fft=64,
+        hop_length=16,
+        n_mels=16,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        max_frames=256,
+        dropout=0.0,
+    )
+
+    # Precomputed mel spectrogram (B, n_mels, T)
+    mel = torch.randn(2, 16, 50)
+    out = encoder(mel)
+
+    # 50 frames + 1 CLS token = 51
+    assert out.shape == (2, 51, 32)
+    assert torch.isfinite(out).all()
+
 
 # --------------------------------------------------------------------------
 # AudioGenerator unit tests
