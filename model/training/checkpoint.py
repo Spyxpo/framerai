@@ -47,8 +47,8 @@ def _write_sidecars(path: str, config, step: int, extra: dict = None):
         json.dump(meta, f, indent=2)
 
 
-def save_sharded(model, optimizer, path: str, step: int = 0, config=None) -> str:
-    """Save model (and optimizer) state as a sharded checkpoint directory.
+def save_sharded(model, optimizer, path: str, step: int = 0, config=None, scheduler=None) -> str:
+    """Save model (and optimizer + scheduler) state as a sharded checkpoint directory.
 
     Every rank participates and writes its own shard. Falls back to a single
     ``.pt`` file named ``<path>/model.pt`` when not running distributed, so the
@@ -63,7 +63,15 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None) -> str
         payload = {"model_state_dict": core.state_dict(), "step": step}
         if optimizer is not None:
             payload["optimizer_state_dict"] = optimizer.state_dict()
-        torch.save(payload, os.path.join(path, "model.pt"))
+        if scheduler is not None:
+            payload["scheduler_state_dict"] = scheduler.state_dict()
+
+        # Atomic write
+        single_file = os.path.join(path, "model.pt")
+        temp_file = single_file + ".tmp"
+        torch.save(payload, temp_file)
+        os.replace(temp_file, single_file)
+
         _write_sidecars(path, config, step, {"sharded": False})
         return path
 
@@ -76,6 +84,8 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None) -> str
     state = {"model": model_state}
     if optimizer is not None:
         state["optim"] = optim_state
+    if scheduler is not None:
+        state["scheduler"] = scheduler.state_dict()
 
     dcp.save(state, checkpoint_id=path)
     if dist.get_rank() == 0:
@@ -84,11 +94,14 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None) -> str
     return path
 
 
-def load_sharded(model, optimizer, path: str) -> int:
+def load_sharded(model, optimizer, path: str, scheduler=None) -> int:
     """Load a checkpoint written by :func:`save_sharded`, in place.
 
     Resharding is handled by the checkpoint layer, so a run saved on N ranks can
     be resumed on M. Returns the step recorded at save time.
+
+    Backward compatible: older checkpoints without scheduler_state_dict are
+    supported.
     """
     meta_path = os.path.join(path, METADATA_FILENAME)
     meta = {}
@@ -108,6 +121,8 @@ def load_sharded(model, optimizer, path: str) -> int:
         _unwrap(model).load_state_dict(payload["model_state_dict"])
         if optimizer is not None and "optimizer_state_dict" in payload:
             optimizer.load_state_dict(payload["optimizer_state_dict"])
+        if scheduler is not None and "scheduler_state_dict" in payload:
+            scheduler.load_state_dict(payload["scheduler_state_dict"])
         return payload.get("step", meta.get("step", 0))
 
     import torch.distributed.checkpoint as dcp
@@ -119,6 +134,8 @@ def load_sharded(model, optimizer, path: str) -> int:
     state = {"model": model_state}
     if optimizer is not None:
         state["optim"] = optim_state
+    if scheduler is not None:
+        state["scheduler"] = {}
 
     dcp.load(state, checkpoint_id=path)
     set_state_dict(
@@ -127,6 +144,9 @@ def load_sharded(model, optimizer, path: str) -> int:
         model_state_dict=state["model"],
         optim_state_dict=state.get("optim"),
     )
+    if scheduler is not None and "scheduler" in state and state["scheduler"]:
+        scheduler.load_state_dict(state["scheduler"])
+
     return meta.get("step", 0)
 
 

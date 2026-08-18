@@ -54,14 +54,19 @@ def train_language_model(
     log_interval: int = 10,
     save_interval: int = 500,
     logger=None,
+    optimizer=None,
+    scheduler=None,
 ):
-    """Train the LM head of ``model`` to ``config.max_steps``. Returns final step."""
+    """Train the LM head of ``model`` to ``config.max_steps``. Returns final step.
+
+    Accepts optional pre-created optimizer and scheduler for resume scenarios.
+    """
     log = (logger.info if logger else print) if is_main_process() else (lambda *a, **k: None)
 
-    optimizer = build_optimizer(model, config)
-    scheduler = build_scheduler(optimizer, config)
-    for _ in range(start_step):  # fast-forward schedule on resume
-        scheduler.step()
+    if optimizer is None:
+        optimizer = build_optimizer(model, config)
+    if scheduler is None:
+        scheduler = build_scheduler(optimizer, config)
 
     autocast_dtype, use_scaler = resolve_precision(device, config.precision, config.mixed_precision)
     scaler = torch.amp.GradScaler(device.type) if use_scaler else None
@@ -116,17 +121,17 @@ def train_language_model(
             running = 0.0
 
         if step % save_interval == 0 and is_main_process():
-            _save(model, config, step, output_dir, f"checkpoint_{step}.pt")
+            _save(model, optimizer, scheduler, config, step, output_dir, f"checkpoint_{step}.pt")
             log(f"Checkpoint saved at step {step}")
 
     if is_main_process():
-        _save(model, config, step, output_dir, "model_final.pt")
+        _save(model, optimizer, scheduler, config, step, output_dir, "model_final.pt")
         log(f"Training complete. Final model saved ({step} steps).")
     return step
 
 
-def _save(model, config, step, output_dir, filename):
-    """Save a checkpoint.
+def _save(model, optimizer, scheduler, config, step, output_dir, filename):
+    """Save a checkpoint with full training state.
 
     Under FSDP2 each rank holds only a slice of every parameter, so writing
     ``state_dict()`` straight to one file used to persist a single rank's shard
@@ -142,7 +147,19 @@ def _save(model, config, step, output_dir, filename):
     state = gather_full_state_dict(model, cpu_offload=True)
     if not state:  # non-zero rank under distributed; rank 0 does the writing
         return
-    torch.save(
-        {"model_state_dict": state, "config": asdict(config), "step": step},
-        os.path.join(output_dir, filename),
-    )
+
+    checkpoint = {
+        "model_state_dict": state,
+        "config": asdict(config),
+        "step": step,
+        "optimizer_state_dict": optimizer.state_dict(),
+    }
+
+    if scheduler is not None:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+
+    # Atomic write
+    path = os.path.join(output_dir, filename)
+    temp_path = path + ".tmp"
+    torch.save(checkpoint, temp_path)
+    os.replace(temp_path, path)
