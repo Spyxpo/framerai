@@ -299,14 +299,29 @@ def save_checkpoint(model: nn.Module, optimizer, step: int, loss: float, path: s
     os.replace(temp_path, path)
 
 
-def load_checkpoint(path: str, model: nn.Module, optimizer=None, scheduler=None):
+def load_checkpoint(path: str, model: nn.Module = None, optimizer=None, scheduler=None):
     """Load a training checkpoint.
+
+    Args:
+        path: Checkpoint file path
+        model: Optional model to load state into. If None, model state is not loaded.
+        optimizer: Optional optimizer to restore state into
+        scheduler: Optional scheduler to restore state into
+
+    Returns:
+        Tuple of (step, loss) and the loaded checkpoint dict
+
+    This allows loading model weights separately from optimizer/scheduler state,
+    which is needed for distributed resume where FSDP wrapping happens between
+    model load and optimizer creation.
 
     Backward compatible: older checkpoints without scheduler_state_dict are
     supported (scheduler will not be restored, but loading won't fail).
     """
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    if model is not None:
+        model.load_state_dict(checkpoint["model_state_dict"])
 
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
