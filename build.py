@@ -41,6 +41,8 @@ from model.training import (
     maybe_wrap_fsdp,
     train_language_model,
 )
+from model.training.optim import build_optimizer
+from model.training.schedule import build_scheduler
 from model.utils import (
     MULTIMODAL_TOWERS,
     apply_seed,
@@ -179,10 +181,18 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     model = FramerModel(config).to(device)
 
     start_step = 0
+    optimizer = None
+    scheduler = None
+
     if resume:
         logger.info(f"Resuming from {resume}")
-        start_step, prev_loss = load_checkpoint(resume, model)
-        logger.info(f"Resumed at step {start_step}")
+        # Create optimizer and scheduler before loading checkpoint
+        optimizer = build_optimizer(model, config)
+        scheduler = build_scheduler(optimizer, config)
+
+        # Load checkpoint and restore all training state
+        start_step, prev_loss = load_checkpoint(resume, model, optimizer, scheduler)
+        logger.info(f"Resumed at step {start_step} (loss: {prev_loss:.4f})")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
@@ -220,6 +230,7 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     train_language_model(
         config, model, loader, device, output_dir,
         start_step=start_step, logger=logger,
+        optimizer=optimizer, scheduler=scheduler,
     )
 
     # Optional image/audio generation training (single-device, full multimodal).
