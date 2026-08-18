@@ -181,28 +181,34 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     model = FramerModel(config).to(device)
 
     start_step = 0
-    optimizer = None
-    scheduler = None
 
+    # When resuming, load model weights BEFORE FSDP wrapping
     if resume:
         logger.info(f"Resuming from {resume}")
-        # Create optimizer and scheduler before loading checkpoint
-        optimizer = build_optimizer(model, config)
-        scheduler = build_scheduler(optimizer, config)
-
-        # Load checkpoint and restore all training state
-        start_step, prev_loss = load_checkpoint(resume, model, optimizer, scheduler)
-        logger.info(f"Resumed at step {start_step} (loss: {prev_loss:.4f})")
+        start_step, prev_loss = load_checkpoint(resume, model=model)
+        logger.info(f"Loaded model weights from step {start_step} (loss: {prev_loss:.4f})")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
-            start_step, _ = load_checkpoint(init_path, model)
+            start_step, _ = load_checkpoint(init_path, model=model)
 
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
 
     # Shard the model across ranks when distributed (no-op single-device).
+    # This must happen BEFORE optimizer creation so optimizer sees wrapped parameters.
     model = maybe_wrap_fsdp(model, config, device)
+
+    # Create optimizer and scheduler from the (potentially wrapped) model
+    optimizer = None
+    scheduler = None
+    if resume:
+        # Now create optimizer/scheduler from wrapped model and restore their state
+        optimizer = build_optimizer(model, config)
+        scheduler = build_scheduler(optimizer, config)
+        # Restore optimizer/scheduler state (model already loaded above)
+        load_checkpoint(resume, model=None, optimizer=optimizer, scheduler=scheduler)
+        logger.info(f"Restored optimizer and scheduler state at step {start_step}")
 
     seq_len = min(config.max_seq_len, 1024)
 
