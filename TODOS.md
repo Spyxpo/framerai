@@ -63,7 +63,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       attention-factor compensation). It was accepted by the config and silently applied no
       extension at all; `validate()` now rejects an unrecognised `rope_scaling_type`.
 - [ ] Add instruction and preference post-training (chat template, SFT, DPO).
-- [ ] Add ONNX export and a safetensors round-trip validation test.
+- [x] Add ONNX export and a safetensors round-trip validation test.
 
 ## Architecture roadmap — reaching frontier-class output
 

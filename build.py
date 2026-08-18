@@ -307,6 +307,38 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
     except ImportError:
         logger.info("  (install 'safetensors' to also export a .safetensors file)")
 
+    # Optional ONNX export.
+    try:
+        import onnx  # noqa: F401
+
+        onnx_path = os.path.join(export_dir, "framerai_model.onnx")
+        dummy_ids = torch.zeros((1, 8), dtype=torch.long)
+
+        class _ONNXWrapper(nn.Module):
+            def __init__(self, m):
+                super().__init__()
+                self.m = m
+
+            def forward(self, input_ids):
+                return self.m.forward_text(input_ids)
+
+        torch.onnx.export(
+            _ONNXWrapper(model),
+            (dummy_ids,),
+            onnx_path,
+            input_names=["input_ids"],
+            output_names=["logits"],
+            dynamic_axes={
+                "input_ids": {0: "batch", 1: "sequence"},
+                "logits": {0: "batch", 1: "sequence"},
+            },
+            opset_version=14,
+            dynamo=False,
+        )
+        logger.info(f"  ONNX: {onnx_path}")
+    except ImportError:
+        logger.info("  (install 'onnx' and 'onnxruntime' to also export an .onnx model)")
+
     # Copy tokenizer
     tokenizer_src = os.path.join(output_dir, "tokenizer")
     tokenizer_dst = os.path.join(export_dir, "tokenizer")

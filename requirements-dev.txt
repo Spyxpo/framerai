@@ -6,6 +6,8 @@ pytest>=8.4.0
 pytest-cov>=7.0.0
 ruff>=0.14.0
 
-# safetensors is an optional runtime extra, but the export path is covered by
-# CI, so it is not optional here.
+# safetensors and onnx are optional runtime extras, but export paths are covered by
+# CI, so they are not optional here.
 safetensors>=0.7.0
+onnx>=1.16.0
+onnxruntime>=1.18.0

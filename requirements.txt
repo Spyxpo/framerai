@@ -8,11 +8,12 @@ soundfile>=0.14.0
 #                  (model/data.py falls back to it, and resampling is hand-rolled
 #                  precisely so torchaudio stays optional)
 #   safetensors  - secure, portable weight export (build.py --mode export)
+#   onnx / onnxruntime - ONNX export & runtime validation (build.py --mode export)
 #   flash-attn   - faster attention on supported CUDA GPUs (SDPA already uses
 #                  flash/mem-efficient kernels where available without it)
 #   opencv-python - live camera and video-file input for model/cognition
 #   sounddevice   - live microphone input for model/cognition (both are imported
 #                   lazily; the cognition layer runs without either)
-# pip install torchaudio safetensors
+# pip install torchaudio safetensors onnx onnxruntime
 #
 # Development tooling lives in requirements-dev.txt.
