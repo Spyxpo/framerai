@@ -480,6 +480,9 @@ python build.py --mode train --data-dir data
 # Export for serving
 python build.py --mode export
 
+# Evaluate a trained checkpoint on standard benchmarks
+python build.py --mode eval --benchmark-dir benchmarks
+
 # Full pipeline: build, train, export
 python build.py --mode all --size small
 
