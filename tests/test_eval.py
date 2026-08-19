@@ -625,3 +625,92 @@ def test_benchmark_suite_missing_data_is_skipped():
     assert "missing_data" in report.skipped
     assert "not found" in report.skipped["missing_data"]
     assert "missing_data" not in report.metrics
+
+
+def test_evaluation_report_preserves_sample_counts():
+    """Sample counts from BenchmarkResult must be preserved in evaluation output."""
+    import json
+    import os
+    import tempfile
+
+    from model.eval import EvalHarness
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    tokenizer.train(["test corpus data"], target_vocab_size=50)
+
+    harness = EvalHarness(model, "cpu")
+
+    @harness.suite("test_benchmark")
+    def _test(model, device, **_):
+        corpus = "test corpus data"
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
+            tmp.write(corpus)
+            tmp_path = tmp.name
+        try:
+            from model.eval.benchmarks import evaluate_text_benchmark
+
+            result = evaluate_text_benchmark(model, tokenizer, tmp_path, seq_len=4, batch_size=1)
+            # Return both metrics and samples, as build.py does
+            return {"metrics": result.metrics, "samples": result.samples}
+        finally:
+            os.remove(tmp_path)
+
+    report = harness.run(["test_benchmark"])
+
+    # Verify sample count is in the report
+    assert "test_benchmark" in report.metrics
+    assert "samples" in report.metrics["test_benchmark"]
+    assert report.metrics["test_benchmark"]["samples"] > 0
+
+    # Verify sample count survives JSON serialization
+    json_str = report.to_json()
+    parsed = json.loads(json_str)
+    assert parsed["metrics"]["test_benchmark"]["samples"] > 0
+
+
+def test_sample_count_distinguishes_stub_from_full_dataset():
+    """Sample count in results must make it clear when evaluating stub vs full dataset."""
+    import json
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_code_benchmark
+    from model.generate import FramerGenerator
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    tokenizer.train(["def test(): pass"], target_vocab_size=100)
+    generator = FramerGenerator(model, tokenizer, "cpu")
+
+    # Create a 3-problem stub dataset
+    stub_cases = [
+        {
+            "task_id": f"test/{i}",
+            "prompt": f"def func_{i}():\n    return {i}\n",
+            "test": f"assert func_{i}() == {i}",
+        }
+        for i in range(3)
+    ]
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+        for case in stub_cases:
+            tmp.write(json.dumps(case) + "\n")
+        tmp_path = tmp.name
+
+    try:
+        result = evaluate_code_benchmark(generator, tmp_path, seed=0)
+        assert result.samples == 3  # Stub dataset size
+        assert "pass@1" in result.metrics
+
+        # Verify to_dict includes samples
+        result_dict = result.to_dict()
+        assert result_dict["samples"] == 3
+        assert result_dict["benchmark"] == "humaneval"
+        assert "pass@1" in result_dict["metrics"]
+    finally:
+        os.remove(tmp_path)

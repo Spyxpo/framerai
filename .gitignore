@@ -26,6 +26,11 @@ data/*
 !data/README.md
 !data/examples/
 
+# Benchmark data (ignore real benchmarks, keep samples)
+benchmarks/wikitext-2/*
+benchmarks/humaneval/*
+!benchmarks/samples/
+
 # Node
 node_modules/
 .env
