@@ -368,3 +368,260 @@ def test_the_default_harness_reports_what_it_could_not_run():
     report = default_harness(model).run()
     assert set(report.skipped) == {"text", "image", "audio", "video"}
     assert all("needs" in reason for reason in report.skipped.values())
+
+
+# --------------------------------------------------------------------------
+# Benchmarks
+# --------------------------------------------------------------------------
+
+
+def test_text_benchmark_returns_perplexity_and_accuracy():
+    """Text benchmark must compute both metrics on the provided corpus."""
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_text_benchmark
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    tokenizer.train(["hello world", "test corpus"], target_vocab_size=100)
+
+    corpus = "hello world\ntest corpus"
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
+        tmp.write(corpus)
+        tmp_path = tmp.name
+
+    try:
+        result = evaluate_text_benchmark(model, tokenizer, tmp_path, seq_len=8, batch_size=1)
+        assert result.benchmark == "wikitext-2"
+        assert "perplexity" in result.metrics
+        assert "token_accuracy" in result.metrics
+        assert math.isfinite(result.metrics["perplexity"])
+        assert 0.0 <= result.metrics["token_accuracy"] <= 1.0
+        assert result.samples > 0
+    finally:
+        os.remove(tmp_path)
+
+
+def test_text_benchmark_raises_on_missing_file():
+    """Missing benchmark files must raise FileNotFoundError, not produce fake results."""
+    from model.eval.benchmarks import evaluate_text_benchmark
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        evaluate_text_benchmark(model, tokenizer, "no_such_file.txt")
+
+
+def test_text_benchmark_raises_on_empty_file():
+    """Empty benchmark files must raise ValueError."""
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_text_benchmark
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        with pytest.raises(ValueError, match="empty"):
+            evaluate_text_benchmark(model, tokenizer, tmp_path)
+    finally:
+        os.remove(tmp_path)
+
+
+def test_code_benchmark_returns_pass_at_1():
+    """Code benchmark must compute pass@1 by running the supplied tests."""
+    import json
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_code_benchmark
+    from model.generate import FramerGenerator
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    tokenizer.train(["def test(): pass"], target_vocab_size=100)
+    generator = FramerGenerator(model, tokenizer, "cpu")
+
+    # Trivial passing case
+    cases = [
+        {
+            "task_id": "test/0",
+            "prompt": "def passes():\n    return True\n",
+            "test": "assert passes() == True",
+        }
+    ]
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+        for case in cases:
+            tmp.write(json.dumps(case) + "\n")
+        tmp_path = tmp.name
+
+    try:
+        result = evaluate_code_benchmark(generator, tmp_path, seed=0, limit=1)
+        assert result.benchmark == "humaneval"
+        assert "pass@1" in result.metrics
+        assert 0.0 <= result.metrics["pass@1"] <= 1.0
+        assert result.samples == 1
+    finally:
+        os.remove(tmp_path)
+
+
+def test_code_benchmark_raises_on_missing_file():
+    """Missing code benchmark files must raise FileNotFoundError."""
+    from model.eval.benchmarks import evaluate_code_benchmark
+    from model.generate import FramerGenerator
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    generator = FramerGenerator(model, tokenizer, "cpu")
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        evaluate_code_benchmark(generator, "no_such_file.jsonl")
+
+
+def test_code_benchmark_raises_on_malformed_json():
+    """Invalid JSON in code benchmark must raise ValueError."""
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_code_benchmark
+    from model.generate import FramerGenerator
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    generator = FramerGenerator(model, tokenizer, "cpu")
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+        tmp.write("{not valid json\n")
+        tmp_path = tmp.name
+
+    try:
+        with pytest.raises(ValueError, match="invalid JSON"):
+            evaluate_code_benchmark(generator, tmp_path)
+    finally:
+        os.remove(tmp_path)
+
+
+def test_code_benchmark_raises_on_missing_required_keys():
+    """Code benchmark cases without required keys must raise ValueError."""
+    import json
+    import os
+    import tempfile
+
+    from model.eval.benchmarks import evaluate_code_benchmark
+    from model.generate import FramerGenerator
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    generator = FramerGenerator(model, tokenizer, "cpu")
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+        tmp.write(json.dumps({"task_id": "test/0"}) + "\n")
+        tmp_path = tmp.name
+
+    try:
+        with pytest.raises(ValueError, match="missing"):
+            evaluate_code_benchmark(generator, tmp_path)
+    finally:
+        os.remove(tmp_path)
+
+
+def test_code_benchmark_timeout_counts_as_failure():
+    """Code that times out must be scored as failing."""
+    from model.eval.benchmarks import _run_humaneval_test
+
+    # Infinite loop
+    code = "def loop():\n    while True: pass\n"
+    test = "loop()"
+    assert _run_humaneval_test(code, test, timeout=1) is False
+
+
+def test_code_benchmark_exception_counts_as_failure():
+    """Code that raises must be scored as failing."""
+    from model.eval.benchmarks import _run_humaneval_test
+
+    code = "def raises():\n    raise ValueError('fail')\n"
+    test = "raises()"
+    assert _run_humaneval_test(code, test) is False
+
+
+def test_code_benchmark_passing_test_returns_true():
+    """Code that passes its test must be scored as passing."""
+    from model.eval.benchmarks import _run_humaneval_test
+
+    code = "def add(a, b):\n    return a + b\n"
+    test = "assert add(2, 3) == 5"
+    assert _run_humaneval_test(code, test) is True
+
+
+def test_benchmark_suite_registration_works_end_to_end():
+    """Benchmark suites registered with the harness must run and report results."""
+    import os
+    import tempfile
+
+    from model.eval import EvalHarness
+    from model.tokenizer import FramerTokenizer
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    tokenizer = FramerTokenizer(config.vocab_size)
+    tokenizer.train(["test"], target_vocab_size=50)
+
+    harness = EvalHarness(model, "cpu")
+
+    # Register a dummy benchmark suite
+    @harness.suite("dummy_text")
+    def _dummy(model, device, **_):
+        corpus = "test corpus"
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
+            tmp.write(corpus)
+            tmp_path = tmp.name
+        try:
+            from model.eval.benchmarks import evaluate_text_benchmark
+            result = evaluate_text_benchmark(model, tokenizer, tmp_path, seq_len=4, batch_size=1)
+            return result.metrics
+        finally:
+            os.remove(tmp_path)
+
+    report = harness.run(["dummy_text"])
+    assert "dummy_text" in report.metrics
+    assert "perplexity" in report.metrics["dummy_text"]
+
+
+def test_benchmark_suite_missing_data_is_skipped():
+    """A benchmark suite that cannot find its data must be reported as skipped."""
+    from model.eval import EvalHarness
+
+    config = eval_config()
+    model = FramerModel(config).eval()
+    harness = EvalHarness(model, "cpu")
+
+    @harness.suite("missing_data")
+    def _missing(model, device, **_):
+        raise FileNotFoundError("benchmark data not found: /no/such/path")
+
+    report = harness.run(["missing_data"])
+    assert "missing_data" in report.skipped
+    assert "not found" in report.skipped["missing_data"]
+    assert "missing_data" not in report.metrics
