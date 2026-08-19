@@ -130,8 +130,8 @@ it. Training compute and licensed data remain a separate, external problem.
       Frechet distance and contrastive alignment; audio SI-SDR, mel distance, WER, CER, and
       speaker similarity; video FVD and temporal consistency. Suites that cannot run report
       why rather than reporting nothing.
-- [ ] Standard benchmark adapters so the numbers can be compared outside this repository.
-- [ ] A `build.py --mode eval` entry point wired to the harness.
+- [x] Standard benchmark adapters so the numbers can be compared outside this repository.
+- [x] A `build.py --mode eval` entry point wired to the harness.
 
 ## Cognition layer
 
