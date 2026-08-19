@@ -430,6 +430,54 @@ Two caveats worth stating before the numbers are used:
 `bits_per_byte` is tokenizer-independent, so two models with different vocabularies can be
 compared on the same corpus - which raw perplexity cannot do.
 
+#### Running standard benchmarks
+
+The evaluation harness supports standard text and code benchmarks through `build.py --mode eval`:
+
+```bash
+# Run all benchmarks
+python build.py --mode eval --size tiny --benchmark-dir benchmarks
+
+# Save results to JSON
+python build.py --mode eval --size tiny --benchmark-dir benchmarks --eval-output results.json
+
+# Run a subset of HumanEval for quick smoke tests
+python build.py --mode eval --size tiny --eval-code-limit 10
+```
+
+**Benchmark data structure:**
+
+```
+benchmarks/
+├── wikitext-2/
+│   └── test.txt         # Plain text corpus for perplexity and token accuracy
+└── humaneval/
+    └── HumanEval.jsonl  # Code problems with prompts and unit tests
+```
+
+Benchmarks are **not downloaded automatically**. Missing benchmark data is reported as skipped
+with a clear message rather than producing fake results.
+
+**Reproducibility:** Evaluation runs with a fixed seed (default 42), deterministic batch
+construction, and explicit benchmark ordering. The same checkpoint and data will produce the
+same scores across runs.
+
+**Code evaluation security:** Generated code is executed in a separate Python subprocess with
+a timeout. This isolates execution from the main process but does not provide sandboxing
+against filesystem access or network calls. Do not run untrusted benchmarks on systems with
+sensitive data.
+
+**Results:**
+
+| Benchmark | Metric | framer-tiny | framer-small | framer-medium | framer-large |
+|-----------|--------|-------------|--------------|---------------|--------------|
+| WikiText-2 | Perplexity | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+| WikiText-2 | Token Accuracy | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+| HumanEval | pass@1 | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+
+Real benchmark scores require a trained checkpoint on a sufficiently large corpus. The table
+above will be populated as checkpoints become available.
+
 ### Placing modalities in the sequence
 
 Under `prefix`, encoded image and audio embeddings are concatenated ahead of the tokens. That
