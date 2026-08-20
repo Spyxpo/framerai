@@ -431,7 +431,8 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
             model, tokenizer, text_path,
             device=device, seq_len=seq_len, batch_size=batch_size,
         )
-        return result.metrics
+        # Flatten metrics and add sample count
+        return {**result.metrics, "samples": result.samples}
 
     @harness.suite("humaneval")
     def _humaneval(model, device, **_):
@@ -439,7 +440,8 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
         result = evaluate_code_benchmark(
             generator, code_path, seed=config.seed, limit=code_limit,
         )
-        return result.metrics
+        # Flatten metrics and add sample count
+        return {**result.metrics, "samples": result.samples}
 
     # Run evaluation
     logger.info("Running benchmarks...")
