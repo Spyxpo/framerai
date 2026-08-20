@@ -653,22 +653,26 @@ def test_evaluation_report_preserves_sample_counts():
             from model.eval.benchmarks import evaluate_text_benchmark
 
             result = evaluate_text_benchmark(model, tokenizer, tmp_path, seq_len=4, batch_size=1)
-            # Return both metrics and samples, as build.py does
-            return {"metrics": result.metrics, "samples": result.samples}
+            # Return flattened structure with metrics and samples
+            return {**result.metrics, "samples": result.samples}
         finally:
             os.remove(tmp_path)
 
     report = harness.run(["test_benchmark"])
 
-    # Verify sample count is in the report
+    # Verify sample count is in the report at the same level as metrics
     assert "test_benchmark" in report.metrics
     assert "samples" in report.metrics["test_benchmark"]
     assert report.metrics["test_benchmark"]["samples"] > 0
+    # Verify metrics are also present
+    assert "perplexity" in report.metrics["test_benchmark"]
+    assert "token_accuracy" in report.metrics["test_benchmark"]
 
     # Verify sample count survives JSON serialization
     json_str = report.to_json()
     parsed = json.loads(json_str)
     assert parsed["metrics"]["test_benchmark"]["samples"] > 0
+    assert parsed["metrics"]["test_benchmark"]["perplexity"] > 0
 
 
 def test_sample_count_distinguishes_stub_from_full_dataset():
