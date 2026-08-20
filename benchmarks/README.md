@@ -6,15 +6,33 @@ This directory contains standard benchmark data for evaluating FramerAI model qu
 
 ```
 benchmarks/
+├── samples/               # SMOKE TEST SAMPLES ONLY - NOT REAL BENCHMARKS
+│   ├── wikitext-2/
+│   │   └── test.txt      # 3-paragraph sample (NOT the full benchmark)
+│   └── humaneval/
+│       └── HumanEval.jsonl  # 3-problem sample (NOT the full 164-problem set)
 ├── wikitext-2/
-│   └── test.txt         # Plain text corpus for perplexity and token accuracy
+│   └── test.txt          # Real WikiText-2 benchmark (place here after download)
 └── humaneval/
-    └── HumanEval.jsonl  # Code problems with prompts and unit tests
+    └── HumanEval.jsonl   # Real HumanEval benchmark (place here after download)
 ```
 
-## Obtaining Benchmark Data
+## ⚠️ CRITICAL: Sample Files vs. Real Benchmarks
 
-Benchmark data is **not included** in the repository. You must obtain it separately.
+The `samples/` directory contains **minimal stub files for smoke testing only**:
+- `samples/wikitext-2/test.txt`: 3 paragraphs (~200 tokens)
+- `samples/humaneval/HumanEval.jsonl`: 3 programming problems
+
+**These are NOT the real benchmark datasets.** They exist solely to:
+1. Verify the evaluation pipeline works
+2. Run fast smoke tests in CI
+3. Test the CLI without downloading large datasets
+
+**Do NOT report or compare results from sample files.** Sample-based results are meaningless for model quality assessment.
+
+## Obtaining Real Benchmark Data
+
+Real benchmark data is **not included** in the repository. You must download it separately.
 
 ### WikiText-2
 
@@ -40,18 +58,30 @@ Each line in the JSONL file must contain:
 
 ## Running Evaluation
 
-Once benchmark data is in place:
+### With Real Benchmark Data
+
+Once you have downloaded and placed the real benchmark data:
 
 ```bash
-# Run all benchmarks
+# Run all benchmarks (uses benchmarks/wikitext-2/ and benchmarks/humaneval/)
 python build.py --mode eval --size tiny --benchmark-dir benchmarks
 
 # Save results to JSON
 python build.py --mode eval --size tiny --eval-output results.json
-
-# Run a subset of HumanEval (for quick smoke tests)
-python build.py --mode eval --size tiny --eval-code-limit 10
 ```
+
+### With Sample Data (Smoke Test Only)
+
+To verify the evaluation pipeline works without downloading real data:
+
+```bash
+# Run on sample data (uses benchmarks/samples/wikitext-2/ and benchmarks/samples/humaneval/)
+python build.py --mode eval --size tiny --benchmark-dir benchmarks/samples --eval-code-limit 3
+
+# Results will clearly show sample count (e.g., "samples": 3 for HumanEval)
+```
+
+**Remember:** Sample results are for pipeline testing only. They do not represent model quality.
 
 ## Reproducibility
 
