@@ -104,8 +104,10 @@ def test_ema_moves_the_codebook_only_in_training():
 
 def test_residual_stages_reduce_the_residual():
     """Each stage encodes what the previous ones missed."""
+    torch.manual_seed(42)
     rvq = ResidualVQ(n_quantizers=4, codebook_size=64, codebook_dim=8).eval()
     z = torch.randn(2, 8, 12)
+
 
     errors = []
     for n in (1, 2, 4):
