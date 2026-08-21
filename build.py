@@ -270,7 +270,10 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                     break
                 input_ids = batch["input_ids"].to(device)
                 target = batch[key].to(device)
-                results = model(input_ids=input_ids, **{key: target})
+                kwargs = {key: target}
+                if key == "target_audio" and "target_waveform" in batch:
+                    kwargs["target_waveform"] = batch["target_waveform"].to(device)
+                results = model(input_ids=input_ids, **kwargs)
                 loss = results[f"{label}_loss"]
                 optimizer.zero_grad()
                 loss.backward()
@@ -279,6 +282,7 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                 steps += 1
                 if steps % 20 == 0:
                     logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}")
+
 
     _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.image_train_resolution), "target_images", "image")
     _run(AudioCaptionDataset(data_dir, tokenizer, config), "target_audio", "audio")

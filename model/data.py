@@ -313,13 +313,20 @@ class AudioCaptionDataset(Dataset):
     def __getitem__(self, idx):
         path, caption = self.pairs[idx]
         waveform = load_waveform(path, self.config.audio_sample_rate)
+        target_len = (self.config.audio_gen_frames - 1) * self.config.audio_hop_length
+        if waveform.shape[-1] >= target_len:
+            target_wav = waveform[:target_len]
+        else:
+            target_wav = torch.nn.functional.pad(waveform, (0, target_len - waveform.shape[-1]))
         mel = self.frontend(waveform.unsqueeze(0))[0]  # (n_mels, frames)
         mel = _normalize_mel(mel)
         mel = _fit_frames(mel, self.config.audio_gen_frames).unsqueeze(0)  # (1, n_mels, frames)
         return {
             "input_ids": _encode_caption(self.tokenizer, caption, self.caption_len),
             "target_audio": mel,
+            "target_waveform": target_wav,
         }
+
 
 
 def _normalize_mel(mel: torch.Tensor) -> torch.Tensor:
