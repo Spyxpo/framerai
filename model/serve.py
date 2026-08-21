@@ -11,8 +11,9 @@ Ops: chat, code, image, video, audio, transcribe, understand.
 
 With --tools web the worker can reach the internet: the
 `search` and `fetch` ops become available, and a chat request carrying
-params.tools runs a bounded tool-calling loop before answering. Without the flag
-no tool is registered and nothing changes.
+params.tools runs a bounded tool-calling loop before answering. With --tools cli
+it can also run commands on the host, inside a sandbox root, under the mode set
+by --cli-mode. Without the flags no tool is registered and nothing changes.
 
 With --mind PATH (or MIND_PATH) the worker also carries a persistent cognitive
 layer - memory, curiosity, affect, self-model - across requests and restarts.
@@ -24,7 +25,7 @@ params.out_dir and the response returns the file name so the backend can serve i
 
 Usage:
     python -m model.serve --model PATH --tokenizer PATH [--device auto] [--mind PATH]
-                          [--tools web]
+                          [--tools web,cli] [--cli-mode allow] [--cli-root .]
 """
 
 import argparse
@@ -138,10 +139,16 @@ def _select_tools(registry, requested):
     return subset if len(subset) else None
 
 
+TOOL_FLAGS = {"web_search": "web", "web_fetch": "web", "shell": "cli"}
+
+
 def _require_tool(registry, name, op):
     tool = registry.get(name) if registry is not None else None
     if tool is None:
-        raise ValueError(f"op '{op}' needs the {name} tool; start the worker with --tools web")
+        toolset = TOOL_FLAGS.get(name, "web")
+        raise ValueError(
+            f"op '{op}' needs the {name} tool; start the worker with --tools {toolset}"
+        )
     return tool
 
 
@@ -207,6 +214,15 @@ def handle(gen, op, params, mind=None, tools=None):
         if not result.ok:
             raise ValueError(result.content)
         return {"content": result.content, **result.data}
+
+    if op == "shell":
+        tool = _require_tool(tools, "shell", op)
+        result = tool.run(command=params["command"], timeout=params.get("timeout"))
+        if not result.ok and not result.data.get("command"):
+            raise ValueError(result.content)
+        # A non-zero exit is an answer, not a worker failure: the model asked
+        # what happens when this runs, and this is what happened.
+        return {"content": result.content, "ok": result.ok, **result.data}
 
     if op == "fetch":
         tool = _require_tool(tools, "web_fetch", op)
@@ -379,7 +395,20 @@ def main():
     )
     parser.add_argument(
         "--tools", default=os.environ.get("MODEL_TOOLS", ""),
-        help="comma-separated toolsets the model may call, for example 'web'",
+        help="comma-separated toolsets the model may call, for example 'web,cli'",
+    )
+    parser.add_argument(
+        "--cli-mode", default=os.environ.get("MODEL_CLI_MODE", "off"), choices=("off", "ask", "allow"),
+        help="how the cli toolset decides: off refuses everything, allow runs allowlisted "
+             "programs unattended, ask needs an approver and so refuses in this worker",
+    )
+    parser.add_argument(
+        "--cli-root", default=os.environ.get("MODEL_CLI_ROOT", os.getcwd()),
+        help="sandbox root for the cli toolset; no argument may resolve outside it",
+    )
+    parser.add_argument(
+        "--cli-timeout", type=float, default=float(os.environ.get("MODEL_CLI_TIMEOUT", 30.0)),
+        help="wall-clock seconds a command may run before its process group is killed",
     )
     args = parser.parse_args()
 
@@ -398,9 +427,12 @@ def main():
     tools, tools_error = None, None
     if args.tools:
         try:
-            from model.tools import build_registry
+            from model.tools import ShellPolicy, build_registry
 
-            tools = build_registry(args.tools)
+            policy = ShellPolicy(
+                mode=args.cli_mode, root=args.cli_root, timeout=args.cli_timeout
+            )
+            tools = build_registry(args.tools, cli_policy=policy)
         except Exception as exc:  # noqa: BLE001 - a bad toolset must not block serving
             tools_error = str(exc)
 
@@ -413,6 +445,8 @@ def main():
 
     # One ready line, always: the bridge waits for exactly one.
     ready = {"ready": True, "mind": mind is not None, "tools": tools.names() if tools else []}
+    if tools and "shell" in tools:
+        ready["cli_mode"] = args.cli_mode
     if mind_error:
         ready["mind_error"] = mind_error
     if tools_error:

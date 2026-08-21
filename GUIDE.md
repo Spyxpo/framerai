@@ -87,7 +87,7 @@ flowchart TD
 | `model/data.py` | Local-corpus datasets (text, image-caption, audio-caption). |
 | `model/generate.py` | Inference and sampling utilities. |
 | `model/cognition/` | Optional persistent mind: memory, curiosity, affect, live senses, sleep. |
-| `model/tools/` | Optional tools the model can call mid-turn: the protocol, the loop, and internet access. |
+| `model/tools/` | Optional tools the model can call mid-turn: the protocol, the loop, internet access, and a sandboxed shell. |
 | `model/serve.py` | Inference worker driven by the backend over stdin/stdout. |
 | `build.py` | Command line entry point to build, train, and export models. |
 | `train.sh` | Convenience wrapper around the full pipeline. |
@@ -1285,18 +1285,60 @@ without a socket:
 client = SearchClient(transport=lambda url, data, timeout, max_bytes: FIXTURE)
 ```
 
+### Command line access
+
+`model/tools/cli.py` adds `shell`, `read_file`, and `list_dir`. What makes a
+shell tool safe is not the shell - it is `ShellPolicy`, which holds the whole
+decision in one object: the mode, the allowlist, the deny list, the sandbox
+root, the timeout, and the output cap. `ShellTool.run` asks the policy first and
+never reaches `subprocess` on a refusal, so a denial costs nothing and is
+recorded with its reason.
+
+The order of the decision matters:
+
+1. Mode `off` refuses everything. This is the default.
+2. The deny list runs next, so it applies in `allow` mode too - an allowlisted
+   `rm` still cannot be `rm -rf /`. Patterns match the normalised argv, so
+   `rm  -rf   /` and `rm -rf /` are the same input.
+3. Path-shaped arguments are resolved against the sandbox root; one that lands
+   outside refuses the command.
+4. In `allow` mode an allowlisted program runs. Otherwise the approver decides,
+   and a missing approver is a refusal.
+
+Execution is deliberately unexciting: `shell=False` with a list argv, `cwd`
+pinned to the sandbox root, an environment cut down to `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `TZ`, and `TERM`, `start_new_session=True`, and a timeout that kills
+the process group rather than orphaning the children.
+
+Parsing uses `shlex` with `punctuation_chars`, which is what lets an *unquoted*
+operator be refused while a quoted one is kept:
+
+```python
+lex("ls; rm -rf /")                         # ['ls', ';', 'rm', '-rf', '/'] - refused
+lex("python -c 'import time; time.sleep(1)'")  # 3 tokens - the ';' belongs to Python
+```
+
+`read_file` and `list_dir` exist so the frequent cases spawn nothing at all.
+They share the policy's sandbox root.
+
+A non-zero exit is an answer, not a failure: the model asked what happens when
+this runs, and that is what happened. It comes back as a failed `ToolResult`
+carrying the code and the output, and the loop continues.
+
 ### Serving it
 
-`--tools web` (or `MODEL_TOOLS=web`) registers the toolset. The ready line
+`--tools web` (or `MODEL_TOOLS=web`) registers the toolset. `--tools cli` adds
+the command line one, with `--cli-mode`, `--cli-root`, and `--cli-timeout`
+setting its policy. The ready line
 reports what was registered:
 
 ```json
-{"ready": true, "mind": false, "tools": ["web_search", "web_fetch"]}
+{"ready": true, "mind": false, "tools": ["web_search", "web_fetch", "shell"], "cli_mode": "allow"}
 ```
 
 Chat runs the loop when the request asks for it with `params.tools` - `true` for
-everything registered, or a list of toolset or tool names. The `search` and
-`fetch` ops call the tools directly. With a mind attached the tools gather and
+everything registered, or a list of toolset or tool names. The `search`, `fetch`,
+and `shell` ops call the tools directly. With a mind attached the tools gather and
 the mind still writes the reply, so the exchange lands in memory as one episode
 rather than one per tool step.
 
