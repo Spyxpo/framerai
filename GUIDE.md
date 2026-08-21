@@ -17,6 +17,7 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [Training on your own data](#training-on-your-own-data)
 - [Single-GPU training tutorial](#single-gpu-training-tutorial)
 - [Cognition layer](#cognition-layer)
+- [Tools](#tools)
 - [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
 - [Running with Docker](#running-with-docker)
@@ -86,6 +87,7 @@ flowchart TD
 | `model/data.py` | Local-corpus datasets (text, image-caption, audio-caption). |
 | `model/generate.py` | Inference and sampling utilities. |
 | `model/cognition/` | Optional persistent mind: memory, curiosity, affect, live senses, sleep. |
+| `model/tools/` | Optional tools the model can call mid-turn: the protocol, the loop, internet access, and a sandboxed shell. |
 | `model/serve.py` | Inference worker driven by the backend over stdin/stdout. |
 | `build.py` | Command line entry point to build, train, and export models. |
 | `train.sh` | Convenience wrapper around the full pipeline. |
@@ -1212,6 +1214,136 @@ config = CognitionConfig(
 ).validate()
 mind = Mind(config, generator=gen)
 ```
+
+## Tools
+
+### The protocol
+
+A tool is four things: a name, a description, a parameter schema, and a `run()`
+that returns a `ToolResult`. `model/tools/base.py` holds all of it, and knows
+nothing about the web, the shell, or the model.
+
+```python
+class Tool:
+    name: str
+    description: str
+    parameters: dict[str, str]
+
+    def run(self, **kwargs) -> ToolResult: ...
+```
+
+`ToolRegistry` is the set of tools a worker is willing to run. It is also the
+whole permission model: a tool that is not registered cannot be called, so
+gating a capability never needs a flag check at the call site. Failures are
+values, not exceptions - an unknown tool, wrong arguments, or a `ToolError`
+raised inside a tool all come back as a failed `ToolResult`, because a model
+that used a tool wrongly should get the reason and another turn rather than
+lose the conversation to a traceback.
+
+### The loop
+
+`model/tools/loop.py` renders the registry into the prompt, generates, and looks
+for one block:
+
+```text
+<tool_call>{"name": "web_search", "arguments": {"query": "rectified flow"}}</tool_call>
+```
+
+No block means the turn is over. A block runs the tool, appends
+`<tool_result>...</tool_result>`, and generates again, up to `max_steps`
+(default 4). A block that will not parse is fed back as an error result instead
+of raising, which gives a model that emitted bad JSON a chance to correct it.
+
+The loop takes a plain `generate(prompt) -> str` callable, so it is independent
+of `FramerGenerator` and testable without a checkpoint. It returns
+`(reply, ToolTrace)`; the trace carries every call, its arguments, its result,
+and why the loop stopped (`answered`, `max_steps`, or `no_tools`).
+
+### Internet access
+
+`model/tools/web.py` implements `web_search` and `web_fetch` against a keyless
+search endpoint, using `urllib` and `html.parser` only. The provider lives
+behind `SearchClient` and nothing outside that module names it, so swapping it
+is a one-module change. Result links come back wrapped in a redirect, which is
+unquoted back to the real URL before it is returned.
+
+Safety is in three places:
+
+- **Scheme and address.** Only `http` and `https` are fetched. The hostname is
+  resolved first and refused if any address is private, loopback, link-local,
+  reserved, multicast, or unspecified, so a fetched page cannot be used to probe
+  the host's network.
+- **Budgets.** Every request carries a timeout and a byte cap, and page text is
+  truncated to a character budget with an explicit marker.
+- **Failure.** Unreachable hosts, HTTP errors, and empty pages become failed
+  results. Offline is a supported state, not an error.
+
+The client's transport is injectable, which is how the whole module is tested
+without a socket:
+
+```python
+client = SearchClient(transport=lambda url, data, timeout, max_bytes: FIXTURE)
+```
+
+### Command line access
+
+`model/tools/cli.py` adds `shell`, `read_file`, and `list_dir`. What makes a
+shell tool safe is not the shell - it is `ShellPolicy`, which holds the whole
+decision in one object: the mode, the allowlist, the deny list, the sandbox
+root, the timeout, and the output cap. `ShellTool.run` asks the policy first and
+never reaches `subprocess` on a refusal, so a denial costs nothing and is
+recorded with its reason.
+
+The order of the decision matters:
+
+1. Mode `off` refuses everything. This is the default.
+2. The deny list runs next, so it applies in `allow` mode too - an allowlisted
+   `rm` still cannot be `rm -rf /`. Patterns match the normalised argv, so
+   `rm  -rf   /` and `rm -rf /` are the same input.
+3. Path-shaped arguments are resolved against the sandbox root; one that lands
+   outside refuses the command.
+4. In `allow` mode an allowlisted program runs. Otherwise the approver decides,
+   and a missing approver is a refusal.
+
+Execution is deliberately unexciting: `shell=False` with a list argv, `cwd`
+pinned to the sandbox root, an environment cut down to `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `TZ`, and `TERM`, `start_new_session=True`, and a timeout that kills
+the process group rather than orphaning the children.
+
+Parsing uses `shlex` with `punctuation_chars`, which is what lets an *unquoted*
+operator be refused while a quoted one is kept:
+
+```python
+lex("ls; rm -rf /")                         # ['ls', ';', 'rm', '-rf', '/'] - refused
+lex("python -c 'import time; time.sleep(1)'")  # 3 tokens - the ';' belongs to Python
+```
+
+`read_file` and `list_dir` exist so the frequent cases spawn nothing at all.
+They share the policy's sandbox root.
+
+A non-zero exit is an answer, not a failure: the model asked what happens when
+this runs, and that is what happened. It comes back as a failed `ToolResult`
+carrying the code and the output, and the loop continues.
+
+### Serving it
+
+`--tools web` (or `MODEL_TOOLS=web`) registers the toolset. `--tools cli` adds
+the command line one, with `--cli-mode`, `--cli-root`, and `--cli-timeout`
+setting its policy. The ready line
+reports what was registered:
+
+```json
+{"ready": true, "mind": false, "tools": ["web_search", "web_fetch", "shell"], "cli_mode": "allow"}
+```
+
+Chat runs the loop when the request asks for it with `params.tools` - `true` for
+everything registered, or a list of toolset or tool names. The `search`, `fetch`,
+and `shell` ops call the tools directly. With a mind attached the tools gather and
+the mind still writes the reply, so the exchange lands in memory as one episode
+rather than one per tool step.
+
+Without the flag no tool is registered, `params.tools` is ignored, and the
+worker behaves exactly as it did before the package existed.
 
 ## The backend and the inference bridge
 
