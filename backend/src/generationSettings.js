@@ -13,7 +13,7 @@ const LIMITS = {
   max_new_tokens: { min: 16, max: 2048 },
   resolution: [64, 128, 256, 512],
   num_frames: { min: 1, max: 64 },
-  tools: ["web"],
+  tools: ["web", "cli"],
 };
 
 /**

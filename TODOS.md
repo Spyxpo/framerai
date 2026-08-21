@@ -65,6 +65,10 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [ ] Add instruction and preference post-training (chat template, SFT, DPO).
 - [x] Add a tool protocol and a bounded tool-calling loop (`model/tools/`), with internet
       search and page fetch behind `--tools web`. Standard library only, no API key.
+- [x] Add command line access behind `--tools cli`: a sandboxed shell with a three-mode
+      permission policy, an always-on deny list, and read-only file helpers.
+- [ ] Surface the approver for `--cli-mode ask` over the backend, so a person can approve
+      a command from the website instead of the worker refusing for want of one.
 - [x] Add ONNX export and a safetensors round-trip validation test.
 
 ## Architecture roadmap — reaching frontier-class output
