@@ -24,6 +24,13 @@ const TOKENIZER_PATH = resolvePath(process.env.TOKENIZER_PATH, BACKEND_ROOT);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const MODEL_ENABLED = (process.env.MODEL_ENABLED || "true").toLowerCase() !== "false";
 const REQUEST_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS || 180000);
+// Toolsets the worker may register, for example MODEL_TOOLS=web. Empty means
+// the worker starts with no tools at all, which is the default.
+const MODEL_TOOLS = (process.env.MODEL_TOOLS || "").trim();
+// How the cli toolset decides, when it is registered at all. Left at "off" the
+// worker refuses every command, which is the default the model ships with.
+const MODEL_CLI_MODE = (process.env.MODEL_CLI_MODE || "off").trim();
+const MODEL_CLI_ROOT = resolvePath(process.env.MODEL_CLI_ROOT, BACKEND_ROOT) || REPO_ROOT;
 
 const GENERATED_DIR = path.join(BACKEND_ROOT, "uploads", "generated");
 
@@ -50,12 +57,14 @@ function start() {
 
     fs.mkdirSync(GENERATED_DIR, { recursive: true });
 
+    const argv = ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH];
+    if (MODEL_TOOLS) argv.push("--tools", MODEL_TOOLS);
+    if (MODEL_TOOLS.includes("cli")) {
+      argv.push("--cli-mode", MODEL_CLI_MODE, "--cli-root", MODEL_CLI_ROOT);
+    }
+
     try {
-      child = spawn(
-        PYTHON_BIN,
-        ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH],
-        { cwd: REPO_ROOT }
-      );
+      child = spawn(PYTHON_BIN, argv, { cwd: REPO_ROOT });
     } catch (err) {
       console.warn(`[model] worker spawn failed: ${err.message}. Using placeholder responses.`);
       disabled = true;
