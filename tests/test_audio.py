@@ -393,3 +393,95 @@ def test_audio_generator_sampling_without_context():
 
     assert mel.shape == (1, 1, 24, 24)
     assert torch.isfinite(mel).all()
+
+
+# --------------------------------------------------------------------------
+# Neural Vocoder & Fallback tests (Issue #19)
+# --------------------------------------------------------------------------
+
+
+def test_audio_generator_griffin_lim_config():
+    """Default AudioGenerator uses Griffin-Lim (vocoder is None)."""
+    audio_gen = AudioGenerator(vocoder_arch="griffin_lim")
+    assert audio_gen.vocoder is None
+
+
+def test_audio_generator_neural_vocoder_config():
+    """AudioGenerator with vocoder_arch='istft' instantiates NeuralVocoder."""
+    audio_gen = AudioGenerator(
+        n_mels=16,
+        n_frames=16,
+        n_fft=64,
+        hop_length=16,
+        vocoder_arch="istft",
+        vocoder_d_model=32,
+        vocoder_n_layers=1,
+    )
+    assert audio_gen.vocoder is not None
+
+
+def test_audio_generator_neural_vocoder_waveform_shape_and_finite():
+    """Neural vocoder reconstructs a 1D waveform with finite values."""
+    audio_gen = AudioGenerator(
+        n_mels=16,
+        n_frames=16,
+        n_fft=64,
+        hop_length=16,
+        vocoder_arch="istft",
+        vocoder_d_model=32,
+        vocoder_n_layers=1,
+    ).eval()
+
+    mel = torch.randn(1, 1, 16, 16).clamp(-1, 1)
+    with torch.no_grad():
+        waveform = audio_gen.mel_to_waveform(mel)
+
+    assert isinstance(waveform, torch.Tensor)
+    assert waveform.dim() == 1
+    expected_length = (16 - 1) * 16
+    assert waveform.shape[0] == expected_length
+    assert torch.isfinite(waveform).all()
+
+
+def test_audio_generator_explicit_griffin_lim_fallback():
+    """use_griffin_lim=True falls back to Griffin-Lim even when vocoder is loaded."""
+    audio_gen = AudioGenerator(
+        n_mels=16,
+        n_frames=16,
+        n_fft=64,
+        hop_length=16,
+        vocoder_arch="istft",
+        vocoder_d_model=32,
+        vocoder_n_layers=1,
+    ).eval()
+
+    mel = torch.randn(1, 1, 16, 16).clamp(-1, 1)
+    with torch.no_grad():
+        waveform = audio_gen.mel_to_waveform(mel, use_griffin_lim=True)
+
+    assert isinstance(waveform, torch.Tensor)
+    assert waveform.dim() == 1
+    assert torch.isfinite(waveform).all()
+
+
+def test_audio_generator_vocoder_loss_returns_finite_scalar():
+    """vocoder_loss returns a finite scalar tensor and gradients flow."""
+    audio_gen = AudioGenerator(
+        n_mels=16,
+        n_frames=16,
+        n_fft=64,
+        hop_length=16,
+        vocoder_arch="istft",
+        vocoder_d_model=32,
+        vocoder_n_layers=1,
+    )
+
+    target_mel = torch.randn(1, 1, 16, 16)
+    target_waveform = torch.randn(1, (16 - 1) * 16)
+
+    loss = audio_gen.vocoder_loss(target_mel, target_waveform)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+    loss.backward()
+    assert audio_gen.vocoder.embed.weight.grad is not None
