@@ -41,6 +41,7 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - [API endpoints](#api-endpoints)
 - [Inference bridge](#inference-bridge)
 - [Cognition layer](#cognition-layer)
+- [Internet access](#internet-access)
 - [build.py usage](#buildpy-usage)
 - [Project structure](#project-structure)
 - [Tests](#tests)
@@ -51,6 +52,8 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 ## Features
 
 - **Text generation** - chat and Q&A with autoregressive decoding (top-k, top-p, temperature).
+- **Internet access** - optional web search and page reading, so an answer can come
+  from what the model just read rather than only from its weights.
 - **Code generation** - lower-temperature sampling for more deterministic output.
 - **Image generation** - text-to-image via a latent diffusion transformer with rectified flow
   and classifier-free guidance, at 512x512 by default and any aspect ratio on request
@@ -410,6 +413,7 @@ MODEL_ENABLED=true
 MODEL_PATH=../checkpoints/export/framerai_model.pt
 TOKENIZER_PATH=../checkpoints/export/tokenizer
 PYTHON_BIN=python3
+MODEL_TOOLS=web        # optional; see Internet access
 ```
 
 ## Cognition layer
@@ -462,6 +466,65 @@ matters. These are functional analogues - memory, intrinsic motivation, affect
 that changes behaviour, offline consolidation - each observable in the trace and
 tested in isolation. [GUIDE.md](GUIDE.md#cognition-layer) covers the details.
 
+## Internet access
+
+A checkpoint can only answer from what it was trained on. Start the worker with
+`--tools web` and it can also search the internet and read what it finds:
+
+```bash
+python -m model.serve --model model.pt --tokenizer tokenizer.json --tools web
+```
+
+Two tools are registered:
+
+| Tool | What it does |
+| --- | --- |
+| `web_search` | A web query, returning ranked results with titles, URLs, and snippets, plus the search provider's own instant answer when there is one. |
+| `web_fetch` | Retrieves one URL and strips it to readable text, truncated to a character budget. |
+
+Chat then runs a bounded tool-calling loop. The model emits one block, the
+worker runs the tool and feeds the result back, and the loop repeats until the
+model answers in plain text or `max_tool_steps` is reached:
+
+```text
+<tool_call>{"name": "web_search", "arguments": {"query": "rectified flow"}}</tool_call>
+<tool_result>web_search (ok): Rectified flow ... https://example.com/flow</tool_result>
+```
+
+Ask for it per request, and read back what it did:
+
+```json
+{"op": "chat", "params": {"prompt": "what shipped in torch 2.13?", "tools": ["web"]}}
+```
+
+```json
+{"ok": true, "result": {"content": "...", "tools": {"used": ["web_search"], "stopped": "answered",
+ "steps": [{"name": "web_search", "arguments": {"query": "torch 2.13 release notes"}, "...": "..."}]}}}
+```
+
+The `search` and `fetch` ops call the tools directly when a caller wants results
+rather than prose. From Python:
+
+```python
+from model.tools import build_registry, run_tool_loop
+
+registry = build_registry("web")
+reply, trace = run_tool_loop(lambda p: gen.generate_text(p), registry, "who maintains ruff?")
+print(trace.to_dict()["used"])   # ['web_search']
+```
+
+There is no API key and no new dependency: the search endpoints are keyless and
+the client is `urllib` plus `html.parser`. Requests are capped by timeout and by
+bytes, only `http` and `https` URLs are fetched, and a host that resolves to a
+private, loopback, link-local, or reserved address is refused - so a page the
+model chose cannot be used to reach the machine's own network. Being offline is
+a supported state: the tool returns a failed result and the model answers
+without it.
+
+The backend forwards the switch. Set `MODEL_TOOLS=web` in `backend/.env` to
+start the worker with tools registered, and send `settings.tools: ["web"]` with
+a chat message to use them for that turn. Without either, nothing changes.
+
 ## build.py usage
 
 ```bash
@@ -511,6 +574,10 @@ framerai/
 │   │   └── multimodal_projector.py
 │   ├── tokenizer/              # BPE tokenizer with special tokens
 │   ├── configs/                # Model configuration
+│   ├── tools/                  # Optional tools the model can call mid-turn
+│   │   ├── base.py             # Tool protocol, results, and the registry
+│   │   ├── loop.py             # Bounded tool-calling loop and its trace
+│   │   └── web.py              # Internet search and page fetch
 │   ├── cognition/              # Optional mind: memory, curiosity, affect, sleep
 │   │   ├── mind.py             # The tick loop tying it together
 │   │   ├── memory.py           # Episodic, semantic, and working memory
