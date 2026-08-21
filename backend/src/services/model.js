@@ -174,10 +174,14 @@ async function modelChat(intent, content, settings = {}) {
 
   const op = intent === "code" ? "code" : "chat";
   const result = await bridge.request(op, { prompt: content, ...settings });
+  const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
+  // Tool steps travel with the reply so the UI can show what was searched and
+  // read instead of presenting a sourced answer as if it came from the weights.
+  if (result.tools) metadata.tools = result.tools;
   return {
     type: intent === "code" ? "code" : "text",
     content: result.content,
-    metadata: { model: `framerai-${intent === "code" ? "code" : "text"}` },
+    metadata,
   };
 }
 

@@ -13,6 +13,7 @@ const LIMITS = {
   max_new_tokens: { min: 16, max: 2048 },
   resolution: [64, 128, 256, 512],
   num_frames: { min: 1, max: 64 },
+  tools: ["web"],
 };
 
 /**
@@ -30,7 +31,19 @@ function readSettings(parent) {
     max_new_tokens: v.integer("max_new_tokens", LIMITS.max_new_tokens),
     resolution: v.oneOf("resolution", LIMITS.resolution),
     num_frames: v.integer("num_frames", LIMITS.num_frames),
+    tools: readTools(v),
   });
+}
+
+/**
+ * The toolsets a chat turn may use. Unknown names are dropped rather than
+ * rejected, because the worker decides what it actually has registered; an
+ * empty list is returned as undefined so the default path stays untouched.
+ */
+function readTools(v) {
+  const raw = v.array("tools", { max: LIMITS.tools.length });
+  const names = raw.filter((name) => LIMITS.tools.includes(name));
+  return names.length ? names : undefined;
 }
 
 function compact(obj) {

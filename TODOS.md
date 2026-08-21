@@ -63,6 +63,8 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       attention-factor compensation). It was accepted by the config and silently applied no
       extension at all; `validate()` now rejects an unrecognised `rope_scaling_type`.
 - [ ] Add instruction and preference post-training (chat template, SFT, DPO).
+- [x] Add a tool protocol and a bounded tool-calling loop (`model/tools/`), with internet
+      search and page fetch behind `--tools web`. Standard library only, no API key.
 - [x] Add ONNX export and a safetensors round-trip validation test.
 
 ## Architecture roadmap — reaching frontier-class output

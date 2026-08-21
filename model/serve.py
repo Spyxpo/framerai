@@ -9,6 +9,11 @@ real inference. It loads an exported checkpoint once, then answers requests:
 
 Ops: chat, code, image, video, audio, transcribe, understand.
 
+With --tools web the worker can reach the internet: the
+`search` and `fetch` ops become available, and a chat request carrying
+params.tools runs a bounded tool-calling loop before answering. Without the flag
+no tool is registered and nothing changes.
+
 With --mind PATH (or MIND_PATH) the worker also carries a persistent cognitive
 layer - memory, curiosity, affect, self-model - across requests and restarts.
 Chat then runs through it, and these ops become available: see, hear, watch,
@@ -19,6 +24,7 @@ params.out_dir and the response returns the file name so the backend can serve i
 
 Usage:
     python -m model.serve --model PATH --tokenizer PATH [--device auto] [--mind PATH]
+                          [--tools web]
 """
 
 import argparse
@@ -114,35 +120,100 @@ def _load_frames(path, size, limit=32):
     return torch.stack(frames)
 
 
+def _select_tools(registry, requested):
+    """The tools this request may use: all of them, a named subset, or none.
+
+    A client asking for a capability the worker was not started with gets a
+    worker without that capability, not an error - the same posture the
+    cognition layer takes when it is absent.
+    """
+    if registry is None or not len(registry) or not requested:
+        return None
+    if requested is True or requested == "all":
+        return registry
+    from .tools import expand_toolsets
+
+    names = [requested] if isinstance(requested, str) else list(requested)
+    subset = registry.subset(expand_toolsets(names))
+    return subset if len(subset) else None
+
+
+def _require_tool(registry, name, op):
+    tool = registry.get(name) if registry is not None else None
+    if tool is None:
+        raise ValueError(f"op '{op}' needs the {name} tool; start the worker with --tools web")
+    return tool
+
+
 def _require_mind(mind, op):
     if mind is None:
         raise ValueError(f"op '{op}' needs the cognition layer; start the worker with --mind PATH")
     return mind
 
 
-def handle(gen, op, params, mind=None):
+def handle(gen, op, params, mind=None, tools=None):
 
     out_dir = params.get("out_dir", ".")
     os.makedirs(out_dir, exist_ok=True)
     prompt = params.get("prompt", "")
 
     if op in ("chat", "text"):
+        active = _select_tools(tools, params.get("tools"))
+        max_new_tokens = params.get("max_new_tokens", 256)
+
+        tool_trace = None
+        if active is not None:
+            from .tools import run_tool_loop
+
+            def generate(text):
+                return gen.generate_text(text, max_new_tokens=max_new_tokens, **_sampling(params))
+
+            reply, tool_trace = run_tool_loop(
+                generate, active, prompt, max_steps=params.get("max_tool_steps", 4)
+            )
+            if mind is None:
+                # The trace carries every query and page, so an answer sourced
+                # from the web can be checked rather than taken on faith.
+                return {"content": reply, "tools": tool_trace.to_dict()}
+            # With a mind attached the tools gather; the mind still answers, so
+            # the exchange lands in memory as one episode rather than four.
+            prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
+
         if mind is not None:
             reply, trace = mind.converse(
                 prompt,
-                max_new_tokens=params.get("max_new_tokens", 256),
+                max_new_tokens=max_new_tokens,
                 **_sampling(params),
             )
             # The trace travels with the reply so a client can show what was
             # recalled and how the model felt, rather than guessing.
-            return {"content": reply, "trace": trace.to_dict()}
+            result = {"content": reply, "trace": trace.to_dict()}
+            if tool_trace is not None:
+                result["tools"] = tool_trace.to_dict()
+            return result
         return {
             "content": gen.generate_text(
                 prompt,
-                max_new_tokens=params.get("max_new_tokens", 256),
+                max_new_tokens=max_new_tokens,
                 **_sampling(params),
             )
         }
+
+    if op == "search":
+        tool = _require_tool(tools, "web_search", op)
+        result = tool.run(
+            query=params.get("query", prompt), max_results=params.get("max_results", 5)
+        )
+        if not result.ok:
+            raise ValueError(result.content)
+        return {"content": result.content, **result.data}
+
+    if op == "fetch":
+        tool = _require_tool(tools, "web_fetch", op)
+        result = tool.run(url=params["url"], max_chars=params.get("max_chars"))
+        if not result.ok:
+            raise ValueError(result.content)
+        return {"content": result.content, **result.data}
 
     if op in ("see", "hear", "watch", "wonder", "reflect", "feedback", "introspect", "live"):
         return _handle_mind(gen, op, params, _require_mind(mind, op))
@@ -306,6 +377,10 @@ def main():
         "--mind", default=os.environ.get("MIND_PATH"),
         help="path to a saved mind; enables the cognition layer and persists it there",
     )
+    parser.add_argument(
+        "--tools", default=os.environ.get("MODEL_TOOLS", ""),
+        help="comma-separated toolsets the model may call, for example 'web'",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -320,6 +395,15 @@ def main():
         _print({"ready": False, "error": str(exc)})
         sys.exit(1)
 
+    tools, tools_error = None, None
+    if args.tools:
+        try:
+            from model.tools import build_registry
+
+            tools = build_registry(args.tools)
+        except Exception as exc:  # noqa: BLE001 - a bad toolset must not block serving
+            tools_error = str(exc)
+
     mind, mind_error = None, None
     if args.mind:
         try:
@@ -328,9 +412,11 @@ def main():
             mind_error = str(exc)
 
     # One ready line, always: the bridge waits for exactly one.
-    ready = {"ready": True, "mind": mind is not None}
+    ready = {"ready": True, "mind": mind is not None, "tools": tools.names() if tools else []}
     if mind_error:
         ready["mind_error"] = mind_error
+    if tools_error:
+        ready["tools_error"] = tools_error
     _print(ready)
 
     for line in sys.stdin:
@@ -343,7 +429,9 @@ def main():
             continue
         req_id = req.get("id")
         try:
-            result = handle(gen, req.get("op", "chat"), req.get("params", {}), mind=mind)
+            result = handle(
+                gen, req.get("op", "chat"), req.get("params", {}), mind=mind, tools=tools
+            )
             if mind is not None and args.mind:
                 # Persist after every request: a mind that only survives a clean
                 # shutdown is a mind that loses its day whenever the worker dies.
