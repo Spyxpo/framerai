@@ -79,6 +79,20 @@ of them with the family that can, selected by a config field so the small preset
 their laptop-runnable path. Every phase ships tiny-scale tests and the metric that measures
 it. Training compute and licensed data remain a separate, external problem.
 
+### Scale and reasoning — the 3T flagship
+
+- [ ] Add a `framer-3t-a64b` preset that scales every modality, not just the backbone:
+      512 fine-grained experts at top-6, and vision, audio, image, video and audio-LM towers
+      roughly doubled. ~2.93T text parameters, ~63.98B active per token, ~76.73B multimodal,
+      ~3.01T total. Cluster-only, like `framer-2t-a49b`.
+- [ ] Add a reasoning segment to the chat template, with its own special tokens, so a
+      thinking span is part of the trained format rather than prose the model happens to emit.
+- [ ] Add a reasoning budget and a reasoning-effort control (off / low / medium / high)
+      through `build.py`, `model/serve.py`, the backend routes and the website settings panel.
+- [ ] Add self-consistency and a verification pass as opt-in test-time compute strategies.
+- [ ] Report every quality claim through `model/eval/`, as a before-and-after table on the
+      same checkpoint.
+
 ### Image generation — latent diffusion transformer
 
 - [x] KL-VAE (8x spatial downsample) so training runs in latent space, not pixel space.
