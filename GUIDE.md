@@ -1267,10 +1267,13 @@ cd website && npm ci && npm run build
 
 ## Troubleshooting
 
-- Out of memory during training: lower `--batch-size`, use a smaller `--size`, or train on CPU with `--device cpu`.
-- Audio file loading fails: `soundfile` comes from `requirements.txt`; if it is unavailable, install the optional fallback loader with `pip install torchaudio`.
-- Backend returns placeholders: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
-- Website shows connection errors: confirm the backend is running on the expected port.
+For detailed solutions to common CUDA, PyTorch, VRAM/OOM, dependency, and environment setup issues, see the dedicated [Troubleshooting Guide](TROUBLESHOOTING.md).
+
+Quick reference for common issues:
+- **Out of memory during training**: lower `--batch-size`, increase `--grad-accum`, enable `--precision bf16` / `--grad-checkpointing`, or train on CPU with `--device cpu`.
+- **Audio file loading fails**: install system dependency `libsndfile1` (Linux) / `libsndfile` (macOS), or install fallback audio loader with `pip install torchaudio`.
+- **Backend returns placeholders**: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
+- **Website shows connection errors**: confirm the backend is running on port 3001.
 
 ## Where to go next
 

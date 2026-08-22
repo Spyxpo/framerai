@@ -45,6 +45,7 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - [Project structure](#project-structure)
 - [Tests](#tests)
 - [Documentation](#documentation)
+- [Troubleshooting](TROUBLESHOOTING.md)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -562,6 +563,7 @@ with supertest and stub the model service, so no Python worker is needed.
 ## Documentation
 
 - [Guide](GUIDE.md) - full walkthrough of the model, backend, and website.
+- [Troubleshooting](TROUBLESHOOTING.md) - solutions for common CUDA, VRAM, and dependency issues.
 - [Contributing](CONTRIBUTING.md) - development setup, branching model, and pull request flow.
 - [Roadmap and TODOs](TODOS.md) - planned work and open tasks.
 - [Changelog](CHANGELOG.md) - notable changes per release.
