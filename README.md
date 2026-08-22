@@ -357,6 +357,194 @@ square images only and says so rather than producing something misshapen.
 | POST | `/api/generate/transcribe` | Transcribe an uploaded audio file |
 | WS | `/ws` | Real-time streaming |
 
+### Generation request examples
+
+#### Image generation (`POST /api/generate/image`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text description of the image.
+  - `num_images` *(optional, int 1–4, default 1)*: Number of images to generate.
+  - `width` & `height` *(optional, int 64–2048)*: Explicit dimensions (must be provided together).
+  - `aspect` *(optional, string)*: Aspect ratio (`"1:1"`, `"4:3"`, `"3:4"`, `"3:2"`, `"2:3"`, `"16:9"`, `"9:16"`, `"21:9"`).
+  - `tier` *(optional, int)*: Size tier (`256`, `512`, `768`, `1024`).
+  - `seed` *(optional, int 0–2147483647)*: Random seed for reproducibility.
+  - `resolution` *(optional, one of `64`, `128`, `256`, `512`)*: Deprecated square-only size alias.
+
+```bash
+curl -s http://localhost:3001/api/generate/image \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "a red bicycle by the sea",
+    "num_images": 1,
+    "aspect": "16:9",
+    "tier": 512,
+    "seed": 42
+  }'
+```
+
+```json
+{
+  "id": "e23382d4-80e3-4b11-ab27-fe9518ed98c1",
+  "prompt": "a red bicycle by the sea",
+  "images": [
+    {
+      "id": "9fcdae84-d042-45c5-99b3-1e933069a0c5",
+      "url": "/uploads/generated/img_1234.png",
+      "placeholder": false
+    }
+  ],
+  "metadata": {
+    "width": 688,
+    "height": 384,
+    "aspect": "16:9",
+    "source": "explicit",
+    "snapped": false,
+    "seed": 42,
+    "model": "framerai-diffusion"
+  }
+}
+```
+
+#### Video generation (`POST /api/generate/video`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text description of the video.
+  - `num_frames` *(optional, int 1–64, default 16)*: Number of video frames to generate.
+
+```bash
+curl -s http://localhost:3001/api/generate/video \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "ocean waves crashing on rocks",
+    "num_frames": 16
+  }'
+```
+
+```json
+{
+  "id": "c79367bb-fde8-4f3b-a9f0-b152554d291a",
+  "prompt": "ocean waves crashing on rocks",
+  "video": {
+    "url": "/uploads/generated/vid_1234.mp4",
+    "frames": 16,
+    "placeholder": false
+  },
+  "metadata": {
+    "frames": 16,
+    "model": "framerai-video"
+  }
+}
+```
+
+#### Audio generation (`POST /api/generate/audio`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text or speech prompt to generate.
+
+```bash
+curl -s http://localhost:3001/api/generate/audio \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "hello and welcome to FramerAI"
+  }'
+```
+
+```json
+{
+  "id": "1e523e1d-652d-44f2-a5ba-9fc93a5efb4c",
+  "prompt": "hello and welcome to FramerAI",
+  "audio": {
+    "url": "/uploads/generated/aud_1234.wav",
+    "placeholder": false
+  },
+  "metadata": {
+    "model": "framerai-audio"
+  }
+}
+```
+
+#### Code generation (`POST /api/generate/code`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Description of the code to generate.
+  - `language` *(optional, string, default "python")*: Target language (`"python"`, `"javascript"`, `"typescript"`, `"java"`, `"go"`, `"rust"`, `"c"`, `"cpp"`, `"csharp"`, `"ruby"`, `"php"`, `"shell"`, `"sql"`, `"html"`, `"css"`).
+  - `settings` *(optional, object)*: Sampling parameters (`temperature` 0.1–2.0, `top_p` 0.1–1.0, `top_k` 0–200, `max_new_tokens` 16–2048).
+
+```bash
+curl -s http://localhost:3001/api/generate/code \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "write a quicksort function",
+    "language": "python",
+    "settings": {
+      "temperature": 0.2,
+      "top_p": 0.95
+    }
+  }'
+```
+
+```json
+{
+  "id": "f8a92b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+  "prompt": "write a quicksort function",
+  "code": "def quicksort(arr):\n    ...",
+  "language": "python",
+  "metadata": {
+    "model": "framerai-code"
+  }
+}
+```
+
+#### Image understanding (`POST /api/generate/understand`)
+
+- **Content-Type**: `multipart/form-data`
+- **Fields**:
+  - `image` *(required, file upload, image/\*)*: Image file to analyze (max 50 MB).
+  - `prompt` *(optional, string, max 4000, default "Describe this image")*: Analysis instruction.
+
+```bash
+curl -s http://localhost:3001/api/generate/understand \
+  -F "image=@photo.jpg" \
+  -F "prompt=Describe what is shown in this image"
+```
+
+```json
+{
+  "description": "A close up photo of a cat sitting on a wooden desk.",
+  "imagePath": "/uploads/images/3f8b91a0-7b2c-4e8a-9d10-8e9f0a1b2c3d.jpg"
+}
+```
+
+#### Audio transcription (`POST /api/generate/transcribe`)
+
+- **Content-Type**: `multipart/form-data`
+- **Fields**:
+  - `audio` *(required, file upload, audio/\*)*: Audio file to transcribe (max 50 MB).
+  - `prompt` *(optional, string, max 4000, default "Transcribe the audio:")*: Transcription instruction.
+
+The upload is rejected unless it is sent as `audio/*`, and curl does not infer a type for `.wav`,
+so set it explicitly with `;type=audio/wav`.
+
+```bash
+curl -s http://localhost:3001/api/generate/transcribe \
+  -F "audio=@recording.wav;type=audio/wav" \
+  -F "prompt=Transcribe the spoken words:"
+```
+
+```json
+{
+  "text": "hello and welcome to framerai",
+  "audioPath": "/uploads/audio/7a8b9c0d-1e2f-3a4b-5c6d-7e8f9a0b1c2d.wav",
+  "metadata": {
+    "model": "framerai-audio"
+  }
+}
+```
+
 ### Errors
 
 Request bodies, path parameters, and uploads are validated before they reach
