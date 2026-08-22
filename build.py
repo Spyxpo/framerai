@@ -136,7 +136,7 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
     else:
         logger.warning(f"No local data in '{data_dir}'; training tokenizer on the built-in sample.")
         corpus = BUILTIN_SAMPLE_TEXTS
-    tokenizer.train(corpus, target_vocab_size=min(1000, config.vocab_size))
+    tokenizer.train(corpus, target_vocab_size=config.vocab_size)
     logger.info(f"Tokenizer vocabulary size: {config.vocab_size}")
 
     # Save

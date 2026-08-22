@@ -150,3 +150,40 @@ def test_special_tokens_are_stripped_or_kept_as_documented():
     assert ids[0] == tokenizer.sos_id and ids[-1] == tokenizer.eos_id
     # sos/eos/pad are control tokens and never render.
     assert tokenizer.decode(ids) == "hi"
+
+def test_build_model_passes_config_vocab_size_to_tokenizer_train(tmp_path):
+    """build_model() must pass config.vocab_size to tokenizer.train(), not min(1000, vocab_size).
+
+    Spying on FramerTokenizer.train() lets us exercise the real build_model()
+    call path without paying the cost of model weight initialisation, and
+    without depending on disk checkpoints.  The assertion fails against the
+    buggy ``min(1000, config.vocab_size)`` call and passes once the fix is in.
+    """
+    from unittest.mock import patch
+
+    import build as build_module
+    from model.configs import FramerConfig
+
+    # Use a vocab_size well above 1000 so min(1000, ...) would be wrong.
+    config = FramerConfig.from_preset("framer-tiny")
+    config.vocab_size = 4096
+
+    recorded_kwargs: list[dict] = []
+
+    original_train = build_module.FramerTokenizer.train
+
+    def spy_train(self, texts, target_vocab_size=None):
+        recorded_kwargs.append({"target_vocab_size": target_vocab_size})
+        # Still do the real (cheap) training so the tokenizer is usable.
+        original_train(self, texts, target_vocab_size=target_vocab_size)
+
+    with patch.object(build_module.FramerTokenizer, "train", spy_train):
+        build_module.build_model(config, str(tmp_path))
+
+    assert recorded_kwargs, "FramerTokenizer.train() was never called"
+    actual = recorded_kwargs[0]["target_vocab_size"]
+    assert actual == config.vocab_size, (
+        f"build_model() called tokenizer.train(target_vocab_size={actual}) "
+        f"but expected {config.vocab_size}. "
+        f"The min(1000, vocab_size) cap is probably back."
+    )
