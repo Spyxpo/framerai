@@ -182,7 +182,7 @@ it. Training compute and licensed data remain a separate, external problem.
 
 - [ ] Expand GUIDE.md with architecture diagrams for each module.
 - [x] Add a from-scratch training tutorial that walks through a full run on a single GPU.
-- [ ] Add a troubleshooting page for common CUDA, VRAM, and dependency issues.
+- [x] Add a troubleshooting page for common CUDA, VRAM, and dependency issues.
 - [ ] Add API reference documentation generated from source.
 
 ## DevOps and CI/CD
