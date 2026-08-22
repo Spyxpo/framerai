@@ -168,7 +168,7 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Add rate limiting and payload size limits to generation endpoints.
 - [ ] Add structured logging and a request id for traceability.
 - [ ] Add OpenAPI or a documented schema for the REST API.
-- [ ] Pool or reuse the inference worker under concurrent load.
+- [x] Pool or reuse the inference worker under concurrent load.
 
 ## Frontend
 
