@@ -362,7 +362,7 @@ square images only and says so rather than producing something misshapen.
   - `aspect` *(optional, string)*: Aspect ratio (`"1:1"`, `"4:3"`, `"3:4"`, `"3:2"`, `"2:3"`, `"16:9"`, `"9:16"`, `"21:9"`).
   - `tier` *(optional, int)*: Size tier (`256`, `512`, `768`, `1024`).
   - `seed` *(optional, int 0–2147483647)*: Random seed for reproducibility.
-  - `resolution` *(optional, int 64–512)*: Deprecated square-only size alias.
+  - `resolution` *(optional, one of `64`, `128`, `256`, `512`)*: Deprecated square-only size alias.
 
 ```bash
 curl -s http://localhost:3001/api/generate/image \
@@ -519,9 +519,12 @@ curl -s http://localhost:3001/api/generate/understand \
   - `audio` *(required, file upload, audio/\*)*: Audio file to transcribe (max 50 MB).
   - `prompt` *(optional, string, max 4000, default "Transcribe the audio:")*: Transcription instruction.
 
+The upload is rejected unless it is sent as `audio/*`, and curl does not infer a type for `.wav`,
+so set it explicitly with `;type=audio/wav`.
+
 ```bash
 curl -s http://localhost:3001/api/generate/transcribe \
-  -F "audio=@recording.wav" \
+  -F "audio=@recording.wav;type=audio/wav" \
   -F "prompt=Transcribe the spoken words:"
 ```
 
