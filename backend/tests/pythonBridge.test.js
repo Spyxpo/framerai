@@ -313,6 +313,12 @@ describe("pythonBridge worker pool", () => {
   it("should spawn replacement worker after exit and use it for subsequent requests", async () => {
     bridge = require("../src/services/pythonBridge");
 
+    // Use zero-delay backoff so replacement spawns immediately in this test
+    const prev = bridge._setTimerImpl(
+      (fn) => { fn(); return null; },
+      () => {}
+    );
+
     const startPromise = bridge.start();
     setImmediate(() => {
       spawnedProcesses[0].simulateReady(true);
@@ -325,7 +331,7 @@ describe("pythonBridge worker pool", () => {
     // Kill first worker
     spawnedProcesses[0].simulateExit(1);
 
-    // Give time for replacement to spawn
+    // Give time for replacement to spawn (backoff is zero)
     await new Promise((r) => setTimeout(r, 10));
 
     assert.strictEqual(spawnedProcesses.length, 3, "should spawn replacement worker");
@@ -333,6 +339,9 @@ describe("pythonBridge worker pool", () => {
     // Make replacement ready
     spawnedProcesses[2].simulateReady(true);
     await new Promise((r) => setTimeout(r, 10));
+
+    // Restore real timers before using the pool further
+    bridge._setTimerImpl(prev.set, prev.clear);
 
     // Send new request - should use a ready worker (either worker 1 or the replacement)
     const reqPromise = bridge.request("chat", { prompt: "after-restart" });
@@ -527,5 +536,114 @@ describe("pythonBridge worker pool", () => {
     assert.ok(spawnedArgs.includes("--cli-mode"), "should pass --cli-mode");
     assert.ok(spawnedArgs.includes("allowlist"), "should pass MODEL_CLI_MODE value");
     assert.ok(spawnedArgs.includes("--cli-root"), "should pass --cli-root");
+  });
+
+  it("should apply backoff before respawning a crashed worker", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    // Capture backoff delay calls without actually waiting
+    const delays = [];
+    let fireFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => { delays.push(ms); fireFn = fn; return {}; },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // Kill the worker - triggers backoff
+    spawnedProcesses[0].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    // Backoff timer should have been requested, not yet fired
+    assert.strictEqual(delays.length, 1, "should request exactly one backoff timer");
+    assert.ok(delays[0] > 0, "backoff delay should be positive");
+    assert.strictEqual(spawnedProcesses.length, 1, "replacement should NOT spawn before backoff fires");
+
+    // Fire the backoff - replacement should now spawn
+    fireFn();
+    await new Promise((r) => setImmediate(r));
+
+    assert.strictEqual(spawnedProcesses.length, 2, "replacement should spawn after backoff fires");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+    spawnedProcesses[1].simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+  });
+
+  it("should stop restarting after MAX_RESTART_ATTEMPTS and disable the pool", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    // Zero-delay backoff so attempts run synchronously
+    const prev = bridge._setTimerImpl(
+      (fn) => { fn(); return null; },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // Kill and immediately fail each replacement, 5 times (the cap)
+    for (let i = 0; i < 5; i++) {
+      const current = spawnedProcesses[spawnedProcesses.length - 1];
+      current.simulateExit(1);
+      await new Promise((r) => setImmediate(r));
+      // Fail the replacement spawn
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      if (replacement !== current) {
+        replacement.simulateReady(false);
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+
+    // One more exit to exhaust the cap
+    const last = spawnedProcesses[spawnedProcesses.length - 1];
+    last.simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Pool should be disabled - no more spawns, bridge.available() returns false
+    const countBefore = spawnedProcesses.length;
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(spawnedProcesses.length, countBefore, "no further spawns after cap");
+    assert.strictEqual(bridge.available(), false, "pool should be disabled after cap");
+  });
+
+  it("should reset restart counter after a worker recovers successfully", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    // Zero-delay backoff
+    const prev = bridge._setTimerImpl(
+      (fn) => { fn(); return null; },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // First exit + successful recovery
+    spawnedProcesses[0].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+    spawnedProcesses[1].simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    // Second exit - counter should have reset, so this is attempt 1 again
+    spawnedProcesses[1].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    // A third worker should spawn (not hit the cap)
+    assert.ok(spawnedProcesses.length >= 3, "should spawn again after counter reset");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+    spawnedProcesses[spawnedProcesses.length - 1].simulateReady(true);
+    await new Promise((r) => setImmediate(r));
   });
 });

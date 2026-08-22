@@ -35,6 +35,24 @@ const MODEL_CLI_ROOT = resolvePath(process.env.MODEL_CLI_ROOT, BACKEND_ROOT) || 
 
 const GENERATED_DIR = path.join(BACKEND_ROOT, "uploads", "generated");
 
+// Restart policy
+const MAX_RESTART_ATTEMPTS = 5;
+// Backoff delays in ms: 500, 1000, 2000, 4000, 8000 (capped at 8s)
+const RESTART_BACKOFF_BASE_MS = 500;
+const RESTART_BACKOFF_MAX_MS = 8000;
+
+// Replaceable timer for testing
+let _setTimeout = (fn, ms) => setTimeout(fn, ms);
+let _clearTimeout = (id) => clearTimeout(id);
+
+// Swap both timer functions at once; returns the previous impl for teardown.
+function _setTimerImpl(setFn, clearFn) {
+  const prev = { set: _setTimeout, clear: _clearTimeout };
+  _setTimeout = setFn;
+  _clearTimeout = clearFn;
+  return prev;
+}
+
 // Worker state
 class Worker {
   constructor(id) {
@@ -223,6 +241,9 @@ class WorkerPool {
     this.size = size;
     this.starting = false;
     this.stopped = false;
+    // Track consecutive restart attempts per worker slot (by id)
+    this._restartCounts = new Map();
+    this._restartTimers = new Map();
   }
 
   async start() {
@@ -255,16 +276,50 @@ class WorkerPool {
 
   async handleWorkerExit(deadWorker) {
     if (this.stopped) return;
-    // Remove dead worker
+    // Remove dead worker from the live set
     const idx = this.workers.indexOf(deadWorker);
     if (idx >= 0) {
       this.workers.splice(idx, 1);
     }
     deadWorker.cleanup();
 
+    const workerId = deadWorker.id;
+    const attempts = (this._restartCounts.get(workerId) || 0) + 1;
+
+    // Hard cap: abandon this worker slot after too many consecutive failures
+    if (attempts > MAX_RESTART_ATTEMPTS) {
+      console.warn(
+        `[model] worker ${workerId} has failed ${MAX_RESTART_ATTEMPTS} restart attempts, giving up`
+      );
+      if (this.workers.filter((w) => w.ready).length === 0) {
+        disabled = true;
+      }
+      return;
+    }
+
+    this._restartCounts.set(workerId, attempts);
+
+    // Exponential backoff, capped at RESTART_BACKOFF_MAX_MS
+    const delay = Math.min(
+      RESTART_BACKOFF_BASE_MS * Math.pow(2, attempts - 1),
+      RESTART_BACKOFF_MAX_MS
+    );
+    console.log(
+      `[model] worker ${workerId} restart attempt ${attempts}/${MAX_RESTART_ATTEMPTS} in ${delay}ms`
+    );
+
+    // Wait out the backoff (interruptible by shutdown)
+    await new Promise((resolve) => {
+      const timer = _setTimeout(resolve, delay);
+      this._restartTimers.set(workerId, timer);
+    });
+    this._restartTimers.delete(workerId);
+
+    if (this.stopped) return;
+
     // Spawn replacement
-    console.log(`[model] spawning replacement worker ${deadWorker.id}`);
-    const replacement = new Worker(deadWorker.id);
+    console.log(`[model] spawning replacement worker ${workerId}`);
+    const replacement = new Worker(workerId);
     replacement.onAvailable = () => this.dispatch();
     replacement.onExit = (w) => this.handleWorkerExit(w);
     this.workers.push(replacement);
@@ -275,11 +330,12 @@ class WorkerPool {
       return;
     }
     if (success) {
-      console.log(`[model] replacement worker ${replacement.id} ready`);
+      // Clean start resets the failure counter for this slot
+      this._restartCounts.delete(workerId);
+      console.log(`[model] replacement worker ${workerId} ready`);
       this.dispatch();
     } else {
-      console.warn(`[model] replacement worker ${replacement.id} failed to start`);
-      // If all workers are dead, mark as disabled
+      console.warn(`[model] replacement worker ${workerId} failed to start`);
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
       }
@@ -327,6 +383,11 @@ class WorkerPool {
 
   shutdown() {
     this.stopped = true;
+    // Cancel any pending backoff timers so restart loops stop immediately
+    for (const timer of this._restartTimers.values()) {
+      _clearTimeout(timer);
+    }
+    this._restartTimers.clear();
     for (const worker of this.workers) {
       worker.cleanup();
     }
@@ -385,4 +446,4 @@ async function start() {
   }
 }
 
-module.exports = { request, available, start, GENERATED_DIR, _pool: () => pool };
+module.exports = { request, available, start, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
