@@ -41,16 +41,23 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - [API endpoints](#api-endpoints)
 - [Inference bridge](#inference-bridge)
 - [Cognition layer](#cognition-layer)
+- [Internet access](#internet-access)
+- [Command line access](#command-line-access)
 - [build.py usage](#buildpy-usage)
 - [Project structure](#project-structure)
 - [Tests](#tests)
 - [Documentation](#documentation)
+- [Troubleshooting](TROUBLESHOOTING.md)
 - [Contributing](#contributing)
 - [License](#license)
 
 ## Features
 
 - **Text generation** - chat and Q&A with autoregressive decoding (top-k, top-p, temperature).
+- **Internet access** - optional web search and page reading, so an answer can come
+  from what the model just read rather than only from its weights.
+- **Command line access** - an optional sandboxed shell, with an allowlist, a deny
+  list, and a root no argument may escape.
 - **Code generation** - lower-temperature sampling for more deterministic output.
 - **Image generation** - text-to-image via a latent diffusion transformer with rectified flow
   and classifier-free guidance, at 512x512 by default and any aspect ratio on request
@@ -353,6 +360,194 @@ The REST API is fully documented via the OpenAPI 3.1 specification served at `/a
 | POST | `/api/generate/transcribe` | Transcribe an uploaded audio file |
 | WS | `/ws` | Real-time streaming |
 
+### Generation request examples
+
+#### Image generation (`POST /api/generate/image`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text description of the image.
+  - `num_images` *(optional, int 1–4, default 1)*: Number of images to generate.
+  - `width` & `height` *(optional, int 64–2048)*: Explicit dimensions (must be provided together).
+  - `aspect` *(optional, string)*: Aspect ratio (`"1:1"`, `"4:3"`, `"3:4"`, `"3:2"`, `"2:3"`, `"16:9"`, `"9:16"`, `"21:9"`).
+  - `tier` *(optional, int)*: Size tier (`256`, `512`, `768`, `1024`).
+  - `seed` *(optional, int 0–2147483647)*: Random seed for reproducibility.
+  - `resolution` *(optional, one of `64`, `128`, `256`, `512`)*: Deprecated square-only size alias.
+
+```bash
+curl -s http://localhost:3001/api/generate/image \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "a red bicycle by the sea",
+    "num_images": 1,
+    "aspect": "16:9",
+    "tier": 512,
+    "seed": 42
+  }'
+```
+
+```json
+{
+  "id": "e23382d4-80e3-4b11-ab27-fe9518ed98c1",
+  "prompt": "a red bicycle by the sea",
+  "images": [
+    {
+      "id": "9fcdae84-d042-45c5-99b3-1e933069a0c5",
+      "url": "/uploads/generated/img_1234.png",
+      "placeholder": false
+    }
+  ],
+  "metadata": {
+    "width": 688,
+    "height": 384,
+    "aspect": "16:9",
+    "source": "explicit",
+    "snapped": false,
+    "seed": 42,
+    "model": "framerai-diffusion"
+  }
+}
+```
+
+#### Video generation (`POST /api/generate/video`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text description of the video.
+  - `num_frames` *(optional, int 1–64, default 16)*: Number of video frames to generate.
+
+```bash
+curl -s http://localhost:3001/api/generate/video \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "ocean waves crashing on rocks",
+    "num_frames": 16
+  }'
+```
+
+```json
+{
+  "id": "c79367bb-fde8-4f3b-a9f0-b152554d291a",
+  "prompt": "ocean waves crashing on rocks",
+  "video": {
+    "url": "/uploads/generated/vid_1234.mp4",
+    "frames": 16,
+    "placeholder": false
+  },
+  "metadata": {
+    "frames": 16,
+    "model": "framerai-video"
+  }
+}
+```
+
+#### Audio generation (`POST /api/generate/audio`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Text or speech prompt to generate.
+
+```bash
+curl -s http://localhost:3001/api/generate/audio \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "hello and welcome to FramerAI"
+  }'
+```
+
+```json
+{
+  "id": "1e523e1d-652d-44f2-a5ba-9fc93a5efb4c",
+  "prompt": "hello and welcome to FramerAI",
+  "audio": {
+    "url": "/uploads/generated/aud_1234.wav",
+    "placeholder": false
+  },
+  "metadata": {
+    "model": "framerai-audio"
+  }
+}
+```
+
+#### Code generation (`POST /api/generate/code`)
+
+- **Content-Type**: `application/json`
+- **Fields**:
+  - `prompt` *(required, string, max 4000)*: Description of the code to generate.
+  - `language` *(optional, string, default "python")*: Target language (`"python"`, `"javascript"`, `"typescript"`, `"java"`, `"go"`, `"rust"`, `"c"`, `"cpp"`, `"csharp"`, `"ruby"`, `"php"`, `"shell"`, `"sql"`, `"html"`, `"css"`).
+  - `settings` *(optional, object)*: Sampling parameters (`temperature` 0.1–2.0, `top_p` 0.1–1.0, `top_k` 0–200, `max_new_tokens` 16–2048).
+
+```bash
+curl -s http://localhost:3001/api/generate/code \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "write a quicksort function",
+    "language": "python",
+    "settings": {
+      "temperature": 0.2,
+      "top_p": 0.95
+    }
+  }'
+```
+
+```json
+{
+  "id": "f8a92b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+  "prompt": "write a quicksort function",
+  "code": "def quicksort(arr):\n    ...",
+  "language": "python",
+  "metadata": {
+    "model": "framerai-code"
+  }
+}
+```
+
+#### Image understanding (`POST /api/generate/understand`)
+
+- **Content-Type**: `multipart/form-data`
+- **Fields**:
+  - `image` *(required, file upload, image/\*)*: Image file to analyze (max 50 MB).
+  - `prompt` *(optional, string, max 4000, default "Describe this image")*: Analysis instruction.
+
+```bash
+curl -s http://localhost:3001/api/generate/understand \
+  -F "image=@photo.jpg" \
+  -F "prompt=Describe what is shown in this image"
+```
+
+```json
+{
+  "description": "A close up photo of a cat sitting on a wooden desk.",
+  "imagePath": "/uploads/images/3f8b91a0-7b2c-4e8a-9d10-8e9f0a1b2c3d.jpg"
+}
+```
+
+#### Audio transcription (`POST /api/generate/transcribe`)
+
+- **Content-Type**: `multipart/form-data`
+- **Fields**:
+  - `audio` *(required, file upload, audio/\*)*: Audio file to transcribe (max 50 MB).
+  - `prompt` *(optional, string, max 4000, default "Transcribe the audio:")*: Transcription instruction.
+
+The upload is rejected unless it is sent as `audio/*`, and curl does not infer a type for `.wav`,
+so set it explicitly with `;type=audio/wav`.
+
+```bash
+curl -s http://localhost:3001/api/generate/transcribe \
+  -F "audio=@recording.wav;type=audio/wav" \
+  -F "prompt=Transcribe the spoken words:"
+```
+
+```json
+{
+  "text": "hello and welcome to framerai",
+  "audioPath": "/uploads/audio/7a8b9c0d-1e2f-3a4b-5c6d-7e8f9a0b1c2d.wav",
+  "metadata": {
+    "model": "framerai-audio"
+  }
+}
+```
+
 ### Errors
 
 Request bodies, path parameters, and uploads are validated before they reach
@@ -413,6 +608,7 @@ MODEL_ENABLED=true
 MODEL_PATH=../checkpoints/export/framerai_model.pt
 TOKENIZER_PATH=../checkpoints/export/tokenizer
 PYTHON_BIN=python3
+MODEL_TOOLS=web        # optional; see Internet access and Command line access
 ```
 
 ## Cognition layer
@@ -465,6 +661,118 @@ matters. These are functional analogues - memory, intrinsic motivation, affect
 that changes behaviour, offline consolidation - each observable in the trace and
 tested in isolation. [GUIDE.md](GUIDE.md#cognition-layer) covers the details.
 
+## Internet access
+
+A checkpoint can only answer from what it was trained on. Start the worker with
+`--tools web` and it can also search the internet and read what it finds:
+
+```bash
+python -m model.serve --model model.pt --tokenizer tokenizer.json --tools web
+```
+
+Two tools are registered:
+
+| Tool | What it does |
+| --- | --- |
+| `web_search` | A web query, returning ranked results with titles, URLs, and snippets, plus the search provider's own instant answer when there is one. |
+| `web_fetch` | Retrieves one URL and strips it to readable text, truncated to a character budget. |
+
+Chat then runs a bounded tool-calling loop. The model emits one block, the
+worker runs the tool and feeds the result back, and the loop repeats until the
+model answers in plain text or `max_tool_steps` is reached:
+
+```text
+<tool_call>{"name": "web_search", "arguments": {"query": "rectified flow"}}</tool_call>
+<tool_result>web_search (ok): Rectified flow ... https://example.com/flow</tool_result>
+```
+
+Ask for it per request, and read back what it did:
+
+```json
+{"op": "chat", "params": {"prompt": "what shipped in torch 2.13?", "tools": ["web"]}}
+```
+
+```json
+{"ok": true, "result": {"content": "...", "tools": {"used": ["web_search"], "stopped": "answered",
+ "steps": [{"name": "web_search", "arguments": {"query": "torch 2.13 release notes"}, "...": "..."}]}}}
+```
+
+The `search` and `fetch` ops call the tools directly when a caller wants results
+rather than prose. From Python:
+
+```python
+from model.tools import build_registry, run_tool_loop
+
+registry = build_registry("web")
+reply, trace = run_tool_loop(lambda p: gen.generate_text(p), registry, "who maintains ruff?")
+print(trace.to_dict()["used"])   # ['web_search']
+```
+
+There is no API key and no new dependency: the search endpoints are keyless and
+the client is `urllib` plus `html.parser`. Requests are capped by timeout and by
+bytes, only `http` and `https` URLs are fetched, and a host that resolves to a
+private, loopback, link-local, or reserved address is refused - so a page the
+model chose cannot be used to reach the machine's own network. Being offline is
+a supported state: the tool returns a failed result and the model answers
+without it.
+
+The backend forwards the switch. Set `MODEL_TOOLS=web` in `backend/.env` to
+start the worker with tools registered, and send `settings.tools: ["web"]` with
+a chat message to use them for that turn. Without either, nothing changes.
+
+## Command line access
+
+A model that can list a directory, read a file, and run the test suite is a
+different tool from one that can only write about doing those things. `--tools cli`
+gives it a shell, and a policy in front of that shell:
+
+```bash
+python -m model.serve --model model.pt --tokenizer tokenizer.json \
+    --tools cli --cli-mode allow --cli-root .
+```
+
+| Tool | What it does |
+| --- | --- |
+| `shell` | Runs one command inside the sandbox root and returns stdout, stderr, and the exit code. |
+| `read_file` | Reads a file, or a line range of it, without spawning anything. |
+| `list_dir` | Lists a directory without spawning anything. |
+
+Three modes, set with `--cli-mode`:
+
+- `off` (the default) - every command is refused, and without `--tools cli` the
+  tools are never registered at all.
+- `allow` - commands whose program is on the allowlist run unattended; anything
+  else goes to the approver, and is refused when there is none.
+- `ask` - every command goes to the approver first. The worker has no human on
+  the other end, so this mode is for embedding the tools in your own program:
+
+```python
+from model.tools import ShellPolicy, cli_tools
+
+policy = ShellPolicy(mode="ask", root=".", approve=lambda command, argv: input(f"{command}? ") == "y")
+tools = cli_tools(policy)
+```
+
+What the policy enforces, before anything is spawned:
+
+- **A deny list that applies in every mode**, including `allow`: recursive
+  deletes, filesystem and partition changes, raw device writes, privilege
+  escalation, host power changes, fork bombs, force pushes, and raw network
+  clients.
+- **A sandbox root.** Any path-shaped argument is resolved and refused if it
+  lands outside, so `cat ../../.env` never runs.
+- **No shell.** Commands are parsed and run with `shell=False`, and an unquoted
+  `;`, `|`, `&`, `<`, `>`, or `(` is refused rather than silently passed through
+  as text. A quoted one is fine: `python -c 'import time; time.sleep(1)'` is one
+  program with one argument.
+- **A scrubbed environment.** The child gets `PATH`, `HOME`, `LANG`, `LC_ALL`,
+  `TZ`, and `TERM`, and none of the parent's tokens.
+- **A timeout and an output cap.** Overrunning kills the whole process group, so
+  a killed command cannot leave children behind.
+
+Every command, its exit code, and its truncated output land in the tool trace
+that travels back with the reply, along with every refusal and its reason.
+
 ## build.py usage
 
 ```bash
@@ -482,6 +790,9 @@ python build.py --mode train --data-dir data
 
 # Export for serving
 python build.py --mode export
+
+# Evaluate a trained checkpoint on standard benchmarks
+python build.py --mode eval --benchmark-dir benchmarks
 
 # Full pipeline: build, train, export
 python build.py --mode all --size small
@@ -511,6 +822,11 @@ framerai/
 │   │   └── multimodal_projector.py
 │   ├── tokenizer/              # BPE tokenizer with special tokens
 │   ├── configs/                # Model configuration
+│   ├── tools/                  # Optional tools the model can call mid-turn
+│   │   ├── base.py             # Tool protocol, results, and the registry
+│   │   ├── loop.py             # Bounded tool-calling loop and its trace
+│   │   ├── web.py              # Internet search and page fetch
+│   │   └── cli.py              # Sandboxed shell and read-only file helpers
 │   ├── cognition/              # Optional mind: memory, curiosity, affect, sleep
 │   │   ├── mind.py             # The tick loop tying it together
 │   │   ├── memory.py           # Episodic, semantic, and working memory
@@ -565,6 +881,7 @@ with supertest and stub the model service, so no Python worker is needed.
 ## Documentation
 
 - [Guide](GUIDE.md) - full walkthrough of the model, backend, and website.
+- [Troubleshooting](TROUBLESHOOTING.md) - solutions for common CUDA, VRAM, and dependency issues.
 - [Contributing](CONTRIBUTING.md) - development setup, branching model, and pull request flow.
 - [Roadmap and TODOs](TODOS.md) - planned work and open tasks.
 - [Changelog](CHANGELOG.md) - notable changes per release.

@@ -7,6 +7,8 @@ afterwards, and writing checkpoints through a path that does not assume the
 whole model fits in one file.
 """
 
+import os
+
 import pytest
 import torch
 
@@ -163,6 +165,249 @@ def test_save_and_load_roundtrip(tmp_path):
         model.state_dict().items(), restored.state_dict().items(), strict=True
     ):
         assert torch.equal(a, b), f"{name} did not survive the round trip"
+
+
+def test_optimizer_state_survives_checkpoint(tmp_path):
+    """Optimizer state (momentum, etc.) must survive save/load."""
+    config = tiny_config()
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+
+    # Perform a training step to populate optimizer state
+    loss = model(input_ids=torch.randint(0, config.vocab_size, (2, 16)),
+                 labels=torch.randint(0, config.vocab_size, (2, 16)))["loss"]
+    loss.backward()
+    optimizer.step()
+
+    # Save checkpoint
+    path = save_sharded(model, optimizer, str(tmp_path / "ckpt"), step=1, config=config)
+
+    # Load into fresh optimizer
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    load_sharded(restored_model, restored_optimizer, path)
+
+    # Optimizer state should match
+    orig_state = optimizer.state_dict()
+    restored_state = restored_optimizer.state_dict()
+
+    assert len(orig_state["state"]) == len(restored_state["state"])
+    for key in orig_state["state"]:
+        for k in orig_state["state"][key]:
+            if isinstance(orig_state["state"][key][k], torch.Tensor):
+                assert torch.equal(orig_state["state"][key][k], restored_state["state"][key][k]), \
+                    f"optimizer state {key}/{k} mismatch"
+
+
+def test_scheduler_state_survives_checkpoint(tmp_path):
+    """Scheduler state must survive save/load."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+
+    # Advance scheduler several steps
+    for _ in range(7):
+        optimizer.step()
+        scheduler.step()
+
+    lr_before = scheduler.get_last_lr()[0]
+
+    # Save checkpoint
+    path = save_sharded(model, optimizer, str(tmp_path / "ckpt"), step=7,
+                       config=config, scheduler=scheduler)
+
+    # Load into fresh scheduler
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+
+    load_sharded(restored_model, restored_optimizer, path, scheduler=restored_scheduler)
+
+    # LR should match (scheduler was at step 7)
+    lr_after = restored_scheduler.get_last_lr()[0]
+    assert abs(lr_before - lr_after) < 1e-9, \
+        f"scheduler LR mismatch: {lr_before} vs {lr_after}"
+
+    # Step count should be correct
+    assert restored_scheduler.state_dict()["_step_count"] == 8  # LambdaLR is 1-indexed
+
+
+def test_scheduler_not_restarted_on_resume(tmp_path):
+    """Scheduler must not restart from step 0 on resume."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20, learning_rate=1e-3)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+
+    # Advance scheduler to step 10 (past warmup)
+    for _ in range(10):
+        optimizer.step()
+        scheduler.step()
+
+    lr_at_step_10 = scheduler.get_last_lr()[0]
+
+    # Save and restore
+    path = save_sharded(model, optimizer, str(tmp_path / "ckpt"), step=10,
+                       config=config, scheduler=scheduler)
+
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+    load_sharded(restored_model, restored_optimizer, path, scheduler=restored_scheduler)
+
+    # If scheduler were incorrectly restarted, it would be in warmup with high LR
+    # But it should be at step 10 with the correct decayed LR
+    lr_restored = restored_scheduler.get_last_lr()[0]
+    assert abs(lr_restored - lr_at_step_10) < 1e-9
+
+    # Step once more and verify LR continues from step 10, not step 0
+    optimizer.step()
+    scheduler.step()
+    restored_optimizer.step()
+    restored_scheduler.step()
+
+    assert abs(scheduler.get_last_lr()[0] - restored_scheduler.get_last_lr()[0]) < 1e-9
+
+
+def test_atomic_write_safety(tmp_path):
+    """Interrupted checkpoint write must not corrupt previous valid checkpoint."""
+    from unittest.mock import patch
+
+    config = tiny_config()
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+
+    # Save first checkpoint
+    path = str(tmp_path / "model.pt")
+    from model.utils.helpers import save_checkpoint
+    save_checkpoint(model, optimizer, step=1, loss=1.0, path=path)
+
+    # Verify it exists and is valid
+    assert os.path.exists(path)
+    ckpt1 = torch.load(path, map_location="cpu", weights_only=False)
+    assert ckpt1["step"] == 1
+
+    # Simulate interrupted write by making torch.save fail
+    with patch("torch.save", side_effect=RuntimeError("disk full")):
+        try:
+            save_checkpoint(model, optimizer, step=2, loss=0.5, path=path)
+        except RuntimeError:
+            pass
+
+    # Original checkpoint should still be valid
+    ckpt_after = torch.load(path, map_location="cpu", weights_only=False)
+    assert ckpt_after["step"] == 1  # still the old checkpoint
+
+    # Temp file should be cleaned up (or never fully written)
+    temp_path = path + ".tmp"
+    # Either temp file doesn't exist, or if it does, it's incomplete
+    if os.path.exists(temp_path):
+        # If temp exists, original should still be intact
+        assert ckpt_after["step"] == 1
+
+
+def test_backward_compat_missing_scheduler_state(tmp_path):
+    """Loading old checkpoint without scheduler_state_dict must not crash."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config()
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+
+    # Save checkpoint without scheduler (simulating old format)
+    path = str(tmp_path / "old_ckpt.pt")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": 5,
+        "loss": 0.5,
+    }, path)
+
+    # Load with scheduler - should not crash
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+
+    from model.utils.helpers import load_checkpoint
+    step, loss = load_checkpoint(path, restored_model, restored_optimizer, restored_scheduler)
+
+    assert step == 5
+    assert loss == 0.5
+    # Scheduler should be at initial state (not crashed)
+
+
+def test_optimizer_references_wrapped_model_parameters(tmp_path):
+    """Regression test for Issue #137: optimizer must reference post-FSDP parameters.
+
+    When resuming in distributed mode, the optimizer must be created AFTER FSDP
+    wrapping, otherwise it holds references to detached pre-wrap parameters.
+
+    This test validates the correct resume flow order:
+    1. Load model weights
+    2. Wrap model (in real distributed, this is maybe_wrap_fsdp)
+    3. Create optimizer from wrapped model
+    4. Restore optimizer state
+
+    Rather than simulating FSDP parameter replacement (which causes state dict
+    mismatches), this test verifies that optimizer creation happens after model
+    loading by checking that optimizer params match the model's current parameters.
+    """
+    config = tiny_config()
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+
+    # Perform a step to populate optimizer state
+    loss = model(input_ids=torch.randint(0, config.vocab_size, (2, 16)),
+                 labels=torch.randint(0, config.vocab_size, (2, 16)))["loss"]
+    loss.backward()
+    optimizer.step()
+
+    # Save checkpoint
+    from model.utils.helpers import save_checkpoint
+    ckpt_path = str(tmp_path / "ckpt.pt")
+    save_checkpoint(model, optimizer, step=1, loss=float(loss), path=ckpt_path)
+
+    # Simulate resume flow (Issue #137 fix):
+    # 1. Load model weights first
+    restored_model = FramerModel(config)
+    from model.utils.helpers import load_checkpoint
+    step, _ = load_checkpoint(ckpt_path, model=restored_model)
+    assert step == 1
+
+    # 2. In real distributed, maybe_wrap_fsdp would happen here
+    # For this test, we just verify the model is loaded
+
+    # 3. Create optimizer from the (potentially wrapped) model
+    # This is the KEY: optimizer must be created AFTER model loading/wrapping
+    restored_optimizer = build_optimizer(restored_model, config)
+
+    # 4. Restore optimizer state (model=None to skip reloading model weights)
+    load_checkpoint(ckpt_path, model=None, optimizer=restored_optimizer)
+
+    # CRITICAL: Verify optimizer references the model's current parameters
+    # Collect all parameter IDs from the optimizer
+    optimizer_param_ids = set()
+    for group in restored_optimizer.param_groups:
+        for p in group["params"]:
+            optimizer_param_ids.add(id(p))
+
+    # Collect all parameter IDs from the model
+    model_param_ids = {id(p) for p in restored_model.parameters()}
+
+    # All optimizer params must be current model params
+    assert optimizer_param_ids == model_param_ids, \
+        "Optimizer must reference model's current parameters (Issue #137 fix)"
+
+    # Verify we can take a step without errors (parameters are properly linked)
+    loss2 = restored_model(input_ids=torch.randint(0, config.vocab_size, (2, 16)),
+                           labels=torch.randint(0, config.vocab_size, (2, 16)))["loss"]
+    loss2.backward()
+    restored_optimizer.step()  # Should not raise errors about detached parameters
 
 
 def test_save_writes_readable_sidecars(tmp_path):

@@ -41,6 +41,8 @@ from model.training import (
     maybe_wrap_fsdp,
     train_language_model,
 )
+from model.training.optim import build_optimizer
+from model.training.schedule import build_scheduler
 from model.utils import (
     MULTIMODAL_TOWERS,
     apply_seed,
@@ -134,8 +136,17 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
     else:
         logger.warning(f"No local data in '{data_dir}'; training tokenizer on the built-in sample.")
         corpus = BUILTIN_SAMPLE_TEXTS
-    tokenizer.train(corpus, target_vocab_size=min(1000, config.vocab_size))
-    logger.info(f"Tokenizer vocabulary size: {config.vocab_size}")
+    tokenizer.train(corpus, target_vocab_size=config.vocab_size)
+    actual_vocab_size = tokenizer.first_merge_id + len(tokenizer.merges)
+    logger.info(f"Tokenizer vocabulary size: {actual_vocab_size}")
+
+    # Warn if actual vocabulary is smaller than configured target
+    if actual_vocab_size < config.vocab_size:
+        logger.warning(
+            f"Trained vocabulary size ({actual_vocab_size}) is smaller than configured "
+            f"target ({config.vocab_size}). This may indicate insufficient training corpus "
+            f"or the target size exceeds what can be learned from the available data."
+        )
 
     # Save
     os.makedirs(output_dir, exist_ok=True)
@@ -179,20 +190,34 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     model = FramerModel(config).to(device)
 
     start_step = 0
+
+    # When resuming, load model weights BEFORE FSDP wrapping
     if resume:
         logger.info(f"Resuming from {resume}")
-        start_step, prev_loss = load_checkpoint(resume, model)
-        logger.info(f"Resumed at step {start_step}")
+        start_step, prev_loss = load_checkpoint(resume, model=model)
+        logger.info(f"Loaded model weights from step {start_step} (loss: {prev_loss:.4f})")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
-            start_step, _ = load_checkpoint(init_path, model)
+            start_step, _ = load_checkpoint(init_path, model=model)
 
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
 
     # Shard the model across ranks when distributed (no-op single-device).
+    # This must happen BEFORE optimizer creation so optimizer sees wrapped parameters.
     model = maybe_wrap_fsdp(model, config, device)
+
+    # Create optimizer and scheduler from the (potentially wrapped) model
+    optimizer = None
+    scheduler = None
+    if resume:
+        # Now create optimizer/scheduler from wrapped model and restore their state
+        optimizer = build_optimizer(model, config)
+        scheduler = build_scheduler(optimizer, config)
+        # Restore optimizer/scheduler state (model already loaded above)
+        load_checkpoint(resume, model=None, optimizer=optimizer, scheduler=scheduler)
+        logger.info(f"Restored optimizer and scheduler state at step {start_step}")
 
     seq_len = min(config.max_seq_len, 1024)
 
@@ -220,6 +245,7 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     train_language_model(
         config, model, loader, device, output_dir,
         start_step=start_step, logger=logger,
+        optimizer=optimizer, scheduler=scheduler,
     )
 
     # Optional image/audio generation training (single-device, full multimodal).
@@ -253,7 +279,10 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                     break
                 input_ids = batch["input_ids"].to(device)
                 target = batch[key].to(device)
-                results = model(input_ids=input_ids, **{key: target})
+                kwargs = {key: target}
+                if key == "target_audio" and "target_waveform" in batch:
+                    kwargs["target_waveform"] = batch["target_waveform"].to(device)
+                results = model(input_ids=input_ids, **kwargs)
                 loss = results[f"{label}_loss"]
                 optimizer.zero_grad()
                 loss.backward()
@@ -262,6 +291,7 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                 steps += 1
                 if steps % 20 == 0:
                     logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}")
+
 
     _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.image_train_resolution), "target_images", "image")
     _run(AudioCaptionDataset(data_dir, tokenizer, config), "target_audio", "audio")
@@ -307,6 +337,38 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
     except ImportError:
         logger.info("  (install 'safetensors' to also export a .safetensors file)")
 
+    # Optional ONNX export.
+    try:
+        import onnx  # noqa: F401
+
+        onnx_path = os.path.join(export_dir, "framerai_model.onnx")
+        dummy_ids = torch.zeros((1, 8), dtype=torch.long)
+
+        class _ONNXWrapper(nn.Module):
+            def __init__(self, m):
+                super().__init__()
+                self.m = m
+
+            def forward(self, input_ids):
+                return self.m.forward_text(input_ids)
+
+        torch.onnx.export(
+            _ONNXWrapper(model),
+            (dummy_ids,),
+            onnx_path,
+            input_names=["input_ids"],
+            output_names=["logits"],
+            dynamic_axes={
+                "input_ids": {0: "batch", 1: "sequence"},
+                "logits": {0: "batch", 1: "sequence"},
+            },
+            opset_version=14,
+            dynamo=False,
+        )
+        logger.info(f"  ONNX: {onnx_path}")
+    except ImportError:
+        logger.info("  (install 'onnx' and 'onnxruntime' to also export an .onnx model)")
+
     # Copy tokenizer
     tokenizer_src = os.path.join(output_dir, "tokenizer")
     tokenizer_dst = os.path.join(export_dir, "tokenizer")
@@ -329,6 +391,92 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
     logger.info(f"Model exported to {export_dir}")
     logger.info(f"  Model: {export_path}")
     logger.info(f"  Parameters: {count_parameters(model):,}")
+
+
+def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benchmarks",
+               eval_output: str = None, seq_len: int = 128, batch_size: int = 4,
+               code_limit: int = None):
+    """Run standard benchmarks on a trained checkpoint and report results.
+
+    Loads the final or best checkpoint, runs text and code benchmarks, and
+    reports results both to stdout and optionally to a JSON file. Missing
+    benchmark data is reported as skipped rather than producing fake results.
+    """
+    device = get_device(config.device)
+    logger.info(f"Running evaluation on {device}")
+    logger.info(f"Config: {config.preset or 'custom'} | seed={config.seed}")
+
+    # Load checkpoint
+    final_path = os.path.join(output_dir, "model_final.pt")
+    init_path = os.path.join(output_dir, "model_init.pt")
+    ckpt_path = final_path if os.path.exists(final_path) else init_path
+
+    if not os.path.exists(ckpt_path):
+        logger.error(f"No checkpoint found at {ckpt_path}. Run build or train first.")
+        sys.exit(1)
+
+    logger.info(f"Loading checkpoint: {ckpt_path}")
+    model = FramerModel(config).to(device)
+    load_checkpoint(ckpt_path, model)
+    model.eval()
+
+    tokenizer_path = os.path.join(output_dir, "tokenizer")
+    if not os.path.exists(tokenizer_path):
+        logger.error(f"No tokenizer found at {tokenizer_path}. Run build first.")
+        sys.exit(1)
+
+    tokenizer = FramerTokenizer.load(tokenizer_path)
+
+    # Build generator for code evaluation
+    from model.generate import FramerGenerator
+    generator = FramerGenerator(model, tokenizer, str(device))
+
+    # Register benchmark suites
+    from model.eval import EvalHarness
+    from model.eval.benchmarks import evaluate_code_benchmark, evaluate_text_benchmark
+
+    harness = EvalHarness(model, str(device))
+
+    @harness.suite("wikitext-2")
+    def _wikitext(model, device, **_):
+        text_path = os.path.join(benchmark_dir, "wikitext-2", "test.txt")
+        result = evaluate_text_benchmark(
+            model, tokenizer, text_path,
+            device=device, seq_len=seq_len, batch_size=batch_size,
+        )
+        # Flatten metrics and add sample count
+        return {**result.metrics, "samples": result.samples}
+
+    @harness.suite("humaneval")
+    def _humaneval(model, device, **_):
+        code_path = os.path.join(benchmark_dir, "humaneval", "HumanEval.jsonl")
+        result = evaluate_code_benchmark(
+            generator, code_path, seed=config.seed, limit=code_limit,
+        )
+        # Flatten metrics and add sample count
+        return {**result.metrics, "samples": result.samples}
+
+    # Run evaluation
+    logger.info("Running benchmarks...")
+    report = harness.run()
+
+    # Print summary
+    logger.info("=" * 60)
+    logger.info("Evaluation Results")
+    logger.info("=" * 60)
+    print(report.summary())
+
+    # Optionally write JSON
+    if eval_output:
+        os.makedirs(os.path.dirname(eval_output) or ".", exist_ok=True)
+        with open(eval_output, "w") as f:
+            f.write(report.to_json())
+        logger.info(f"Results written to {eval_output}")
+
+    # Exit with error if all suites were skipped
+    if report.metrics == {}:
+        logger.error("All benchmark suites were skipped. Check benchmark data paths.")
+        sys.exit(1)
 
 
 def print_estimate(config: FramerConfig):
@@ -366,7 +514,7 @@ def print_estimate(config: FramerConfig):
 def _make_parser() -> argparse.ArgumentParser:
     """Return the argument parser. Extracted so tests can invoke it directly."""
     parser = argparse.ArgumentParser(description="FramerAI Model Builder")
-    parser.add_argument("--mode", choices=["build", "train", "export", "all"], default="build", help="Operation mode")
+    parser.add_argument("--mode", choices=["build", "train", "export", "eval", "all"], default="build", help="Operation mode")
     parser.add_argument("--output-dir", default="checkpoints", help="Output directory")
     parser.add_argument("--export-dir", default=None, help="Export directory")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
@@ -387,6 +535,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accum", type=int, default=None,
                         help="Gradient accumulation steps (effective batch = batch-size × grad-accum)")
     parser.add_argument("--device", type=str, default=None, help="Device (auto, cpu, cuda, mps)")
+    parser.add_argument("--tokenizer-vocab-size", type=int, default=None,
+                        help="Override tokenizer vocabulary size for smoke/development runs (e.g., 1000)")
 
     # Size presets (named registry, scaling from ~15M to 1T-MoE)
     parser.add_argument("--preset", default=None,
@@ -414,6 +564,18 @@ def _make_parser() -> argparse.ArgumentParser:
     # Context extension
     parser.add_argument("--rope-scaling", type=float, default=None,
                         help="RoPE scaling factor for extended context (e.g., 8.0 for 8x)")
+
+    # Evaluation
+    parser.add_argument("--benchmark-dir", default="benchmarks",
+                        help="Directory containing benchmark data (wikitext-2/, humaneval/)")
+    parser.add_argument("--eval-output", default=None,
+                        help="Write evaluation results to JSON file")
+    parser.add_argument("--eval-seq-len", type=int, default=128,
+                        help="Sequence length for text benchmarks")
+    parser.add_argument("--eval-batch-size", type=int, default=4,
+                        help="Batch size for text benchmarks")
+    parser.add_argument("--eval-code-limit", type=int, default=None,
+                        help="Limit number of HumanEval problems (for fast smoke tests)")
 
     return parser
 
@@ -457,6 +619,8 @@ def _build_config_from_args(args: argparse.Namespace) -> FramerConfig:
         config.rope_scaling_factor = args.rope_scaling
     if args.seed is not None:
         config.seed = args.seed
+    if args.tokenizer_vocab_size is not None:
+        config.vocab_size = args.tokenizer_vocab_size
 
     config.validate()
     return config
@@ -499,6 +663,16 @@ def main():
 
     if args.mode in ("export", "all"):
         export_model(config, args.output_dir, args.export_dir)
+
+    if args.mode == "eval":
+        eval_model(
+            config, args.output_dir,
+            benchmark_dir=args.benchmark_dir,
+            eval_output=args.eval_output,
+            seq_len=args.eval_seq_len,
+            batch_size=args.eval_batch_size,
+            code_limit=args.eval_code_limit,
+        )
 
     logger.info("Done!")
 

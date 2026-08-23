@@ -272,21 +272,61 @@ def estimate_params(config, strict: bool = False) -> dict:
     }
 
 
-def save_checkpoint(model: nn.Module, optimizer, step: int, loss: float, path: str):
-    """Save a training checkpoint."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save({
+def save_checkpoint(model: nn.Module, optimizer, step: int, loss: float, path: str, scheduler=None):
+    """Save a training checkpoint with atomic write safety.
+
+    Writes to a temporary file first, then atomically renames it to the final
+    path. If the write is interrupted, the previous valid checkpoint remains
+    usable.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
         "loss": loss,
-    }, path)
+    }
+
+    if scheduler is not None:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+
+    # Atomic write: write to temp file, then rename
+    temp_path = path + ".tmp"
+    torch.save(checkpoint, temp_path)
+
+    # os.replace is atomic on both Unix and Windows
+    os.replace(temp_path, path)
 
 
-def load_checkpoint(path: str, model: nn.Module, optimizer=None):
-    """Load a training checkpoint."""
+def load_checkpoint(path: str, model: nn.Module = None, optimizer=None, scheduler=None):
+    """Load a training checkpoint.
+
+    Args:
+        path: Checkpoint file path
+        model: Optional model to load state into. If None, model state is not loaded.
+        optimizer: Optional optimizer to restore state into
+        scheduler: Optional scheduler to restore state into
+
+    Returns:
+        Tuple of (step, loss) and the loaded checkpoint dict
+
+    This allows loading model weights separately from optimizer/scheduler state,
+    which is needed for distributed resume where FSDP wrapping happens between
+    model load and optimizer creation.
+
+    Backward compatible: older checkpoints without scheduler_state_dict are
+    supported (scheduler will not be restored, but loading won't fail).
+    """
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    if optimizer and "optimizer_state_dict" in checkpoint:
+
+    if model is not None:
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
     return checkpoint.get("step", 0), checkpoint.get("loss", float("inf"))

@@ -342,9 +342,19 @@ class FramerModel(nn.Module):
         self._require_multimodal()
         return self.video_gen(video, context)
 
-    def forward_audio_gen(self, target_audio: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
+    def forward_audio_gen(
+        self,
+        target_audio: torch.Tensor,
+        context: torch.Tensor = None,
+        target_waveform: torch.Tensor = None,
+    ) -> torch.Tensor:
         """Training forward for audio generation (returns loss)."""
         self._require_multimodal()
+        if target_waveform is not None:
+            try:
+                return self.audio_gen(target_audio, context, target_waveform=target_waveform)
+            except TypeError:
+                pass
         return self.audio_gen(target_audio, context)
 
     def forward(
@@ -356,6 +366,7 @@ class FramerModel(nn.Module):
         target_images: torch.Tensor = None,
         target_video: torch.Tensor = None,
         target_audio: torch.Tensor = None,
+        target_waveform: torch.Tensor = None,
         labels: torch.Tensor = None,
     ) -> dict:
         """Unified forward pass. Returns per-modality losses for present inputs."""
@@ -413,7 +424,10 @@ class FramerModel(nn.Module):
 
         # Audio generation
         if target_audio is not None:
-            results["audio_loss"] = self.forward_audio_gen(target_audio, text_context)
+            results["audio_loss"] = self.forward_audio_gen(
+                target_audio, text_context, target_waveform=target_waveform
+            )
+
 
         # Total loss
         total_loss = sum(v for k, v in results.items() if k.endswith("_loss"))
