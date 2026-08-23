@@ -10,6 +10,7 @@ export default function Sidebar({
   onNew,
   onSelect,
   onDelete,
+  onClearAll,
   onOpenSettings,
   onFocusChat,
   onFocusChatSettings,
@@ -20,6 +21,15 @@ export default function Sidebar({
   const newChatBtnRef = useRef(null);
   const toggleBtnRef = useRef(null);
   const footerSettingsBtnRef = useRef(null);
+
+  const handleClearAll = (e) => {
+    e?.stopPropagation();
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      const confirmed = window.confirm("Are you sure you want to clear all conversation history?");
+      if (!confirmed) return;
+    }
+    onClearAll?.();
+  };
 
   // Expose focus fns to App
   useEffect(() => {
@@ -222,29 +232,41 @@ export default function Sidebar({
         <div className="model-info">
           <div className="model-badge">FramerAI v1.0</div>
         </div>
-        <button
-          className="icon-btn"
-          ref={footerSettingsBtnRef}
-          onClick={onOpenSettings}
-          aria-label="Generation settings"
-          title="Generation settings"
-          onKeyDown={(e) => {
-            if (e.key === "ArrowUp") {
-              e.preventDefault();
-              const items = getItems();
-              if (items.length > 0) {
-                items[items.length - 1].focus();
-              } else {
-                newChatBtnRef.current?.focus();
+        <div className="sidebar-footer-actions" style={{ display: "flex", gap: "4px" }}>
+          {conversations.length > 0 && (
+            <button
+              className="icon-btn clear-history-btn"
+              onClick={handleClearAll}
+              aria-label="Clear all conversations"
+              title="Clear all conversations"
+            >
+              <Trash2 size={18} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            className="icon-btn"
+            ref={footerSettingsBtnRef}
+            onClick={onOpenSettings}
+            aria-label="Generation settings"
+            title="Generation settings"
+            onKeyDown={(e) => {
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                const items = getItems();
+                if (items.length > 0) {
+                  items[items.length - 1].focus();
+                } else {
+                  newChatBtnRef.current?.focus();
+                }
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                onFocusChatSettings?.();
               }
-            } else if (e.key === "ArrowRight") {
-              e.preventDefault();
-              onFocusChatSettings?.();
-            }
-          }}
-        >
-          <Settings size={18} aria-hidden="true" />
-        </button>
+            }}
+          >
+            <Settings size={18} aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </aside>
   );
