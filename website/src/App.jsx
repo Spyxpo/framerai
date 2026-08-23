@@ -29,6 +29,7 @@ export default function App() {
     createConversation,
     selectConversation,
     deleteConversation,
+    clearAllConversations,
     sendMessage,
     dismissError,
   } = useChat(settings);
@@ -93,6 +94,7 @@ export default function App() {
         onNew={createConversation}
         onSelect={handleSelectConversation}
         onDelete={handleDeleteConversation}
+        onClearAll={clearAllConversations}
         onOpenSettings={() => setSettingsOpen(true)}
         onFocusChat={focusChatArea}
         onFocusChatSettings={focusChatSettings}
