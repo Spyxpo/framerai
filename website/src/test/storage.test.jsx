@@ -165,18 +165,21 @@ describe("Storage utility — eviction & sanitization", () => {
   });
 
   it("7. storage size exceeded -> oldest conversations evicted", () => {
-    const conv1 = { id: "c1", title: "Old Chat", messages: [{ id: "m1", role: "user", content: "A".repeat(500) }] };
-    const conv2 = { id: "c2", title: "Medium Chat", messages: [{ id: "m2", role: "user", content: "B".repeat(500) }] };
-    const conv3 = { id: "c3", title: "New Chat", messages: [{ id: "m3", role: "user", content: "C".repeat(500) }] };
+    const conv3 = { id: "c3", title: "Newest Chat", updatedAt: "2026-08-23T12:00:00.000Z", messages: [{ id: "m3", role: "user", content: "C".repeat(500) }] };
+    const conv2 = { id: "c2", title: "Medium Chat", updatedAt: "2026-08-23T11:00:00.000Z", messages: [{ id: "m2", role: "user", content: "B".repeat(500) }] };
+    const conv1 = { id: "c1", title: "Oldest Chat", updatedAt: "2026-08-23T10:00:00.000Z", messages: [{ id: "m1", role: "user", content: "A".repeat(500) }] };
 
-    const conversations = [conv1, conv2, conv3];
+    // Newest-first ordering in array: [conv3, conv2, conv1]
+    const conversations = [conv3, conv2, conv1];
 
     // Set maxBytes small enough to force eviction of oldest conversation (c1)
-    const { conversations: evicted } = evictOldestConversations(conversations, "c3", 1200);
+    const { conversations: evicted } = evictOldestConversations(conversations, "c3", 1500);
 
     // Oldest non-active conversation (c1) should be evicted
     expect(evicted.some((c) => c.id === "c1")).toBe(false);
+    // Newest conversation (c3 - active) and middle conversation (c2) should be preserved
     expect(evicted.some((c) => c.id === "c3")).toBe(true);
+    expect(evicted.some((c) => c.id === "c2")).toBe(true);
   });
 
   it("sanitizes transient fields from messages before saving", () => {
@@ -312,6 +315,34 @@ describe("useChat integration with localStorage", () => {
     expect(result.current.activeConversation).toBeDefined();
 
     setItemSpy.mockRestore();
+  });
+
+  it("reload does not change updatedAt timestamp", async () => {
+    const initialUpdatedAt = "2026-08-23T10:00:00.000Z";
+    const initialPayload = {
+      version: STORAGE_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          title: "Persisted Chat",
+          updatedAt: initialUpdatedAt,
+          messages: [{ id: "m1", role: "user", content: "Existing message" }],
+        },
+      ],
+      activeConversationId: "c1",
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(initialPayload));
+
+    let result;
+    await act(async () => {
+      const rendered = renderHook(() => useChat({}));
+      result = rendered.result;
+    });
+
+    expect(result.current.conversations[0].updatedAt).toBe(initialUpdatedAt);
+
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    expect(saved.conversations[0].updatedAt).toBe(initialUpdatedAt);
   });
 });
 

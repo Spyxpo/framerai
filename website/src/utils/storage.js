@@ -115,16 +115,29 @@ export function evictOldestConversations(conversations, activeId, maxBytes = DEF
     }
 
     if (list.length === 1) {
-      // If even a single conversation exceeds maxBytes, return empty list or trimmed conv
+      // If even a single conversation exceeds maxBytes, return empty list
       return { conversations: [], activeConversationId: null };
     }
 
-    // Evict oldest conversation (looking for one that is not active first)
-    const oldestNonActiveIdx = list.findIndex((c) => c.id !== activeId);
-    if (oldestNonActiveIdx !== -1) {
-      list.splice(oldestNonActiveIdx, 1);
+    // Find the oldest non-active conversation by updatedAt timestamp
+    let oldestIdx = -1;
+    let oldestTime = Infinity;
+
+    for (let i = 0; i < list.length; i++) {
+      const conv = list[i];
+      if (conv.id === activeId) continue; // Keep active conversation protected
+
+      const time = conv.updatedAt ? new Date(conv.updatedAt).getTime() : 0;
+      if (time < oldestTime) {
+        oldestTime = time;
+        oldestIdx = i;
+      }
+    }
+
+    if (oldestIdx !== -1) {
+      list.splice(oldestIdx, 1);
     } else {
-      // If all remaining are active (e.g. only 1 left), remove oldest
+      // If all remaining are active (e.g. only active conversation left), remove the last
       list.pop();
     }
   }

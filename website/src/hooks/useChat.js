@@ -8,18 +8,10 @@ import {
 } from "../utils/storage";
 
 export function useChat(settings) {
-  const [conversations, setConversations] = useState(() => {
-    const stored = loadConversationsFromStorage();
-    return stored.conversations;
-  });
-  const [activeConversation, setActiveConversation] = useState(() => {
-    const stored = loadConversationsFromStorage();
-    return stored.activeConversationId;
-  });
-  const [messages, setMessages] = useState(() => {
-    const stored = loadConversationsFromStorage();
-    return stored.messages;
-  });
+  const [initialStorage] = useState(loadConversationsFromStorage);
+  const [conversations, setConversations] = useState(initialStorage.conversations);
+  const [activeConversation, setActiveConversation] = useState(initialStorage.activeConversationId);
+  const [messages, setMessages] = useState(initialStorage.messages);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(true);
