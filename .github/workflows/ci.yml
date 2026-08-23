@@ -175,6 +175,10 @@ jobs:
         working-directory: backend
         run: npm test
 
+      - name: Check OpenAPI schema consistency
+        working-directory: backend
+        run: npm run openapi:check
+
   website:
     name: Website (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
