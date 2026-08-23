@@ -137,7 +137,8 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
         logger.warning(f"No local data in '{data_dir}'; training tokenizer on the built-in sample.")
         corpus = BUILTIN_SAMPLE_TEXTS
     tokenizer.train(corpus, target_vocab_size=config.vocab_size)
-    logger.info(f"Tokenizer vocabulary size: {config.vocab_size}")
+    actual_vocab_size = tokenizer.first_merge_id + len(tokenizer.merges)
+    logger.info(f"Tokenizer vocabulary size: {actual_vocab_size}")
 
     # Save
     os.makedirs(output_dir, exist_ok=True)
@@ -526,6 +527,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accum", type=int, default=None,
                         help="Gradient accumulation steps (effective batch = batch-size × grad-accum)")
     parser.add_argument("--device", type=str, default=None, help="Device (auto, cpu, cuda, mps)")
+    parser.add_argument("--tokenizer-vocab-size", type=int, default=None,
+                        help="Override tokenizer vocabulary size for smoke/development runs (e.g., 1000)")
 
     # Size presets (named registry, scaling from ~15M to 1T-MoE)
     parser.add_argument("--preset", default=None,
@@ -608,6 +611,8 @@ def _build_config_from_args(args: argparse.Namespace) -> FramerConfig:
         config.rope_scaling_factor = args.rope_scaling
     if args.seed is not None:
         config.seed = args.seed
+    if args.tokenizer_vocab_size is not None:
+        config.vocab_size = args.tokenizer_vocab_size
 
     config.validate()
     return config
