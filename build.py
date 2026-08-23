@@ -140,6 +140,14 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
     actual_vocab_size = tokenizer.first_merge_id + len(tokenizer.merges)
     logger.info(f"Tokenizer vocabulary size: {actual_vocab_size}")
 
+    # Warn if actual vocabulary is smaller than configured target
+    if actual_vocab_size < config.vocab_size:
+        logger.warning(
+            f"Trained vocabulary size ({actual_vocab_size}) is smaller than configured "
+            f"target ({config.vocab_size}). This may indicate insufficient training corpus "
+            f"or the target size exceeds what can be learned from the available data."
+        )
+
     # Save
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = os.path.join(output_dir, "model_init.pt")
