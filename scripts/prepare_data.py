@@ -37,7 +37,7 @@ def main():
         print(f"[warn] tokenizer '{args.tokenizer}' not found; training a fresh one on the corpus.")
         tokenizer = FramerTokenizer(args.vocab_size)
         corpus = list(iter_text_records(args.data_dir))
-        tokenizer.train(corpus, target_vocab_size=min(1000, args.vocab_size))
+        tokenizer.train(corpus, target_vocab_size=args.vocab_size)
 
     meta = prepare_shards(args.data_dir, tokenizer, args.out_dir, shard_tokens=args.shard_tokens)
     print(f"Wrote {len(meta['shards'])} shard(s), {meta['total_tokens']:,} tokens "
