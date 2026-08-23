@@ -363,3 +363,55 @@ def test_tokenizer_vocab_size_flag_affects_actual_build(tmp_path):
     assert logged_size == actual_size, (
         f"Logged size {logged_size} != actual tokenizer size {actual_size}"
     )
+
+
+def test_vocabulary_size_warning_logic(tmp_path):
+    """Test vocabulary size warning is emitted when actual < configured."""
+    import logging
+    import re
+
+    import build as build_module
+    from model.configs import FramerConfig
+
+    log_messages: list[str] = []
+
+    class _LogCapture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_messages.append(record.getMessage())
+
+    logger = logging.getLogger("framerai")
+    original_level = logger.level
+    handler = _LogCapture()
+    handler.setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+
+    try:
+        # Test case 1: Large target should trigger warning
+        config = FramerConfig.from_preset("framer-tiny")
+        config.vocab_size = 3000  # Larger than achievable with built-in corpus
+        build_module.build_model(config, str(tmp_path / "large_vocab"))
+
+        warning_lines = [msg for msg in log_messages if "smaller than configured" in msg]
+        assert len(warning_lines) == 1, f"Expected exactly one warning, got: {warning_lines}"
+
+        warning = warning_lines[0]
+        assert "3000" in warning, f"Warning should contain configured size: {warning!r}"
+
+        # Extract actual size to verify it's reasonable and smaller than target
+        match = re.search(r"Trained vocabulary size \((\d+)\)", warning)
+        assert match, f"Could not parse actual vocab size from: {warning!r}"
+        actual_size = int(match.group(1))
+        assert actual_size < 3000, f"Actual {actual_size} should be < configured 3000"
+
+        # Test case 2: Small target should not trigger warning
+        log_messages.clear()
+        config.vocab_size = 400  # Achievable with built-in corpus
+        build_module.build_model(config, str(tmp_path / "small_vocab"))
+
+        warning_lines = [msg for msg in log_messages if "smaller than configured" in msg]
+        assert len(warning_lines) == 0, f"Unexpected warning for small vocab: {warning_lines}"
+
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
