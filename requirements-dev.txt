@@ -9,5 +9,5 @@ ruff>=0.14.0
 # safetensors and onnx are optional runtime extras, but export paths are covered by
 # CI, so they are not optional here.
 safetensors>=0.7.0
-onnx>=1.16.0
+onnx>=1.22.0
 onnxruntime>=1.18.0
