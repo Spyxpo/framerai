@@ -214,6 +214,17 @@ class FramerConfig:
     def num_patches(self) -> int:
         return (self.image_size // self.patch_size) ** 2
 
+    @property
+    def context_extension(self) -> float:
+        """How far ``max_seq_len`` stretches past the context RoPE was built for.
+
+        1.0 when no extension is configured. This is the factor
+        ``rope_scaling_factor`` has to cover for a declared long context to be
+        real rather than a larger number in the config.
+        """
+        original = self.rope_original_max_seq_len or self.max_seq_len
+        return self.max_seq_len / original if original else 1.0
+
     def validate(self) -> "FramerConfig":
         """Check the shape invariants the modules assume, and fail early if not.
 
@@ -244,6 +255,31 @@ class FramerConfig:
                 f"rope_high_freq_factor ({self.rope_high_freq_factor}) must exceed "
                 f"rope_low_freq_factor ({self.rope_low_freq_factor})"
             )
+
+        # A context longer than the one RoPE was built for is only real if a
+        # scaling strategy covers the whole stretch. Both halves of this used to
+        # pass silently: "none" past the original length applies no extension at
+        # all, and a scaling factor short of the ratio extends part of the way
+        # and leaves the rest of the declared window unreachable.
+        if self.rope_original_max_seq_len:
+            if self.rope_original_max_seq_len > self.max_seq_len:
+                problems.append(
+                    f"rope_original_max_seq_len ({self.rope_original_max_seq_len}) exceeds "
+                    f"max_seq_len ({self.max_seq_len})"
+                )
+            elif self.context_extension > 1.0 and self.rope_scaling_type == "none":
+                problems.append(
+                    f"max_seq_len ({self.max_seq_len}) extends rope_original_max_seq_len "
+                    f"({self.rope_original_max_seq_len}) by {self.context_extension:.0f}x "
+                    f"but rope_scaling_type is 'none'"
+                )
+            elif self.rope_scaling_factor < self.context_extension:
+                problems.append(
+                    f"rope_scaling_factor ({self.rope_scaling_factor}) is below the "
+                    f"{self.context_extension:.0f}x extension max_seq_len ({self.max_seq_len}) "
+                    f"asks for over rope_original_max_seq_len "
+                    f"({self.rope_original_max_seq_len})"
+                )
 
         if self.use_moe:
             if self.n_experts < 1:
