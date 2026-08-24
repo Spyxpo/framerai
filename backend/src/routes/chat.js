@@ -105,4 +105,7 @@ router.post(
   })
 );
 
+router.MESSAGE_TYPES = MESSAGE_TYPES;
+router.MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH;
+
 module.exports = router;
