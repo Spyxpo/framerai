@@ -5,6 +5,11 @@ scale the classic decoder; MoE presets add sparse experts so *total* parameters
 grow into the hundreds-of-billions / trillion range while *active* (per-token)
 parameters stay tractable.
 
+The two trillion-scale presets carry a 1,048,576-token context, extended with
+yarn RoPE scaling from the length the backbone is pretrained at. Context costs no
+parameters here (RoPE stores no per-position weights) but it does cost KV cache,
+which ``model.utils.helpers.estimate_params`` reports per sequence.
+
 The four largest MoE presets scale every modality, not just the text core: the
 vision and audio encoders and the image / video / audio diffusion decoders grow
 with the backbone, so ``framer-2t-a49b`` is two trillion parameters of text,
@@ -107,7 +112,13 @@ _MOE = {
         vocoder_d_model=768, vocoder_n_layers=8, use_speaker_conditioning=True,
     ),
     "framer-1t-a32b": dict(  # ~1.0T total across all modalities / ~32B active (cluster-only)
-        d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672, max_seq_len=8192,
+        d_model=8192, n_layers=64, n_heads=64, n_kv_heads=8, d_ff=28672,
+        # 1M-token context, reached by yarn from the 8192 the backbone is
+        # pretrained at. RoPE holds no per-position parameters, so the longer
+        # window costs nothing in weights; it costs KV cache, which `--estimate`
+        # now reports.
+        max_seq_len=1048576, rope_scaling_type="yarn", rope_scaling_factor=128.0,
+        rope_original_max_seq_len=8192,
         use_moe=True, n_experts=256, n_experts_per_tok=4, n_shared_experts=1,
         expert_d_ff=2560, moe_layer_freq=1, first_dense_layers=4, use_qk_norm=True,
         image_size=448, patch_size=14,
@@ -133,7 +144,12 @@ _MOE = {
         # expert-parallel meshes. Fine-grained experts (384 narrow ones rather
         # than 256 wide ones) buy sparsity: total scales with the expert count
         # while active scales with top-k.
-        d_model=10240, n_layers=84, n_heads=80, n_kv_heads=8, d_ff=32768, max_seq_len=16384,
+        d_model=10240, n_layers=84, n_heads=80, n_kv_heads=8, d_ff=32768,
+        # 1M-token context, reached by yarn from the 16384 the backbone is
+        # pretrained at. Prefill at that length has to be chunked through the KV
+        # cache; `FramerGenerator` does this by default.
+        max_seq_len=1048576, rope_scaling_type="yarn", rope_scaling_factor=64.0,
+        rope_original_max_seq_len=16384,
         use_moe=True, n_experts=384, n_experts_per_tok=4, n_shared_experts=1,
         expert_d_ff=2048, moe_layer_freq=1, first_dense_layers=4, use_qk_norm=True,
         image_size=448, patch_size=14,
