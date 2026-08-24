@@ -10,6 +10,9 @@
 const chatRoutes = require("./routes/chat");
 const generateRoutes = require("./routes/generate");
 const { LIMITS } = require("./generationSettings");
+const config = require("./config");
+
+const MAX_FILE_SIZE_MB = Math.floor(config.maxFileSize / (1024 * 1024));
 
 function generateOpenApiSpec() {
   const rateLimitHeaderRefs = {
@@ -446,7 +449,7 @@ function generateOpenApiSpec() {
                     image: {
                       type: "string",
                       format: "binary",
-                      description: "Image file to analyze (image/*, max file size 50MB)",
+                      description: `Image file to analyze (image/*, max file size ${MAX_FILE_SIZE_MB}MB)`,
                     },
                     prompt: {
                       type: "string",
@@ -496,7 +499,7 @@ function generateOpenApiSpec() {
                     audio: {
                       type: "string",
                       format: "binary",
-                      description: "Audio file to transcribe (audio/*, max file size 50MB)",
+                      description: `Audio file to transcribe (audio/*, max file size ${MAX_FILE_SIZE_MB}MB)`,
                     },
                     prompt: {
                       type: "string",
@@ -657,7 +660,7 @@ function generateOpenApiSpec() {
                 required: ["id", "placeholder"],
                 properties: {
                   id: { type: "string", format: "uuid" },
-                  url: { type: "string", nullable: true },
+                  url: { type: ["string", "null"] },
                   placeholder: { type: "boolean" },
                   message: { type: "string" },
                 },
@@ -676,7 +679,7 @@ function generateOpenApiSpec() {
               type: "object",
               required: ["frames", "placeholder"],
               properties: {
-                url: { type: "string", nullable: true },
+                url: { type: ["string", "null"] },
                 frames: { type: "integer" },
                 placeholder: { type: "boolean" },
                 message: { type: "string" },
@@ -695,7 +698,7 @@ function generateOpenApiSpec() {
               type: "object",
               required: ["placeholder"],
               properties: {
-                url: { type: "string", nullable: true },
+                url: { type: ["string", "null"] },
                 placeholder: { type: "boolean" },
                 message: { type: "string" },
               },

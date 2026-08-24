@@ -1206,8 +1206,10 @@
                   "format": "uuid"
                 },
                 "url": {
-                  "type": "string",
-                  "nullable": true
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "placeholder": {
                   "type": "boolean"
@@ -1248,8 +1250,10 @@
             ],
             "properties": {
               "url": {
-                "type": "string",
-                "nullable": true
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "frames": {
                 "type": "integer"
@@ -1291,8 +1295,10 @@
             ],
             "properties": {
               "url": {
-                "type": "string",
-                "nullable": true
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "placeholder": {
                 "type": "boolean"
