@@ -343,8 +343,11 @@ square images only and says so rather than producing something misshapen.
 
 ## API endpoints
 
+The REST API is fully documented via the OpenAPI 3.1 specification served at `/api/openapi.json` (committed schema file at [`backend/openapi.json`](backend/openapi.json)).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | `/api/openapi.json` | OpenAPI 3.1 specification schema |
 | GET | `/api/health` | Health check and capabilities |
 | POST | `/api/chat/conversations` | Create conversation |
 | GET | `/api/chat/conversations` | List conversations |
