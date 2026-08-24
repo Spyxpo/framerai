@@ -4,7 +4,7 @@
 
 pytest>=8.4.0
 pytest-cov>=7.0.0
-ruff>=0.14.0
+ruff>=0.16.4
 
 # safetensors and onnx are optional runtime extras, but export paths are covered by
 # CI, so they are not optional here.
