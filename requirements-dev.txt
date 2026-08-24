@@ -10,4 +10,4 @@ ruff>=0.14.0
 # CI, so they are not optional here.
 safetensors>=0.7.0
 onnx>=1.16.0
-onnxruntime>=1.18.0
+onnxruntime>=1.29.0
