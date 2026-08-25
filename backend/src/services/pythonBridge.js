@@ -24,6 +24,7 @@ const TOKENIZER_PATH = resolvePath(process.env.TOKENIZER_PATH, BACKEND_ROOT);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const MODEL_ENABLED = (process.env.MODEL_ENABLED || "true").toLowerCase() !== "false";
 const REQUEST_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS || 180000);
+const STARTUP_TIMEOUT_MS = Number(process.env.MODEL_STARTUP_TIMEOUT_MS || 60000);
 const WORKER_COUNT = Number(process.env.MODEL_WORKERS || 2);
 // Toolsets the worker may register, for example MODEL_TOOLS=web. Empty means
 // the worker starts with no tools at all, which is the default.
@@ -102,7 +103,7 @@ class Worker {
             resolved = true;
             // Clear safety timeout on success or failure
             if (this._safetyTimer) {
-              clearTimeout(this._safetyTimer);
+              _clearTimeout(this._safetyTimer);
               this._safetyTimer = null;
             }
             if (msg.ready) {
@@ -137,7 +138,7 @@ class Worker {
         this.child = null;
         // Clear safety timeout if still pending
         if (this._safetyTimer) {
-          clearTimeout(this._safetyTimer);
+          _clearTimeout(this._safetyTimer);
           this._safetyTimer = null;
         }
         // Reject current request if any
@@ -159,13 +160,15 @@ class Worker {
       });
 
       // Safety timeout - stored on instance so cleanup() can cancel it
-      this._safetyTimer = setTimeout(() => {
+      this._safetyTimer = _setTimeout(() => {
         if (!resolved) {
           resolved = true;
           this._safetyTimer = null;
+          console.warn(`[model:worker-${this.id}] startup timeout after ${STARTUP_TIMEOUT_MS}ms, cleaning up`);
+          this.cleanup();
           resolve(false);
         }
-      }, 60000);
+      }, STARTUP_TIMEOUT_MS);
     });
   }
 
@@ -210,7 +213,7 @@ class Worker {
 
   cleanup() {
     if (this._safetyTimer) {
-      clearTimeout(this._safetyTimer);
+      _clearTimeout(this._safetyTimer);
       this._safetyTimer = null;
     }
     if (this.child) {
