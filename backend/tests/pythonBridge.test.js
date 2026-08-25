@@ -314,30 +314,16 @@ describe("pythonBridge worker pool", () => {
   it("should spawn replacement worker after exit and use it for subsequent requests", async () => {
     bridge = require("../src/services/pythonBridge");
 
-    // Track startup timeout callbacks separately so they don't fire immediately
-    let startupTimeoutCallbacks = [];
-
-    // Use zero-delay backoff but preserve startup timeouts
+    // Zero-delay backoff, but leave the startup timeout pending so it does not
+    // fire and tear down the worker mid-test.
     const prev = bridge._setTimerImpl(
       (fn, ms) => {
-        // Startup timeouts use 60000ms (or configured value), backoff uses 500-8000ms
-        if (ms >= 10000) {
-          // This is a startup timeout - store it but don't fire immediately
-          startupTimeoutCallbacks.push(fn);
-          return { isStartupTimeout: true, fn };
-        } else {
-          // This is a backoff timer - fire immediately for zero-delay testing
-          fn();
-          return null;
-        }
+        // Startup timeouts use 60000ms (or the configured value); backoff is 500-8000ms.
+        if (ms >= 10000) return { startupTimeout: true };
+        fn();
+        return null;
       },
-      (id) => {
-        // Remove from startup timeout list if it's being cleared
-        if (id && id.isStartupTimeout) {
-          const idx = startupTimeoutCallbacks.indexOf(id.fn);
-          if (idx >= 0) startupTimeoutCallbacks.splice(idx, 1);
-        }
-      }
+      () => {}
     );
 
     const startPromise = bridge.start();
@@ -645,30 +631,16 @@ describe("pythonBridge worker pool", () => {
     process.env.MODEL_WORKERS = "1";
     bridge = require("../src/services/pythonBridge");
 
-    // Track startup timeout callbacks separately
-    let startupTimeoutCallbacks = [];
-
-    // Zero-delay backoff but preserve startup timeouts
+    // Zero-delay backoff, but leave the startup timeout pending so it does not
+    // fire and tear down the worker mid-test.
     const prev = bridge._setTimerImpl(
       (fn, ms) => {
-        // Startup timeouts use 60000ms (or configured value), backoff uses 500-8000ms
-        if (ms >= 10000) {
-          // This is a startup timeout - store it but don't fire immediately
-          startupTimeoutCallbacks.push(fn);
-          return { isStartupTimeout: true, fn };
-        } else {
-          // This is a backoff timer - fire immediately for zero-delay testing
-          fn();
-          return null;
-        }
+        // Startup timeouts use 60000ms (or the configured value); backoff is 500-8000ms.
+        if (ms >= 10000) return { startupTimeout: true };
+        fn();
+        return null;
       },
-      (id) => {
-        // Remove from startup timeout list if it's being cleared
-        if (id && id.isStartupTimeout) {
-          const idx = startupTimeoutCallbacks.indexOf(id.fn);
-          if (idx >= 0) startupTimeoutCallbacks.splice(idx, 1);
-        }
-      }
+      () => {}
     );
 
     const startPromise = bridge.start();
@@ -696,45 +668,48 @@ describe("pythonBridge worker pool", () => {
     bridge._setTimerImpl(prev.set, prev.clear);
     await new Promise((r) => setImmediate(r));
   });
-});
-  it("should demonstrate startup timeout cleanup behavior", async () => {
-    // This test verifies the fix for GitHub Issue #153:
-    // When startup timeout fires, cleanup() is called to kill child process
-    // This prevents orphaned Python processes from continuing to run
 
-    // Use short timeout for faster test
-    const originalTimeout = process.env.MODEL_STARTUP_TIMEOUT_MS;
+  it("should kill the worker child process when startup times out", async () => {
+    // Regression test for #153: a worker that never reports ready must be torn
+    // down, otherwise the Python process is orphaned and keeps holding memory.
     process.env.MODEL_STARTUP_TIMEOUT_MS = "25";
-
-    // Delete and reload module to pick up new timeout value
-    delete require.cache[require.resolve("../src/services/pythonBridge")];
     bridge = require("../src/services/pythonBridge");
 
-    try {
-      const startPromise = bridge.start();
+    const startPromise = bridge.start();
+    assert.strictEqual(spawnedProcesses.length, 2, "both workers should spawn");
 
-      // Don't simulate ready - let timeout fire
-      // Wait for timeout to occur
-      await new Promise((r) => setTimeout(r, 50));
+    // Never send a ready message, so the startup timeout is the only exit path.
+    const result = await startPromise;
 
-      const result = await startPromise;
-
-      assert.strictEqual(result, false, "start should return false after timeout");
-
-      // The key fix: processes should now be killed when timeout fires
-      // (Previously they would be left running as orphaned processes)
-      if (spawnedProcesses.length > 0) {
-        assert.strictEqual(spawnedProcesses[0].killed, true, "worker 0 should be killed by timeout cleanup");
-        if (spawnedProcesses.length > 1) {
-          assert.strictEqual(spawnedProcesses[1].killed, true, "worker 1 should be killed by timeout cleanup");
-        }
-      }
-    } finally {
-      // Restore original timeout or delete if it wasn't set
-      if (originalTimeout !== undefined) {
-        process.env.MODEL_STARTUP_TIMEOUT_MS = originalTimeout;
-      } else {
-        delete process.env.MODEL_STARTUP_TIMEOUT_MS;
-      }
-    }
+    assert.strictEqual(result, false, "start should return false after the timeout");
+    assert.strictEqual(spawnedProcesses[0].killed, true, "worker 0 should be killed by timeout cleanup");
+    assert.strictEqual(spawnedProcesses[1].killed, true, "worker 1 should be killed by timeout cleanup");
   });
+
+  it("should use MODEL_STARTUP_TIMEOUT_MS for the startup timeout", async () => {
+    process.env.MODEL_STARTUP_TIMEOUT_MS = "1234";
+    bridge = require("../src/services/pythonBridge");
+
+    const delays = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        delays.push(ms);
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+    await startPromise;
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    assert.ok(
+      delays.includes(1234),
+      `startup timeout should use the configured value, saw ${JSON.stringify(delays)}`
+    );
+  });
+});
