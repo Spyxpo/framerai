@@ -41,6 +41,7 @@ const MAX_RESTART_ATTEMPTS = 5;
 // Backoff delays in ms: 500, 1000, 2000, 4000, 8000 (capped at 8s)
 const RESTART_BACKOFF_BASE_MS = 500;
 const RESTART_BACKOFF_MAX_MS = 8000;
+const WORKER_STABILITY_MS = Number(process.env.MODEL_WORKER_STABILITY_MS || 30000);
 
 // Replaceable timer for testing
 let _setTimeout = (fn, ms) => setTimeout(fn, ms);
@@ -66,6 +67,7 @@ class Worker {
     this.pending = new Map();
     this.nextId = 1;
     this._safetyTimer = null;
+    this.onSuccess = null;
   }
 
   spawn() {
@@ -122,8 +124,12 @@ class Worker {
             this.pending.delete(msg.id);
             this.busy = false;
             this.currentRequest = null;
-            if (msg.ok) res(msg.result);
-            else reject(new Error(msg.error || "inference failed"));
+            if (msg.ok) {
+              if (this.onSuccess) this.onSuccess(this);
+              res(msg.result);
+            } else {
+              reject(new Error(msg.error || "inference failed"));
+            }
             // Notify pool that worker is available
             if (this.onAvailable) this.onAvailable(this);
           }
@@ -247,6 +253,27 @@ class WorkerPool {
     // Track consecutive restart attempts per worker slot (by id)
     this._restartCounts = new Map();
     this._restartTimers = new Map();
+    this._stabilityTimers = new Map();
+  }
+
+  markWorkerStable(workerId) {
+    this._restartCounts.delete(workerId);
+    if (this._stabilityTimers.has(workerId)) {
+      _clearTimeout(this._stabilityTimers.get(workerId));
+      this._stabilityTimers.delete(workerId);
+    }
+  }
+
+  scheduleStabilityTimer(workerId) {
+    if (this._stabilityTimers.has(workerId)) {
+      _clearTimeout(this._stabilityTimers.get(workerId));
+    }
+    const timer = _setTimeout(() => {
+      this._stabilityTimers.delete(workerId);
+      this.markWorkerStable(workerId);
+      console.log(`[model] worker ${workerId} considered stable after ${WORKER_STABILITY_MS}ms`);
+    }, WORKER_STABILITY_MS);
+    this._stabilityTimers.set(workerId, timer);
   }
 
   async start() {
@@ -260,6 +287,7 @@ class WorkerPool {
       const worker = new Worker(i);
       worker.onAvailable = () => this.dispatch();
       worker.onExit = (w) => this.handleWorkerExit(w);
+      worker.onSuccess = (w) => this.markWorkerStable(w.id);
       this.workers.push(worker);
       startPromises.push(worker.spawn());
     }
@@ -273,12 +301,24 @@ class WorkerPool {
       throw new Error("no workers available");
     }
 
+    for (let i = 0; i < this.size; i++) {
+      if (results[i]) {
+        this.scheduleStabilityTimer(i);
+      }
+    }
+
     console.log(`[model] started ${successCount}/${this.size} workers`);
     this.dispatch();
   }
 
   async handleWorkerExit(deadWorker) {
     if (this.stopped) return;
+    const workerId = deadWorker.id;
+    if (this._stabilityTimers.has(workerId)) {
+      _clearTimeout(this._stabilityTimers.get(workerId));
+      this._stabilityTimers.delete(workerId);
+    }
+
     // Remove dead worker from the live set
     const idx = this.workers.indexOf(deadWorker);
     if (idx >= 0) {
@@ -286,7 +326,6 @@ class WorkerPool {
     }
     deadWorker.cleanup();
 
-    const workerId = deadWorker.id;
     const attempts = (this._restartCounts.get(workerId) || 0) + 1;
 
     // Hard cap: abandon this worker slot after too many consecutive failures
@@ -325,6 +364,7 @@ class WorkerPool {
     const replacement = new Worker(workerId);
     replacement.onAvailable = () => this.dispatch();
     replacement.onExit = (w) => this.handleWorkerExit(w);
+    replacement.onSuccess = (w) => this.markWorkerStable(w.id);
     this.workers.push(replacement);
 
     const success = await replacement.spawn();
@@ -333,8 +373,7 @@ class WorkerPool {
       return;
     }
     if (success) {
-      // Clean start resets the failure counter for this slot
-      this._restartCounts.delete(workerId);
+      this.scheduleStabilityTimer(workerId);
       console.log(`[model] replacement worker ${workerId} ready`);
       this.dispatch();
     } else {
@@ -391,6 +430,10 @@ class WorkerPool {
       _clearTimeout(timer);
     }
     this._restartTimers.clear();
+    for (const timer of this._stabilityTimers.values()) {
+      _clearTimeout(timer);
+    }
+    this._stabilityTimers.clear();
     for (const worker of this.workers) {
       worker.cleanup();
     }
