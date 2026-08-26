@@ -8,6 +8,7 @@ const path = require("node:path");
 const { processMessage } = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
+const { createLogger } = require("./logger");
 
 const { validator } = require("../middleware/validate");
 const { readSettings } = require("../generationSettings");
@@ -92,7 +93,7 @@ function parseWavFile(filePath) {
  * Stream audio in chunks over WebSocket.
  * Reads the generated WAV file, extracts PCM data, and sends it in time-based chunks.
  */
-async function streamAudio(ws, response, conversationId) {
+async function streamAudio(ws, response, conversationId, wsLog) {
   const audioUrl = response.metadata?.url;
   if (!audioUrl) {
     // No audio file available, send non-streaming response
@@ -160,7 +161,7 @@ async function streamAudio(ws, response, conversationId) {
       }
     }
   } catch (err) {
-    console.error("[websocket] audio streaming failed:", err.message);
+    wsLog.error("audio streaming failed", { error: err.message });
     // Fallback: send non-streaming response with URL
     ws.send(JSON.stringify({
       type: "stream",
@@ -176,6 +177,7 @@ async function streamAudio(ws, response, conversationId) {
 function setupWebSocket(wss) {
   wss.on("connection", (ws, req) => {
     const clientId = randomUUID();
+    const wsLog = createLogger({ connectionId: clientId });
     // Rate limit key. There is no Express request here, so read the socket
     // directly. The forwarded header is only honoured when a proxy is trusted,
     // otherwise a client could set it and get a fresh bucket per frame.
@@ -183,7 +185,7 @@ function setupWebSocket(wss) {
       ? (req?.headers["x-forwarded-for"] || "").split(",")[0].trim()
       : "";
     const clientKey = forwarded || req?.socket?.remoteAddress || clientId;
-    console.log(`WebSocket client connected: ${clientId}`);
+    wsLog.info("WebSocket client connected");
 
     ws.on("message", async (data) => {
       try {
@@ -227,7 +229,7 @@ function setupWebSocket(wss) {
 
           // Special handling for audio: stream PCM chunks
           if (response.type === "audio") {
-            await streamAudio(ws, response, conversationId);
+            await streamAudio(ws, response, conversationId, wsLog);
             return;
           }
 
@@ -261,7 +263,7 @@ function setupWebSocket(wss) {
     });
 
     ws.on("close", () => {
-      console.log(`WebSocket client disconnected: ${clientId}`);
+      wsLog.info("WebSocket client disconnected");
     });
   });
 }
