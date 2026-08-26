@@ -81,10 +81,13 @@ it. Training compute and licensed data remain a separate, external problem.
 
 ### Scale and reasoning — the 3T flagship
 
-- [ ] Add a `framer-3t-a64b` preset that scales every modality, not just the backbone:
+- [x] Add a `framer-3t-a64b` preset that scales every modality, not just the backbone:
       512 fine-grained experts at top-6, and vision, audio, image, video and audio-LM towers
       roughly doubled. ~2.93T text parameters, ~63.98B active per token, ~76.73B multimodal,
       ~3.01T total. Cluster-only, like `framer-2t-a49b`.
+- [x] Extend the trillion-scale presets to a 1,048,576-token context with yarn RoPE
+      scaling, validated against the scaling factor, with chunked prefill so the window is
+      reachable and a KV-cache figure in `--estimate` so its cost is visible.
 - [ ] Add a reasoning segment to the chat template, with its own special tokens, so a
       thinking span is part of the trained format rather than prose the model happens to emit.
 - [ ] Add a reasoning budget and a reasoning-effort control (off / low / medium / high)

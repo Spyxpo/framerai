@@ -1,4 +1,4 @@
-"""Preset registry + parameter estimator tests (incl. the 2T flagship)."""
+"""Preset registry + parameter estimator tests (incl. the 3T flagship)."""
 
 import pytest
 
@@ -13,7 +13,12 @@ LARGE_MULTIMODAL = [
     "framer-200b-a20b",
     "framer-1t-a32b",
     "framer-2t-a49b",
+    "framer-3t-a64b",
 ]
+
+# Expert counts have to divide evenly across every mesh width the expert-parallel
+# placement supports, or the largest presets cannot be sharded at all.
+EP_MESHES = (8, 16, 32, 64, 128)
 
 
 def test_all_presets_build_configs():
@@ -91,6 +96,31 @@ def test_trillion_preset_counts_every_modality():
     assert est["active"] < 4e10  # sparse: a text token routes through ~32B
     assert est["multimodal_total"] > 1e10  # towers scaled with the backbone
     assert est["model_total"] == est["total"] + est["multimodal_total"]
+
+
+def test_flagship_preset_is_about_3t_across_every_modality():
+    """The 3T flagship: three trillion of text, image, video, and audio together."""
+    cfg = FramerConfig.from_preset("framer-3t-a64b")
+    est = estimate_params(cfg)
+    assert 2.95e12 < est["model_total"] < 3.1e12
+    assert 6e10 < est["active"] < 7e10  # top-6 routing, ~64B per text token
+    assert est["multimodal_total"] > 7e10  # towers scaled with the backbone
+    assert est["model_total"] == est["total"] + est["multimodal_total"]
+
+
+def test_flagship_towers_outgrow_the_2t_preset():
+    """The point of the preset is the towers, not only the expert count."""
+    two = estimate_params(FramerConfig.from_preset("framer-2t-a49b"))["multimodal"]
+    three = estimate_params(FramerConfig.from_preset("framer-3t-a64b"))["multimodal"]
+    for tower in ("vision_encoder", "audio_encoder", "image_diffusion", "video_diffusion"):
+        assert three[tower] > two[tower], tower
+
+
+@pytest.mark.parametrize("name", ["framer-2t-a49b", "framer-3t-a64b"])
+def test_flagship_experts_divide_across_every_mesh(name):
+    cfg = FramerConfig.from_preset(name)
+    for mesh in EP_MESHES:
+        assert cfg.n_experts % mesh == 0, f"{cfg.n_experts} experts do not shard {mesh} ways"
 
 
 def test_200b_preset():

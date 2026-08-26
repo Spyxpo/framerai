@@ -171,12 +171,14 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~11.5B | ~205B |
 | `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~21.1B | ~1.00T |
 | `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~39.3B | ~2.00T |
+| `framer-3t-a64b` | 10240 | 84 | 80 / 8 | ~2.93T | ~64B | ~76.7B | ~3.01T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
-The four largest scale their vision, audio, and diffusion towers with the backbone, so
-`framer-2t-a49b` holds two trillion parameters across all five modalities rather than in the
-language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
+The five largest scale their vision, audio, and diffusion towers with the backbone, so
+`framer-3t-a64b` holds three trillion parameters across all five modalities rather than in the
+language model alone, and carries a 1,048,576-token context reached with YaRN RoPE scaling
+from the 16384 the backbone pretrains at. `--size tiny|small|medium|large` remains as a legacy alias, and
 `--preset NAME` selects any preset by name (also available on `train.sh`).
 
 ### Transformer backbone and MoE
@@ -233,13 +235,18 @@ flowchart TD
 - **MoE Routing**: `build_ffn` constructs `MoEFeedForward` for MoE layers. The router scores all experts, selects top-k (`n_experts_per_tok`), computes token dispatch, and accumulates outputs alongside optional always-on shared experts. Auxiliary load-balancing and router z-loss are aggregated across layers.
 
 
-### Why 384 fine-grained experts
+### Why fine-grained experts
 
-The flagship uses 384 experts of width 2048 rather than, say, 192 of width 4096. Total
-parameters scale with the expert *count*, active parameters with `n_experts_per_tok`, so
-narrower and more numerous experts buy sparsity at the same total. 384 is 3 x 128, which
-divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes - a placement
-constraint worth respecting before the sharding code exists rather than after.
+`framer-2t-a49b` uses 384 experts of width 2048 rather than, say, 192 of width 4096, and
+`framer-3t-a64b` uses 512 of width 2304. Total parameters scale with the expert *count*,
+active parameters with `n_experts_per_tok`, so narrower and more numerous experts buy
+sparsity at the same total. Both counts divide evenly across 8, 16, 32, 64, and 128-way
+expert-parallel meshes - 384 is 3 x 128, 512 is 4 x 128 - a placement constraint worth
+respecting before the sharding code exists rather than after.
+
+The 3T preset also routes top-6 rather than top-4. It is the one change that raises
+per-token compute, from 63.98B active against 49.40B, and it is spent on the width of the
+path each token takes rather than on more total parameters.
 
 Attention is roughly 39% of the flagship's active budget (84 layers x 230.7M). That is a
 consequence of `d_model=10240` with only four routed experts per token, and it is the knob to
@@ -274,8 +281,8 @@ across the switch.
 | `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
 | `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | the four large MoE presets |
 | `vocoder_arch` | `griffin_lim` | `istft` | the four large MoE presets |
-| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b` |
-| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b` |
+| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
+| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
 
 `unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
 cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that
@@ -917,7 +924,7 @@ To inspect parameters and memory requirements without instantiating the model:
 python build.py --preset framer-small --estimate
 ```
 
-> **Note on MoE presets**: Trillion-parameter MoE presets (`framer-30b-a3b` through `framer-2t-a49b`) require multi-node hardware with torch-native FSDP2 and expert-parallel meshes. Single-GPU from-scratch training should use dense presets (`framer-tiny` to `framer-large`).
+> **Note on MoE presets**: Trillion-parameter MoE presets (`framer-30b-a3b` through `framer-3t-a64b`) require multi-node hardware with torch-native FSDP2 and expert-parallel meshes. Single-GPU from-scratch training should use dense presets (`framer-tiny` to `framer-large`).
 
 ### 8. How to use `--train-modalities`
 
