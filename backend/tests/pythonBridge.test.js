@@ -676,6 +676,61 @@ describe("pythonBridge worker pool", () => {
     await new Promise((r) => setImmediate(r));
   });
 
+  it("should respect absolute deadline for queued requests (Issue #155)", async () => {
+    // This test verifies the fix for GitHub Issue #155:
+    // Queued requests must NOT receive a fresh full timeout after dispatch.
+    // The timeout must bound the TOTAL time from acceptance to response.
+
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "100"; // Short timeout
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // Submit first request that will block the worker
+    let firstRequestMsg = null;
+    spawnedProcesses[0].onStdinWrite = (data) => {
+      firstRequestMsg = JSON.parse(data);
+    };
+
+    const firstReqPromise = bridge.request("chat", { prompt: "blocker" });
+    await new Promise((r) => setImmediate(r));
+
+    // Clear the stdin write handler to capture the second request separately
+    spawnedProcesses[0].onStdinWrite = null;
+
+    // Submit second request - should be queued
+    const secondReqStart = Date.now();
+    const secondReqPromise = bridge.request("chat", { prompt: "queued" });
+    await new Promise((r) => setImmediate(r));
+
+    // Wait 80ms (most of the 100ms timeout)
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Complete the first request to free up the worker
+    spawnedProcesses[0].simulateResponse(firstRequestMsg.id, true, { content: "done" });
+    await firstReqPromise;
+
+    // Now the queued request should be dispatched with very little time remaining
+    // It should timeout quickly (within the remaining ~20ms + processing time)
+
+    const timeoutStart = Date.now();
+    try {
+      await secondReqPromise;
+      assert.fail("Expected queued request to timeout due to absolute deadline");
+    } catch (err) {
+      const timeoutDuration = Date.now() - timeoutStart;
+      assert.ok(err.message.includes("timed out"), `Expected timeout, got: ${err.message}`);
+
+      // The timeout should happen quickly since we consumed most of the 100ms in queue
+      // Allow some extra time for processing but it should be much less than 100ms
+      assert.ok(timeoutDuration < 80,
+        `Timeout took ${timeoutDuration}ms, expected < 80ms (indicating reduced remaining time)`);
+    }
+  });
+
   it("should reach MAX_RESTART_ATTEMPTS for workers that crash after becoming ready (Issue #154)", async () => {
     process.env.MODEL_WORKERS = "1";
     bridge = require("../src/services/pythonBridge");
