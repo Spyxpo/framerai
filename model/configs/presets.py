@@ -1,18 +1,18 @@
-"""Named model-size presets for FramerAI, from laptop-scale to a 2T flagship.
+"""Named model-size presets for FramerAI, from laptop-scale to a 3T flagship.
 
 Each preset is a set of :class:`FramerConfig` field overrides. Dense presets
 scale the classic decoder; MoE presets add sparse experts so *total* parameters
 grow into the hundreds-of-billions / trillion range while *active* (per-token)
 parameters stay tractable.
 
-The two trillion-scale presets carry a 1,048,576-token context, extended with
+The three trillion-scale presets carry a 1,048,576-token context, extended with
 yarn RoPE scaling from the length the backbone is pretrained at. Context costs no
 parameters here (RoPE stores no per-position weights) but it does cost KV cache,
 which ``model.utils.helpers.estimate_params`` reports per sequence.
 
-The four largest MoE presets scale every modality, not just the text core: the
+The five largest MoE presets scale every modality, not just the text core: the
 vision and audio encoders and the image / video / audio diffusion decoders grow
-with the backbone, so ``framer-2t-a49b`` is two trillion parameters of text,
+with the backbone, so ``framer-3t-a64b`` is three trillion parameters of text,
 code, image, video and audio in one model rather than a large LLM with small
 towers. ``model.utils.helpers.estimate_params`` reports the whole-model number.
 
@@ -177,6 +177,43 @@ _MOE = {
         vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
         # image_size is the tile size here; effective resolution is ~1568px
         # across 12 tiles plus a thumbnail, at per-tile attention cost.
+        vision_tiling=True, vision_max_tiles=12, vision_thumbnail=True,
+        mm_token_placement="interleaved",
+    ),
+    "framer-3t-a64b": dict(  # ~3.0T total across all modalities / ~64B active (cluster-only)
+        # The flagship. Same backbone geometry as framer-2t-a49b; what grows is
+        # the expert count, the routing width, and every modality tower.
+        #
+        # 512 is 4 * 128, so it keeps the even division across 8/16/32/64/128-way
+        # expert-parallel meshes that 384 was chosen for. Top-6 rather than top-4
+        # is the one change that costs per-token compute (49.40B -> 63.98B
+        # active), and it is deliberate: reasoning-heavy decoding spends its
+        # budget on tokens, so the width of the path each token takes is what it
+        # has to work with.
+        d_model=10240, n_layers=84, n_heads=80, n_kv_heads=8, d_ff=32768,
+        max_seq_len=1048576, rope_scaling_type="yarn", rope_scaling_factor=64.0,
+        rope_original_max_seq_len=16384,
+        use_moe=True, n_experts=512, n_experts_per_tok=6, n_shared_experts=1,
+        expert_d_ff=2304, moe_layer_freq=1, first_dense_layers=4, use_qk_norm=True,
+        image_size=448, patch_size=14,
+        # Towers roughly doubled against the 2T preset. On that preset the
+        # multimodal side is 39.32B out of 2.00T, which is a very large text
+        # model with modest towers attached; here it is 76.73B, and image, video
+        # and audio scale with the backbone rather than trailing it.
+        vision_d_model=5120, vision_n_heads=40, vision_n_layers=72,
+        audio_d_model=4096, audio_n_heads=32, audio_n_layers=56,
+        audio_n_mels=128, audio_max_frames=3000,
+        diffusion_channels=2048, audio_gen_channels=1024, audio_gen_frames=512,
+        image_gen_arch="latent_dit", image_train_resolution=512,
+        vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=4096, dit_n_layers=40, dit_n_heads=32,
+        video_gen_arch="spacetime_dit",
+        video_vae_latent_channels=8, video_vae_base_channels=128,
+        video_dit_d_model=3072, video_dit_n_layers=40, video_dit_n_heads=24,
+        audio_gen_arch="rvq_lm", vocoder_arch="istft",
+        codec_base_channels=96, rvq_n_quantizers=12, rvq_codebook_size=2048,
+        audio_lm_d_model=3072, audio_lm_n_layers=32, audio_lm_n_heads=48,
+        vocoder_d_model=1024, vocoder_n_layers=12, use_speaker_conditioning=True,
         vision_tiling=True, vision_max_tiles=12, vision_thumbnail=True,
         mm_token_placement="interleaved",
     ),
