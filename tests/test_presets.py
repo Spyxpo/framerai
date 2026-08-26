@@ -29,9 +29,35 @@ def test_size_aliases():
     assert FramerConfig.from_preset("small").preset == "framer-small"
 
 
-def test_tiny_preset_image_train_resolution():
+def test_preset_image_train_resolutions():
     assert FramerConfig.from_preset("framer-tiny").image_train_resolution == 64
     assert FramerConfig.from_preset("framer-tiny-moe").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-small").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-medium").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-large").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-3b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-8b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-30b-a3b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-160b-a16b").image_train_resolution == 512
+    assert FramerConfig.from_preset("framer-2t-a49b").image_train_resolution == 512
+
+
+def test_validate_rejects_high_resolution_pixel_unet():
+    with pytest.raises(ValueError, match="image_train_resolution.*cannot exceed 64"):
+        FramerConfig(image_gen_arch="unet", image_train_resolution=128).validate()
+
+
+def test_pixel_unet_forward_backward_pass():
+    import torch
+    cfg = FramerConfig.from_preset("framer-small")
+    model = FramerModel(cfg)
+    input_ids = torch.randint(0, cfg.vocab_size, (1, 8))
+    target_images = torch.randn(1, 3, cfg.image_train_resolution, cfg.image_train_resolution)
+    out = model(input_ids=input_ids, target_images=target_images)
+    assert "image_loss" in out
+    assert torch.isfinite(out["image_loss"])
+    out["image_loss"].backward()
+    assert model.diffusion.unet.conv_in.weight.grad is not None
 
 
 def test_trillion_preset_is_about_1t_without_instantiation():

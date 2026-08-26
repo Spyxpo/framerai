@@ -77,7 +77,7 @@ class FramerConfig:
     diffusion_channels: int = 256
     # Resolution the image decoder is *trained* at. Distinct from image_size,
     # which is the vision encoder's input, and from the per-request size below.
-    image_train_resolution: int = 512
+    image_train_resolution: int = 64
     beta_start: float = 1e-4
     beta_end: float = 0.02
 
@@ -356,6 +356,14 @@ class FramerConfig:
                     f"sampler_method ('{self.sampler_method}') must be one of "
                     f"{', '.join(SAMPLER_METHODS)}"
                 )
+
+            if self.image_gen_arch == "unet":
+                if self.image_train_resolution > 64:
+                    problems.append(
+                        f"image_train_resolution ({self.image_train_resolution}) cannot exceed 64 "
+                        "when image_gen_arch='unet' due to quadratic pixel U-Net memory scaling; "
+                        "use image_gen_arch='latent_dit' for higher resolutions"
+                    )
 
             if self.image_gen_arch == "latent_dit":
                 if self.vae_downsample < 1 or (self.vae_downsample & (self.vae_downsample - 1)):
