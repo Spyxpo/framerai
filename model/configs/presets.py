@@ -28,22 +28,25 @@ _DENSE = {
         d_model=768, n_layers=12, n_heads=12, n_kv_heads=4, d_ff=3072, max_seq_len=2048,
         vision_d_model=512, vision_n_heads=8, vision_n_layers=6,
         audio_d_model=512, audio_n_heads=8, audio_n_layers=6,
-        diffusion_channels=128, audio_gen_channels=64,
+        diffusion_channels=128, audio_gen_channels=64, image_train_resolution=64,
     ),
     "framer-medium": dict(  # ~450M
         d_model=1024, n_layers=24, n_heads=16, n_kv_heads=8, d_ff=4096, max_seq_len=2048,
+        image_train_resolution=64,
     ),
     "framer-large": dict(  # ~1.4B
         d_model=2048, n_layers=24, n_heads=16, n_kv_heads=8, d_ff=5632, max_seq_len=4096,
         vision_d_model=2048, vision_n_heads=32, vision_n_layers=16,
         audio_d_model=2048, audio_n_heads=32, audio_n_layers=16,
-        diffusion_channels=512, audio_gen_channels=256,
+        diffusion_channels=512, audio_gen_channels=256, image_train_resolution=64,
     ),
     "framer-3b": dict(
         d_model=2560, n_layers=32, n_heads=20, n_kv_heads=4, d_ff=6912, max_seq_len=4096,
+        image_train_resolution=64,
     ),
     "framer-8b": dict(  # classic 8B dense shape
         d_model=4096, n_layers=32, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
+        image_train_resolution=64,
     ),
 }
 
@@ -61,6 +64,7 @@ _MOE = {
         d_model=2048, n_layers=28, n_heads=16, n_kv_heads=4, d_ff=8192, max_seq_len=4096,
         use_moe=True, n_experts=128, n_experts_per_tok=8, n_shared_experts=2,
         expert_d_ff=1536, moe_layer_freq=1, first_dense_layers=1,
+        image_train_resolution=64,
     ),
     "framer-160b-a16b": dict(  # ~156B total across all modalities / ~15B active
         d_model=4096, n_layers=48, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
@@ -71,7 +75,7 @@ _MOE = {
         audio_d_model=1536, audio_n_heads=12, audio_n_layers=24,
         audio_n_mels=128, audio_max_frames=2048,
         diffusion_channels=768, audio_gen_channels=384, audio_gen_frames=256,
-        image_gen_arch="latent_dit",
+        image_gen_arch="latent_dit", image_train_resolution=512,
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=1536, dit_n_layers=20, dit_n_heads=12,
         video_gen_arch="spacetime_dit",
@@ -91,7 +95,7 @@ _MOE = {
         audio_d_model=2048, audio_n_heads=16, audio_n_layers=32,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=1024, audio_gen_channels=512, audio_gen_frames=256,
-        image_gen_arch="latent_dit",
+        image_gen_arch="latent_dit", image_train_resolution=512,
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=2048, dit_n_layers=24, dit_n_heads=16,
         video_gen_arch="spacetime_dit",
@@ -111,7 +115,7 @@ _MOE = {
         audio_d_model=2560, audio_n_heads=20, audio_n_layers=40,
         audio_n_mels=128, audio_max_frames=3000,
         diffusion_channels=1536, audio_gen_channels=768, audio_gen_frames=256,
-        image_gen_arch="latent_dit",
+        image_gen_arch="latent_dit", image_train_resolution=512,
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=2560, dit_n_layers=28, dit_n_heads=20,
         video_gen_arch="spacetime_dit",
@@ -140,7 +144,7 @@ _MOE = {
         # Latent diffusion transformer for image generation. The pixel U-Net is
         # quadratic in pixel count and cannot run at the resolutions configured
         # here; the small presets keep it, the flagship does not.
-        image_gen_arch="latent_dit",
+        image_gen_arch="latent_dit", image_train_resolution=512,
         vae_latent_channels=16, vae_base_channels=128, vae_downsample=8,
         dit_d_model=3072, dit_n_layers=32, dit_n_heads=24,
         # Spacetime transformer for video: factorised attention over a causal 3D
