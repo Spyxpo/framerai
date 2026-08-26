@@ -635,8 +635,8 @@ describe("pythonBridge worker pool", () => {
     // fire and tear down the worker mid-test.
     const prev = bridge._setTimerImpl(
       (fn, ms) => {
-        // Startup timeouts use 60000ms (or the configured value); backoff is 500-8000ms.
-        if (ms >= 10000) return { startupTimeout: true };
+        // Startup timeouts / stability timers use ms >= 10000; backoff is 500-8000ms.
+        if (ms >= 10000) return { longTimer: true };
         fn();
         return null;
       },
@@ -647,11 +647,18 @@ describe("pythonBridge worker pool", () => {
     setImmediate(() => spawnedProcesses[0].simulateReady(true));
     await startPromise;
 
-    // First exit + successful recovery
+    // First exit + successful recovery via request completion
     spawnedProcesses[0].simulateExit(1);
     await new Promise((r) => setImmediate(r));
     spawnedProcesses[1].simulateReady(true);
     await new Promise((r) => setImmediate(r));
+
+    // Send a request to worker 1 to complete recovery and reset restart count
+    const reqPromise = bridge.request("chat", { prompt: "recover" });
+    await new Promise((r) => setImmediate(r));
+    const msg = JSON.parse(spawnedProcesses[1].lastWrite);
+    spawnedProcesses[1].simulateResponse(msg.id, true, { content: "recovered" });
+    await reqPromise;
 
     // Second exit - counter should have reset, so this is attempt 1 again
     spawnedProcesses[1].simulateExit(1);
@@ -667,6 +674,90 @@ describe("pythonBridge worker pool", () => {
 
     bridge._setTimerImpl(prev.set, prev.clear);
     await new Promise((r) => setImmediate(r));
+  });
+
+  it("should reach MAX_RESTART_ATTEMPTS for workers that crash after becoming ready (Issue #154)", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    // Capture backoff delays without waiting, but keep startup/stability timers pending
+    const delays = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        delays.push(ms);
+        fn();
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    delays.length = 0;
+
+    // Simulate crash after ready without completing any request 5 times
+    for (let i = 0; i < 5; i++) {
+      const current = spawnedProcesses[spawnedProcesses.length - 1];
+      current.simulateExit(1);
+      await new Promise((r) => setImmediate(r));
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      assert.notStrictEqual(replacement, current, `replacement #${i + 1} should spawn`);
+      replacement.simulateReady(true);
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // 6th exit: attempts becomes 6 > MAX_RESTART_ATTEMPTS (5)
+    const current = spawnedProcesses[spawnedProcesses.length - 1];
+    current.simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    assert.deepStrictEqual(delays, [500, 1000, 2000, 4000, 8000]);
+    assert.strictEqual(bridge.available(), false, "pool should be disabled after crash-after-ready cap is reached");
+  });
+
+  it("should reset restart counter after worker remains ready for stability duration", async () => {
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_WORKER_STABILITY_MS = "30000";
+    bridge = require("../src/services/pythonBridge");
+
+    let stabilityTimerFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms === 30000) {
+          stabilityTimerFn = fn;
+          return { stabilityTimer: true };
+        }
+        if (ms >= 10000) return { startupTimeout: true };
+        fn();
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    spawnedProcesses[0].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+    spawnedProcesses[1].simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(stabilityTimerFn, "should have registered a 30s stability timer");
+    stabilityTimerFn();
+    await new Promise((r) => setImmediate(r));
+
+    spawnedProcesses[1].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    assert.strictEqual(spawnedProcesses.length, 3, "should spawn replacement worker 2 after stability reset");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
   });
 
   it("should kill the worker child process when startup times out", async () => {
