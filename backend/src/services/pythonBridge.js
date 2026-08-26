@@ -178,7 +178,7 @@ class Worker {
     });
   }
 
-  async execute(op, params) {
+  async execute(op, params, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (!this.ready || !this.child) {
       throw new Error("worker not ready");
     }
@@ -198,7 +198,7 @@ class Worker {
         reject(new Error("inference timed out"));
         // Notify pool
         if (this.onAvailable) this.onAvailable(this);
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
 
       const requestState = { resolve, reject, timer };
       this.pending.set(id, requestState);
@@ -394,10 +394,19 @@ class WorkerPool {
       const worker = this.getAvailableWorker();
       if (!worker) break;
 
-      const { op, params, resolve, reject, timer } = this.queue.shift();
+      const { op, params, resolve, reject, timer, deadline } = this.queue.shift();
       clearTimeout(timer);
+
+      // Calculate remaining time from original deadline
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        // Already past deadline while in queue
+        reject(new Error("queued request timed out"));
+        continue;
+      }
+
       worker
-        .execute(op, params)
+        .execute(op, params, remainingMs)
         .then(resolve)
         .catch(reject);
     }
@@ -406,11 +415,13 @@ class WorkerPool {
   async execute(op, params) {
     const worker = this.getAvailableWorker();
     if (worker) {
-      return worker.execute(op, params);
+      return worker.execute(op, params, REQUEST_TIMEOUT_MS);
     }
 
-    // All workers busy, queue the request with timeout
+    // All workers busy, queue the request with absolute deadline
     return new Promise((resolve, reject) => {
+      const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+
       const timer = setTimeout(() => {
         // Remove from queue
         const idx = this.queue.findIndex((item) => item.timer === timer);
@@ -420,7 +431,7 @@ class WorkerPool {
         reject(new Error("queued request timed out"));
       }, REQUEST_TIMEOUT_MS);
 
-      this.queue.push({ op, params, resolve, reject, timer });
+      this.queue.push({ op, params, resolve, reject, timer, deadline });
     });
   }
 
