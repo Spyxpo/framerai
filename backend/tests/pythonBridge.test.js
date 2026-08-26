@@ -803,4 +803,81 @@ describe("pythonBridge worker pool", () => {
       `startup timeout should use the configured value, saw ${JSON.stringify(delays)}`
     );
   });
+
+  it("should re-enable bridge.available() when worker pool recovers after transient failure (Issue #152)", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        fn();
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    assert.strictEqual(bridge.available(), true, "bridge should be available when worker is ready");
+
+    // Worker exits
+    spawnedProcesses[0].simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    // First replacement startup fails -> pool becomes disabled
+    const replacement1 = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.notStrictEqual(replacement1, spawnedProcesses[0], "replacement 1 should spawn");
+    replacement1.simulateReady(false);
+    await new Promise((r) => setImmediate(r));
+
+    assert.strictEqual(bridge.available(), false, "bridge should be disabled after replacement spawn failure");
+
+    // Exit replacement1 to trigger next restart attempt
+    replacement1.simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    // Replacement 2 spawns on retry
+    const replacement2 = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.notStrictEqual(replacement2, replacement1, "replacement 2 should spawn after retry");
+
+    // Replacement 2 becomes ready
+    replacement2.simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    // Confirm bridge.available() is true again
+    assert.strictEqual(bridge.available(), true, "bridge should become available again after worker pool recovers");
+
+    // Verify a request can actually be dispatched/completed by the recovered worker
+    const reqPromise = bridge.request("chat", { prompt: "after-recovery" });
+    await new Promise((r) => setImmediate(r));
+
+    const msg = JSON.parse(replacement2.lastWrite);
+    replacement2.simulateResponse(msg.id, true, { content: "recovered-success" });
+
+    const result = await reqPromise;
+    assert.strictEqual(result.content, "recovered-success", "recovered worker should handle request successfully");
+
+    // Verify that exhausting MAX_RESTART_ATTEMPTS leaves the bridge unavailable
+    for (let i = 0; i < 4; i++) {
+      const current = spawnedProcesses[spawnedProcesses.length - 1];
+      current.simulateExit(1);
+      await new Promise((r) => setImmediate(r));
+      const rep = spawnedProcesses[spawnedProcesses.length - 1];
+      if (rep !== current) {
+        rep.simulateReady(false);
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+
+    const last = spawnedProcesses[spawnedProcesses.length - 1];
+    last.simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    assert.strictEqual(bridge.available(), false, "bridge should remain disabled after MAX_RESTART_ATTEMPTS cap");
+  });
 });

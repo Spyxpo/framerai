@@ -373,6 +373,7 @@ class WorkerPool {
       return;
     }
     if (success) {
+      disabled = false;
       this.scheduleStabilityTimer(workerId);
       console.log(`[model] replacement worker ${workerId} ready`);
       this.dispatch();
