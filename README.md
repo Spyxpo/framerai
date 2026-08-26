@@ -237,16 +237,25 @@ model — the number that describes FramerAI as a multimodal system.
 | `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B  | ~15B   | ~5.4B  | ~157B  |
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B  | ~20B   | ~11.5B | ~205B  |
 | `framer-1t-a32b`   | 8192  | 64 | 64 / 8 | ~983B  | ~32B   | ~21.1B | ~1.00T |
-| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~39.3B | **~2.00T** |
+| `framer-2t-a49b`   | 10240 | 84 | 80 / 8 | ~1.96T | ~49B   | ~39.3B | ~2.00T |
+| `framer-3t-a64b`   | 10240 | 84 | 80 / 8 | ~2.93T | ~64B   | ~76.7B | **~3.01T** |
 
-`framer-2t-a49b` is the all-modality flagship: 2.00T parameters covering text, code, image,
-video, and audio, of which ~49B are active for any given text token. The four largest
+`framer-3t-a64b` is the all-modality flagship: 3.01T parameters covering text, code, image,
+video, and audio, of which ~64B are active for any given text token. The five largest
 presets scale their perception and generation towers with the backbone; the smaller ones
-keep laptop-sized towers.
+keep laptop-sized towers. Its towers are 76.7B against the 2T preset's 39.3B, so image,
+video, and audio scale with the backbone rather than trailing it.
 
-Its 384 experts are deliberately fine-grained rather than fewer and wider: total parameters
-scale with the expert count while active parameters scale with top-k, and 384 (3 x 128)
-divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes.
+Experts are deliberately fine-grained rather than fewer and wider: total parameters scale
+with the expert count while active parameters scale with top-k. Both flagship counts keep
+even division across 8, 16, 32, 64, and 128-way expert-parallel meshes - 384 is 3 x 128,
+512 is 4 x 128. Top-6 routing on the 3T preset rather than top-4 is the one change that
+costs per-token compute, taking active parameters from ~49B to ~64B.
+
+The three trillion-scale presets carry a **1,048,576-token context**, reached with YaRN RoPE
+scaling from the length each backbone pretrains at. Context costs no parameters - RoPE holds
+no per-position weights - but it does cost KV cache, which the estimator reports per
+sequence.
 
 Legacy `--size tiny|small|medium|large` still works as an alias for the `framer-*` presets.
 
@@ -257,36 +266,39 @@ is computed analytically and the multimodal towers are constructed on the meta d
 trillion-parameter definition can therefore be sized on a laptop in under a second:
 
 ```console
-$ python build.py --preset framer-2t-a49b --estimate
-Preset: framer-2t-a49b
-  d_model=10240 layers=84 heads=80/8 seq=16384
-  MoE: 384 experts, top-4, 1 shared, expert_d_ff=2048, 4 dense layers first
+$ python build.py --preset framer-3t-a64b --estimate
+Preset: framer-3t-a64b
+  d_model=10240 layers=84 heads=80/8 seq=1048576
+  MoE: 512 experts, top-6, 1 shared, expert_d_ff=2304, 4 dense layers first
 
-  Text backbone          1.96T total      49.40B active/token
-    vision_encoder        12.89B
-    vision_projector     146.86M
-    audio_encoder          5.45B
-    audio_projector      136.38M
+  Text backbone          2.93T total      63.98B active/token
+    vision_encoder        22.66B
+    vision_projector     157.35M
+    audio_encoder         11.29B
+    audio_projector      146.86M
     image_vae            126.03M
-    image_diffusion       10.23B
+    image_diffusion       21.57B
     video_vae            236.11M
-    video_diffusion        7.33B
-    audio_codec            2.69B
+    video_diffusion       15.42B
+    audio_codec            5.04B
     audio_vocoder         78.75M
     audio_diffusion            0
-  Multimodal total      39.32B
+  Multimodal total      76.73B
 
-  MODEL TOTAL            2.00T parameters
-  Weights (bf16)        3727.8 GiB
-  Training state       29822.0 GiB (weights + fp32 master + AdamW moments)
+  MODEL TOTAL            3.01T parameters
+  Weights (bf16)        5598.8 GiB
+  Training state       44790.4 GiB (weights + fp32 master + AdamW moments)
+  KV cache               336.0 GiB (bf16, one sequence at 1,048,576 tokens)
+  Context            1,048,576 tokens (64x 16,384 via yarn RoPE scaling)
 ```
 
 `python build.py --list-presets` prints the whole ladder, and `estimate_params(config)` returns
 the same numbers programmatically.
 
 > **Reality check.** The small and mid presets train on a single consumer GPU or CPU. The large
-> MoE presets are *correct, estimable definitions*: `framer-2t-a49b` needs roughly 3.6 TiB just
-> to hold its weights in bf16, and around 29 TiB with the optimizer state, so it is a
+> MoE presets are *correct, estimable definitions*: `framer-3t-a64b` needs roughly 5.5 TiB just
+> to hold its weights in bf16, around 44 TiB with the optimizer state, and a further 336 GiB of
+> KV cache per sequence at full context, so it is a
 > multi-node preset that no single machine can even *construct*, let alone train. Materialising
 > it needs deferred initialization, sharded checkpointing, and expert-parallel placement, none
 > of which single-device code paths provide. The code path — MoE routing, GQA, the KV cache,

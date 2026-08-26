@@ -57,7 +57,7 @@ def test_a_covered_extension_validates():
     assert long_config().validate() is not None
 
 
-@pytest.mark.parametrize("preset", ["framer-1t-a32b", "framer-2t-a49b"])
+@pytest.mark.parametrize("preset", ["framer-1t-a32b", "framer-2t-a49b", "framer-3t-a64b"])
 def test_flagship_presets_carry_a_million_token_context(preset):
     config = build_preset_config(preset)
     assert config.max_seq_len == ONE_MILLION
