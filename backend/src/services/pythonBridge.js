@@ -10,6 +10,7 @@
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
+const { createLogger } = require("./logger");
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 const BACKEND_ROOT = path.join(__dirname, "..", "..");
@@ -71,6 +72,7 @@ class Worker {
   }
 
   spawn() {
+    const workerLog = createLogger({ route: `worker-${this.id}` });
     return new Promise((resolve) => {
       const argv = ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH];
       if (MODEL_TOOLS) argv.push("--tools", MODEL_TOOLS);
@@ -81,7 +83,7 @@ class Worker {
       try {
         this.child = spawn(PYTHON_BIN, argv, { cwd: REPO_ROOT });
       } catch (err) {
-        console.warn(`[model:worker-${this.id}] spawn failed: ${err.message}`);
+        workerLog.warn("spawn failed", { error: err.message });
         resolve(false);
         return;
       }
@@ -109,11 +111,11 @@ class Worker {
               this._safetyTimer = null;
             }
             if (msg.ready) {
-              console.log(`[model:worker-${this.id}] ready`);
+              workerLog.info("ready");
               this.ready = true;
               resolve(true);
             } else {
-              console.warn(`[model:worker-${this.id}] failed to load: ${msg.error}`);
+              workerLog.warn("failed to load", { error: msg.error });
               resolve(false);
             }
             continue;
@@ -139,7 +141,7 @@ class Worker {
       this.child.stderr.on("data", (d) => process.stderr.write(`[model:worker-${this.id}] ${d}`));
 
       this.child.on("exit", (code) => {
-        console.warn(`[model:worker-${this.id}] exited (code ${code})`);
+        workerLog.warn("exited", { code });
         this.ready = false;
         this.child = null;
         // Clear safety timeout if still pending
@@ -170,7 +172,7 @@ class Worker {
         if (!resolved) {
           resolved = true;
           this._safetyTimer = null;
-          console.warn(`[model:worker-${this.id}] startup timeout after ${STARTUP_TIMEOUT_MS}ms, cleaning up`);
+          workerLog.warn("startup timeout, cleaning up", { timeoutMs: STARTUP_TIMEOUT_MS });
           this.cleanup();
           resolve(false);
         }
@@ -178,7 +180,7 @@ class Worker {
     });
   }
 
-  async execute(op, params, timeoutMs = REQUEST_TIMEOUT_MS) {
+  async execute(op, params, timeoutMs = REQUEST_TIMEOUT_MS, requestId = null) {
     if (!this.ready || !this.child) {
       throw new Error("worker not ready");
     }
@@ -189,6 +191,9 @@ class Worker {
     this.busy = true;
     const id = this.nextId++;
     const payload = { id, op, params: { out_dir: GENERATED_DIR, ...params } };
+    if (requestId) {
+      payload.requestId = requestId;
+    }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -254,6 +259,7 @@ class WorkerPool {
     this._restartCounts = new Map();
     this._restartTimers = new Map();
     this._stabilityTimers = new Map();
+    this.poolLog = createLogger({ route: "bridge-pool" });
   }
 
   markWorkerStable(workerId) {
@@ -271,7 +277,7 @@ class WorkerPool {
     const timer = _setTimeout(() => {
       this._stabilityTimers.delete(workerId);
       this.markWorkerStable(workerId);
-      console.log(`[model] worker ${workerId} considered stable after ${WORKER_STABILITY_MS}ms`);
+      this.poolLog.info("worker stable", { workerId, stabilityMs: WORKER_STABILITY_MS });
     }, WORKER_STABILITY_MS);
     this._stabilityTimers.set(workerId, timer);
   }
@@ -296,7 +302,7 @@ class WorkerPool {
     const successCount = results.filter((r) => r).length;
 
     if (successCount === 0) {
-      console.warn("[model] no workers started successfully");
+      this.poolLog.warn("no workers started successfully");
       disabled = true;
       throw new Error("no workers available");
     }
@@ -307,7 +313,7 @@ class WorkerPool {
       }
     }
 
-    console.log(`[model] started ${successCount}/${this.size} workers`);
+    this.poolLog.info("pool started", { successCount, totalWorkers: this.size });
     this.dispatch();
   }
 
@@ -330,9 +336,7 @@ class WorkerPool {
 
     // Hard cap: abandon this worker slot after too many consecutive failures
     if (attempts > MAX_RESTART_ATTEMPTS) {
-      console.warn(
-        `[model] worker ${workerId} has failed ${MAX_RESTART_ATTEMPTS} restart attempts, giving up`
-      );
+      this.poolLog.warn("worker restart limit exceeded", { workerId, maxAttempts: MAX_RESTART_ATTEMPTS });
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
       }
@@ -346,9 +350,7 @@ class WorkerPool {
       RESTART_BACKOFF_BASE_MS * Math.pow(2, attempts - 1),
       RESTART_BACKOFF_MAX_MS
     );
-    console.log(
-      `[model] worker ${workerId} restart attempt ${attempts}/${MAX_RESTART_ATTEMPTS} in ${delay}ms`
-    );
+    this.poolLog.info("worker restart scheduled", { workerId, attempt: attempts, maxAttempts: MAX_RESTART_ATTEMPTS, delayMs: delay });
 
     // Wait out the backoff (interruptible by shutdown)
     await new Promise((resolve) => {
@@ -360,7 +362,7 @@ class WorkerPool {
     if (this.stopped) return;
 
     // Spawn replacement
-    console.log(`[model] spawning replacement worker ${workerId}`);
+    this.poolLog.info("spawning replacement worker", { workerId });
     const replacement = new Worker(workerId);
     replacement.onAvailable = () => this.dispatch();
     replacement.onExit = (w) => this.handleWorkerExit(w);
@@ -375,10 +377,10 @@ class WorkerPool {
     if (success) {
       disabled = false;
       this.scheduleStabilityTimer(workerId);
-      console.log(`[model] replacement worker ${workerId} ready`);
+      this.poolLog.info("replacement worker ready", { workerId });
       this.dispatch();
     } else {
-      console.warn(`[model] replacement worker ${workerId} failed to start`);
+      this.poolLog.warn("replacement worker failed", { workerId });
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
       }
@@ -394,7 +396,7 @@ class WorkerPool {
       const worker = this.getAvailableWorker();
       if (!worker) break;
 
-      const { op, params, resolve, reject, timer, deadline } = this.queue.shift();
+      const { op, params, resolve, reject, timer, deadline, requestId } = this.queue.shift();
       clearTimeout(timer);
 
       // Calculate remaining time from original deadline
@@ -406,16 +408,16 @@ class WorkerPool {
       }
 
       worker
-        .execute(op, params, remainingMs)
+        .execute(op, params, remainingMs, requestId)
         .then(resolve)
         .catch(reject);
     }
   }
 
-  async execute(op, params) {
+  async execute(op, params, requestId = null) {
     const worker = this.getAvailableWorker();
     if (worker) {
-      return worker.execute(op, params, REQUEST_TIMEOUT_MS);
+      return worker.execute(op, params, REQUEST_TIMEOUT_MS, requestId);
     }
 
     // All workers busy, queue the request with absolute deadline
@@ -431,7 +433,7 @@ class WorkerPool {
         reject(new Error("queued request timed out"));
       }, REQUEST_TIMEOUT_MS);
 
-      this.queue.push({ op, params, resolve, reject, timer, deadline });
+      this.queue.push({ op, params, resolve, reject, timer, deadline, requestId });
     });
   }
 
@@ -485,9 +487,9 @@ async function ensurePool() {
   return pool;
 }
 
-async function request(op, params = {}) {
+async function request(op, params = {}, requestId = null) {
   const p = await ensurePool();
-  return p.execute(op, params);
+  return p.execute(op, params, requestId);
 }
 
 function available() {
