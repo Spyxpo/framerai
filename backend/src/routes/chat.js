@@ -91,7 +91,7 @@ router.post(
       conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
     }
 
-    const response = await processMessage(conv.messages, type, settings);
+    const response = await processMessage(conv.messages, type, settings, req.requestId);
     const assistantMessage = {
       id: randomUUID(),
       role: "assistant",

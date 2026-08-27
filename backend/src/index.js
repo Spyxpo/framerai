@@ -3,14 +3,15 @@ const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const { createServer } = require("./app");
+const { logger } = require("./services/logger");
 
 const PORT = process.env.PORT || 3001;
 const { server, wss } = createServer();
 
 server.listen(PORT, () => {
   const actualPort = server.address() ? server.address().port : PORT;
-  console.log(`FramerAI backend running on http://localhost:${actualPort}`);
-  console.log(`WebSocket available at ws://localhost:${actualPort}/ws`);
+  logger.info(`FramerAI backend running on http://localhost:${actualPort}`);
+  logger.info(`WebSocket available at ws://localhost:${actualPort}/ws`);
 });
 
 function shutdown() {
