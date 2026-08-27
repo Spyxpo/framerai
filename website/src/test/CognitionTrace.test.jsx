@@ -5,7 +5,7 @@
  * and only appears when a valid trace exists.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import CognitionTrace from "../components/Chat/CognitionTrace";
 
