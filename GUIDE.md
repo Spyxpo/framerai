@@ -17,6 +17,7 @@ the [README](README.md). For contribution mechanics read [CONTRIBUTING.md](CONTR
 - [Training on your own data](#training-on-your-own-data)
 - [Single-GPU training tutorial](#single-gpu-training-tutorial)
 - [Cognition layer](#cognition-layer)
+- [Tools](#tools)
 - [The backend and the inference bridge](#the-backend-and-the-inference-bridge)
 - [The website](#the-website)
 - [Running with Docker](#running-with-docker)
@@ -86,6 +87,7 @@ flowchart TD
 | `model/data.py` | Local-corpus datasets (text, image-caption, audio-caption). |
 | `model/generate.py` | Inference and sampling utilities. |
 | `model/cognition/` | Optional persistent mind: memory, curiosity, affect, live senses, sleep. |
+| `model/tools/` | Optional tools the model can call mid-turn: the protocol, the loop, internet access, and a sandboxed shell. |
 | `model/serve.py` | Inference worker driven by the backend over stdin/stdout. |
 | `build.py` | Command line entry point to build, train, and export models. |
 | `train.sh` | Convenience wrapper around the full pipeline. |
@@ -169,12 +171,14 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~11.5B | ~205B |
 | `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~21.1B | ~1.00T |
 | `framer-2t-a49b` | 10240 | 84 | 80 / 8 | ~1.96T | ~49B | ~39.3B | ~2.00T |
+| `framer-3t-a64b` | 10240 | 84 | 80 / 8 | ~2.93T | ~64B | ~76.7B | ~3.01T |
 
 Dense presets train on a single consumer GPU or CPU; the MoE presets (`*-a*b`)
 scale total parameters via sparse experts and need multi-node hardware to train.
-The four largest scale their vision, audio, and diffusion towers with the backbone, so
-`framer-2t-a49b` holds two trillion parameters across all five modalities rather than in the
-language model alone. `--size tiny|small|medium|large` remains as a legacy alias, and
+The five largest scale their vision, audio, and diffusion towers with the backbone, so
+`framer-3t-a64b` holds three trillion parameters across all five modalities rather than in the
+language model alone, and carries a 1,048,576-token context reached with YaRN RoPE scaling
+from the 16384 the backbone pretrains at. `--size tiny|small|medium|large` remains as a legacy alias, and
 `--preset NAME` selects any preset by name (also available on `train.sh`).
 
 ### Transformer backbone and MoE
@@ -231,13 +235,18 @@ flowchart TD
 - **MoE Routing**: `build_ffn` constructs `MoEFeedForward` for MoE layers. The router scores all experts, selects top-k (`n_experts_per_tok`), computes token dispatch, and accumulates outputs alongside optional always-on shared experts. Auxiliary load-balancing and router z-loss are aggregated across layers.
 
 
-### Why 384 fine-grained experts
+### Why fine-grained experts
 
-The flagship uses 384 experts of width 2048 rather than, say, 192 of width 4096. Total
-parameters scale with the expert *count*, active parameters with `n_experts_per_tok`, so
-narrower and more numerous experts buy sparsity at the same total. 384 is 3 x 128, which
-divides evenly across 8, 16, 32, 64, and 128-way expert-parallel meshes - a placement
-constraint worth respecting before the sharding code exists rather than after.
+`framer-2t-a49b` uses 384 experts of width 2048 rather than, say, 192 of width 4096, and
+`framer-3t-a64b` uses 512 of width 2304. Total parameters scale with the expert *count*,
+active parameters with `n_experts_per_tok`, so narrower and more numerous experts buy
+sparsity at the same total. Both counts divide evenly across 8, 16, 32, 64, and 128-way
+expert-parallel meshes - 384 is 3 x 128, 512 is 4 x 128 - a placement constraint worth
+respecting before the sharding code exists rather than after.
+
+The 3T preset also routes top-6 rather than top-4. It is the one change that raises
+per-token compute, from 63.98B active against 49.40B, and it is spent on the width of the
+path each token takes rather than on more total parameters.
 
 Attention is roughly 39% of the flagship's active budget (84 layers x 230.7M). That is a
 consequence of `d_model=10240` with only four routed experts per token, and it is the knob to
@@ -272,8 +281,8 @@ across the switch.
 | `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
 | `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | the four large MoE presets |
 | `vocoder_arch` | `griffin_lim` | `istft` | the four large MoE presets |
-| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b` |
-| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b` |
+| `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
+| `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
 
 `unet` is the pixel-space U-Net. Its attention is quadratic in pixel count, which is why it
 cannot run at the resolutions the large presets configure. `latent_dit` is a KL-VAE that
@@ -429,6 +438,54 @@ Two caveats worth stating before the numbers are used:
 
 `bits_per_byte` is tokenizer-independent, so two models with different vocabularies can be
 compared on the same corpus - which raw perplexity cannot do.
+
+#### Running standard benchmarks
+
+The evaluation harness supports standard text and code benchmarks through `build.py --mode eval`:
+
+```bash
+# Run all benchmarks
+python build.py --mode eval --size tiny --benchmark-dir benchmarks
+
+# Save results to JSON
+python build.py --mode eval --size tiny --benchmark-dir benchmarks --eval-output results.json
+
+# Run a subset of HumanEval for quick smoke tests
+python build.py --mode eval --size tiny --eval-code-limit 10
+```
+
+**Benchmark data structure:**
+
+```
+benchmarks/
+├── wikitext-2/
+│   └── test.txt         # Plain text corpus for perplexity and token accuracy
+└── humaneval/
+    └── HumanEval.jsonl  # Code problems with prompts and unit tests
+```
+
+Benchmarks are **not downloaded automatically**. Missing benchmark data is reported as skipped
+with a clear message rather than producing fake results.
+
+**Reproducibility:** Evaluation runs with a fixed seed (default 42), deterministic batch
+construction, and explicit benchmark ordering. The same checkpoint and data will produce the
+same scores across runs.
+
+**Code evaluation security:** Generated code is executed in a separate Python subprocess with
+a timeout. This isolates execution from the main process but does not provide sandboxing
+against filesystem access or network calls. Do not run untrusted benchmarks on systems with
+sensitive data.
+
+**Results:**
+
+| Benchmark | Metric | framer-tiny | framer-small | framer-medium | framer-large |
+|-----------|--------|-------------|--------------|---------------|--------------|
+| WikiText-2 | Perplexity | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+| WikiText-2 | Token Accuracy | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+| HumanEval | pass@1 | *not yet measured* | *not yet measured* | *not yet measured* | *not yet measured* |
+
+Real benchmark scores require a trained checkpoint on a sufficiently large corpus. The table
+above will be populated as checkpoints become available.
 
 ### Placing modalities in the sequence
 
@@ -867,7 +924,7 @@ To inspect parameters and memory requirements without instantiating the model:
 python build.py --preset framer-small --estimate
 ```
 
-> **Note on MoE presets**: Trillion-parameter MoE presets (`framer-30b-a3b` through `framer-2t-a49b`) require multi-node hardware with torch-native FSDP2 and expert-parallel meshes. Single-GPU from-scratch training should use dense presets (`framer-tiny` to `framer-large`).
+> **Note on MoE presets**: Trillion-parameter MoE presets (`framer-30b-a3b` through `framer-3t-a64b`) require multi-node hardware with torch-native FSDP2 and expert-parallel meshes. Single-GPU from-scratch training should use dense presets (`framer-tiny` to `framer-large`).
 
 ### 8. How to use `--train-modalities`
 
@@ -1165,6 +1222,136 @@ config = CognitionConfig(
 mind = Mind(config, generator=gen)
 ```
 
+## Tools
+
+### The protocol
+
+A tool is four things: a name, a description, a parameter schema, and a `run()`
+that returns a `ToolResult`. `model/tools/base.py` holds all of it, and knows
+nothing about the web, the shell, or the model.
+
+```python
+class Tool:
+    name: str
+    description: str
+    parameters: dict[str, str]
+
+    def run(self, **kwargs) -> ToolResult: ...
+```
+
+`ToolRegistry` is the set of tools a worker is willing to run. It is also the
+whole permission model: a tool that is not registered cannot be called, so
+gating a capability never needs a flag check at the call site. Failures are
+values, not exceptions - an unknown tool, wrong arguments, or a `ToolError`
+raised inside a tool all come back as a failed `ToolResult`, because a model
+that used a tool wrongly should get the reason and another turn rather than
+lose the conversation to a traceback.
+
+### The loop
+
+`model/tools/loop.py` renders the registry into the prompt, generates, and looks
+for one block:
+
+```text
+<tool_call>{"name": "web_search", "arguments": {"query": "rectified flow"}}</tool_call>
+```
+
+No block means the turn is over. A block runs the tool, appends
+`<tool_result>...</tool_result>`, and generates again, up to `max_steps`
+(default 4). A block that will not parse is fed back as an error result instead
+of raising, which gives a model that emitted bad JSON a chance to correct it.
+
+The loop takes a plain `generate(prompt) -> str` callable, so it is independent
+of `FramerGenerator` and testable without a checkpoint. It returns
+`(reply, ToolTrace)`; the trace carries every call, its arguments, its result,
+and why the loop stopped (`answered`, `max_steps`, or `no_tools`).
+
+### Internet access
+
+`model/tools/web.py` implements `web_search` and `web_fetch` against a keyless
+search endpoint, using `urllib` and `html.parser` only. The provider lives
+behind `SearchClient` and nothing outside that module names it, so swapping it
+is a one-module change. Result links come back wrapped in a redirect, which is
+unquoted back to the real URL before it is returned.
+
+Safety is in three places:
+
+- **Scheme and address.** Only `http` and `https` are fetched. The hostname is
+  resolved first and refused if any address is private, loopback, link-local,
+  reserved, multicast, or unspecified, so a fetched page cannot be used to probe
+  the host's network.
+- **Budgets.** Every request carries a timeout and a byte cap, and page text is
+  truncated to a character budget with an explicit marker.
+- **Failure.** Unreachable hosts, HTTP errors, and empty pages become failed
+  results. Offline is a supported state, not an error.
+
+The client's transport is injectable, which is how the whole module is tested
+without a socket:
+
+```python
+client = SearchClient(transport=lambda url, data, timeout, max_bytes: FIXTURE)
+```
+
+### Command line access
+
+`model/tools/cli.py` adds `shell`, `read_file`, and `list_dir`. What makes a
+shell tool safe is not the shell - it is `ShellPolicy`, which holds the whole
+decision in one object: the mode, the allowlist, the deny list, the sandbox
+root, the timeout, and the output cap. `ShellTool.run` asks the policy first and
+never reaches `subprocess` on a refusal, so a denial costs nothing and is
+recorded with its reason.
+
+The order of the decision matters:
+
+1. Mode `off` refuses everything. This is the default.
+2. The deny list runs next, so it applies in `allow` mode too - an allowlisted
+   `rm` still cannot be `rm -rf /`. Patterns match the normalised argv, so
+   `rm  -rf   /` and `rm -rf /` are the same input.
+3. Path-shaped arguments are resolved against the sandbox root; one that lands
+   outside refuses the command.
+4. In `allow` mode an allowlisted program runs. Otherwise the approver decides,
+   and a missing approver is a refusal.
+
+Execution is deliberately unexciting: `shell=False` with a list argv, `cwd`
+pinned to the sandbox root, an environment cut down to `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `TZ`, and `TERM`, `start_new_session=True`, and a timeout that kills
+the process group rather than orphaning the children.
+
+Parsing uses `shlex` with `punctuation_chars`, which is what lets an *unquoted*
+operator be refused while a quoted one is kept:
+
+```python
+lex("ls; rm -rf /")                         # ['ls', ';', 'rm', '-rf', '/'] - refused
+lex("python -c 'import time; time.sleep(1)'")  # 3 tokens - the ';' belongs to Python
+```
+
+`read_file` and `list_dir` exist so the frequent cases spawn nothing at all.
+They share the policy's sandbox root.
+
+A non-zero exit is an answer, not a failure: the model asked what happens when
+this runs, and that is what happened. It comes back as a failed `ToolResult`
+carrying the code and the output, and the loop continues.
+
+### Serving it
+
+`--tools web` (or `MODEL_TOOLS=web`) registers the toolset. `--tools cli` adds
+the command line one, with `--cli-mode`, `--cli-root`, and `--cli-timeout`
+setting its policy. The ready line
+reports what was registered:
+
+```json
+{"ready": true, "mind": false, "tools": ["web_search", "web_fetch", "shell"], "cli_mode": "allow"}
+```
+
+Chat runs the loop when the request asks for it with `params.tools` - `true` for
+everything registered, or a list of toolset or tool names. The `search`, `fetch`,
+and `shell` ops call the tools directly. With a mind attached the tools gather and
+the mind still writes the reply, so the exchange lands in memory as one episode
+rather than one per tool step.
+
+Without the flag no tool is registered, `params.tools` is ignored, and the
+worker behaves exactly as it did before the package existed.
+
 ## The backend and the inference bridge
 
 The backend is an Express server under `backend/src/`:
@@ -1267,10 +1454,13 @@ cd website && npm ci && npm run build
 
 ## Troubleshooting
 
-- Out of memory during training: lower `--batch-size`, use a smaller `--size`, or train on CPU with `--device cpu`.
-- Audio file loading fails: `soundfile` comes from `requirements.txt`; if it is unavailable, install the optional fallback loader with `pip install torchaudio`.
-- Backend returns placeholders: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
-- Website shows connection errors: confirm the backend is running on the expected port.
+For detailed solutions to common CUDA, PyTorch, VRAM/OOM, dependency, and environment setup issues, see the dedicated [Troubleshooting Guide](TROUBLESHOOTING.md).
+
+Quick reference for common issues:
+- **Out of memory during training**: lower `--batch-size`, increase `--grad-accum`, enable `--precision bf16` / `--grad-checkpointing`, or train on CPU with `--device cpu`.
+- **Audio file loading fails**: install system dependency `libsndfile1` (Linux) / `libsndfile` (macOS), or install fallback audio loader with `pip install torchaudio`.
+- **Backend returns placeholders**: confirm a checkpoint exists at `MODEL_PATH` and `MODEL_ENABLED=true`.
+- **Website shows connection errors**: confirm the backend is running on port 3001.
 
 ## Where to go next
 

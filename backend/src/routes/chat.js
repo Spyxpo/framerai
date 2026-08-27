@@ -114,6 +114,7 @@ router.post(
       }
     }
 
+
     const assistantMessage = {
       id: randomUUID(),
       role: "assistant",

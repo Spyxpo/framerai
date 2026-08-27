@@ -193,4 +193,7 @@ def build_audio_generator(config):
         sample_rate=config.audio_sample_rate,
         n_fft=config.audio_n_fft,
         hop_length=config.audio_hop_length,
+        vocoder_arch=config.vocoder_arch,
+        vocoder_d_model=config.vocoder_d_model,
+        vocoder_n_layers=config.vocoder_n_layers,
     )

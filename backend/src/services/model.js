@@ -9,6 +9,7 @@
 
 const { randomUUID } = require("node:crypto");
 const bridge = require("./pythonBridge");
+const { logger } = require("./logger");
 
 const GENERATED_URL = "/uploads/generated";
 
@@ -222,7 +223,7 @@ async function processMessage(messages, requestType = "text", settings = {}, req
     try {
       return await modelChat(intent, content, settings, requestId, operatorCtx);
     } catch (err) {
-      console.warn(`[model] falling back to placeholder: ${err.message}`);
+      logger.warn("falling back to placeholder", { error: err.message, requestId });
     }
   }
 
@@ -231,7 +232,7 @@ async function processMessage(messages, requestType = "text", settings = {}, req
 
 async function modelChat(intent, content, settings = {}, requestId = null, operatorCtx = null) {
   if (intent === "image" || intent === "video" || intent === "audio") {
-    const result = await bridge.request(intent, { prompt: content, ...settings });
+    const result = await bridge.request(intent, { prompt: content, ...settings }, requestId);
     return {
       type: intent,
       content: `Here is the ${intent} generated for: "${content}"`,
@@ -327,7 +328,7 @@ function generateTextResponse(content, messages) {
   return `I understand your message: "${content}"\n\nAs FramerAI, I can help with text, code, image, video, and audio generation. To unlock full capabilities, train the model:\n\n\`\`\`bash\npython build.py --mode all --size tiny\n\`\`\`\n\nThen set MODEL_ENABLED=true and restart the backend.`;
 }
 
-async function generateImage(prompt, numImages = 1, size = {}) {
+async function generateImage(prompt, numImages = 1, size = {}, requestId = null) {
   // The worker resolves the final dimensions: explicit width/height win, then an
   // aspect ratio at a size tier, then whatever the prompt itself asks for, then
   // the configured default. It reports back what it understood.
@@ -338,7 +339,7 @@ async function generateImage(prompt, numImages = 1, size = {}) {
 
   if (bridge.available()) {
     try {
-      const result = await bridge.request("image", payload);
+      const result = await bridge.request("image", payload, requestId);
       return {
         id: randomUUID(),
         prompt,
@@ -354,7 +355,7 @@ async function generateImage(prompt, numImages = 1, size = {}) {
         },
       };
     } catch (err) {
-      console.warn(`[model] image fallback: ${err.message}`);
+      logger.warn("image fallback", { error: err.message, requestId });
     }
   }
   return {
@@ -370,10 +371,10 @@ async function generateImage(prompt, numImages = 1, size = {}) {
   };
 }
 
-async function generateVideo(prompt, numFrames = 16) {
+async function generateVideo(prompt, numFrames = 16, requestId = null) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("video", { prompt, num_frames: numFrames });
+      const result = await bridge.request("video", { prompt, num_frames: numFrames }, requestId);
       return {
         id: randomUUID(),
         prompt,
@@ -381,7 +382,7 @@ async function generateVideo(prompt, numFrames = 16) {
         metadata: { frames: numFrames, model: "framerai-video" },
       };
     } catch (err) {
-      console.warn(`[model] video fallback: ${err.message}`);
+      logger.warn("video fallback", { error: err.message, requestId });
     }
   }
   return {
@@ -392,10 +393,10 @@ async function generateVideo(prompt, numFrames = 16) {
   };
 }
 
-async function generateAudio(prompt, settings = {}) {
+async function generateAudio(prompt, settings = {}, requestId = null) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("audio", { prompt, ...settings });
+      const result = await bridge.request("audio", { prompt, ...settings }, requestId);
       return {
         id: randomUUID(),
         prompt,
@@ -403,7 +404,7 @@ async function generateAudio(prompt, settings = {}) {
         metadata: { model: "framerai-audio" },
       };
     } catch (err) {
-      console.warn(`[model] audio fallback: ${err.message}`);
+      logger.warn("audio fallback", { error: err.message, requestId });
     }
   }
   return {
@@ -414,13 +415,13 @@ async function generateAudio(prompt, settings = {}) {
   };
 }
 
-async function generateCode(prompt, language = "python", settings = {}) {
+async function generateCode(prompt, language = "python", settings = {}, requestId = null) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("code", { prompt, language, ...settings });
+      const result = await bridge.request("code", { prompt, language, ...settings }, requestId);
       return { id: randomUUID(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
     } catch (err) {
-      console.warn(`[model] code fallback: ${err.message}`);
+      logger.warn("code fallback", { error: err.message, requestId });
     }
   }
   return {
@@ -432,13 +433,13 @@ async function generateCode(prompt, language = "python", settings = {}) {
   };
 }
 
-async function transcribeAudio(audioPath, prompt = "Transcribe the audio:") {
+async function transcribeAudio(audioPath, prompt = "Transcribe the audio:", requestId = null) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("transcribe", { audio_path: audioPath, prompt });
+      const result = await bridge.request("transcribe", { audio_path: audioPath, prompt }, requestId);
       return { text: result.content, metadata: { model: "framerai-audio" } };
     } catch (err) {
-      console.warn(`[model] transcribe fallback: ${err.message}`);
+      logger.warn("transcribe fallback", { error: err.message, requestId });
     }
   }
   return {
@@ -447,13 +448,13 @@ async function transcribeAudio(audioPath, prompt = "Transcribe the audio:") {
   };
 }
 
-async function understandImage(imagePath, prompt = "Describe this image") {
+async function understandImage(imagePath, prompt = "Describe this image", requestId = null) {
   if (bridge.available()) {
     try {
-      const result = await bridge.request("understand", { image_path: imagePath, prompt });
+      const result = await bridge.request("understand", { image_path: imagePath, prompt }, requestId);
       return { description: result.content };
     } catch (err) {
-      console.warn(`[model] understand fallback: ${err.message}`);
+      logger.warn("understand fallback", { error: err.message, requestId });
     }
   }
   return {

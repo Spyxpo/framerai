@@ -130,7 +130,8 @@ test("a whitespace-only prompt counts as missing", async () => {
 test("video frames are bounded", async () => {
   const ok = await request(app).post("/api/generate/video").send({ prompt: "x", num_frames: 32 });
   assert.equal(ok.status, 200);
-  assert.deepEqual(lastCall("generateVideo").args, ["x", 32]);
+  const videoArgs = lastCall("generateVideo").args;
+  assert.deepEqual(videoArgs.slice(0, 2), ["x", 32]);
 
   const tooMany = await request(app)
     .post("/api/generate/video")
@@ -142,7 +143,8 @@ test("video frames are bounded", async () => {
 test("code generation defaults to python and rejects unknown languages", async () => {
   const ok = await request(app).post("/api/generate/code").send({ prompt: "sort a list" });
   assert.equal(ok.status, 200);
-  assert.deepEqual(lastCall("generateCode").args, ["sort a list", "python", {}]);
+  const codeArgs = lastCall("generateCode").args;
+  assert.deepEqual(codeArgs.slice(0, 3), ["sort a list", "python", {}]);
 
   const bad = await request(app)
     .post("/api/generate/code")

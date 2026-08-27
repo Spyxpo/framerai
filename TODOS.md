@@ -63,6 +63,12 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       attention-factor compensation). It was accepted by the config and silently applied no
       extension at all; `validate()` now rejects an unrecognised `rope_scaling_type`.
 - [ ] Add instruction and preference post-training (chat template, SFT, DPO).
+- [x] Add a tool protocol and a bounded tool-calling loop (`model/tools/`), with internet
+      search and page fetch behind `--tools web`. Standard library only, no API key.
+- [x] Add command line access behind `--tools cli`: a sandboxed shell with a three-mode
+      permission policy, an always-on deny list, and read-only file helpers.
+- [ ] Surface the approver for `--cli-mode ask` over the backend, so a person can approve
+      a command from the website instead of the worker refusing for want of one.
 - [x] Add ONNX export and a safetensors round-trip validation test.
 
 ## Architecture roadmap — reaching frontier-class output
@@ -72,6 +78,23 @@ frontier-class output at any size, for architectural reasons; each item below re
 of them with the family that can, selected by a config field so the small presets keep
 their laptop-runnable path. Every phase ships tiny-scale tests and the metric that measures
 it. Training compute and licensed data remain a separate, external problem.
+
+### Scale and reasoning — the 3T flagship
+
+- [x] Add a `framer-3t-a64b` preset that scales every modality, not just the backbone:
+      512 fine-grained experts at top-6, and vision, audio, image, video and audio-LM towers
+      roughly doubled. ~2.93T text parameters, ~63.98B active per token, ~76.73B multimodal,
+      ~3.01T total. Cluster-only, like `framer-2t-a49b`.
+- [x] Extend the trillion-scale presets to a 1,048,576-token context with yarn RoPE
+      scaling, validated against the scaling factor, with chunked prefill so the window is
+      reachable and a KV-cache figure in `--estimate` so its cost is visible.
+- [ ] Add a reasoning segment to the chat template, with its own special tokens, so a
+      thinking span is part of the trained format rather than prose the model happens to emit.
+- [ ] Add a reasoning budget and a reasoning-effort control (off / low / medium / high)
+      through `build.py`, `model/serve.py`, the backend routes and the website settings panel.
+- [ ] Add self-consistency and a verification pass as opt-in test-time compute strategies.
+- [ ] Report every quality claim through `model/eval/`, as a before-and-after table on the
+      same checkpoint.
 
 ### Image generation — latent diffusion transformer
 
@@ -130,8 +153,8 @@ it. Training compute and licensed data remain a separate, external problem.
       Frechet distance and contrastive alignment; audio SI-SDR, mel distance, WER, CER, and
       speaker similarity; video FVD and temporal consistency. Suites that cannot run report
       why rather than reporting nothing.
-- [ ] Standard benchmark adapters so the numbers can be compared outside this repository.
-- [ ] A `build.py --mode eval` entry point wired to the harness.
+- [x] Standard benchmark adapters so the numbers can be compared outside this repository.
+- [x] A `build.py --mode eval` entry point wired to the harness.
 
 ## Cognition layer
 
@@ -161,8 +184,8 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Add request validation and consistent error responses across all routes.
 - [x] Add rate limiting and payload size limits to generation endpoints.
 - [ ] Add structured logging and a request id for traceability.
-- [ ] Add OpenAPI or a documented schema for the REST API.
-- [ ] Pool or reuse the inference worker under concurrent load.
+- [x] Add OpenAPI or a documented schema for the REST API.
+- [x] Pool or reuse the inference worker under concurrent load.
 
 ## Frontend
 
@@ -176,7 +199,7 @@ it. Training compute and licensed data remain a separate, external problem.
 
 - [ ] Expand GUIDE.md with architecture diagrams for each module.
 - [x] Add a from-scratch training tutorial that walks through a full run on a single GPU.
-- [ ] Add a troubleshooting page for common CUDA, VRAM, and dependency issues.
+- [x] Add a troubleshooting page for common CUDA, VRAM, and dependency issues.
 - [ ] Add API reference documentation generated from source.
 
 ## DevOps and CI/CD

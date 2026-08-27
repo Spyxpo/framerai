@@ -10,6 +10,10 @@ from .framer import FramerModel
 from .tokenizer import FramerTokenizer
 from .utils.image_request import resolve_image_request
 
+# Prompt tokens pushed through the KV cache per prefill step. Bounded so a very
+# long prompt costs the same activation memory as a short one.
+DEFAULT_PREFILL_CHUNK = 4096
+
 
 def _filter_logits(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
     """Apply top-k then nucleus (top-p) filtering to a (1, V) logits row."""
@@ -58,6 +62,33 @@ class FramerGenerator:
         input_ids = torch.tensor([tokens], device=self.device)
         return self.model.forward_lm(input_ids)["hidden"]
 
+    def _prefill(self, input_ids, prefix_embeds=None, chunk_size=None):
+        """Seed the KV cache from a prompt, one chunk at a time.
+
+        A single-shot prefill runs the whole prompt through the backbone in one
+        forward, which materialises a logits row for every prompt position: at a
+        million tokens that is a (1, 1048576, vocab_size) tensor built before the
+        first token is ever sampled. Walking the prompt in chunks through the
+        cache bounds activations by the chunk size and keeps only the last logits
+        row, which is the only one generation reads. Attention is offset-aware
+        against a cache, so the result is identical either way.
+
+        Returns the populated cache and the logits for the final prompt position.
+        """
+        chunk = chunk_size or DEFAULT_PREFILL_CHUNK
+        starts = list(range(0, input_ids.shape[1], chunk)) or [0]
+        past, logits = None, None
+        for start in starts:
+            out = self.model.forward_lm(
+                input_ids[:, start:start + chunk],
+                prefix_embeds=prefix_embeds if start == 0 else None,
+                past_kvs=past,
+                use_cache=True,
+            )
+            past = out["past_kvs"]
+            logits = out["logits"][:, -1, :]
+        return past, logits
+
     @torch.no_grad()
     def generate_text(
         self,
@@ -68,12 +99,15 @@ class FramerGenerator:
         top_p: float = 0.9,
         image: torch.Tensor = None,
         audio: torch.Tensor = None,
+        prefill_chunk_size: int = None,
     ) -> str:
         """Generate text, optionally conditioned on an image or audio.
 
         Uses an incremental KV cache: the prompt is encoded once, then each new
         token attends to the cache in O(1) rather than re-running the whole
-        prefix every step.
+        prefix every step. The prompt itself is prefilled in chunks of
+        ``prefill_chunk_size`` tokens (default :data:`DEFAULT_PREFILL_CHUNK`),
+        which is what makes a context of a million tokens reachable.
         """
         tokens = self.tokenizer.encode(prompt, add_special=True)
         input_ids = torch.tensor([tokens], device=self.device)
@@ -86,9 +120,7 @@ class FramerGenerator:
         prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
         # Prefill the prompt (+ modality prefix) and seed the cache.
-        out = self.model.forward_lm(input_ids, prefix_embeds=prefix_embeds, use_cache=True)
-        past = out["past_kvs"]
-        logits = out["logits"][:, -1, :]
+        past, logits = self._prefill(input_ids, prefix_embeds, prefill_chunk_size)
 
         generated = list(tokens)
         for _ in range(max_new_tokens):

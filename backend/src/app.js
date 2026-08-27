@@ -16,8 +16,10 @@ const chatRoutes = require("./routes/chat");
 const generateRoutes = require("./routes/generate");
 const healthRoutes = require("./routes/health");
 const { setupWebSocket } = require("./services/websocket");
+const { getOpenApiSpecJson } = require("./openapi");
 const { notFoundHandler, errorHandler } = require("./middleware/errors");
 const { apiLimiter, generationLimiter } = require("./middleware/limiters");
+const { requestIdMiddleware } = require("./middleware/requestId");
 
 function createApp() {
   const app = express();
@@ -29,11 +31,18 @@ function createApp() {
   // Middleware
   app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
   app.use(express.json({ limit: config.jsonBodyLimit }));
+  app.use(requestIdMiddleware);
   app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
   // A broad ceiling for the whole API, then a much tighter one for the routes
   // that actually run the model.
   app.use("/api", apiLimiter);
+
+  // OpenAPI 3.1 specification endpoint
+  app.get("/api/openapi.json", (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.send(getOpenApiSpecJson());
+  });
 
   // Routes
   app.use("/api/health", healthRoutes);

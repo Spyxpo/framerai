@@ -10,6 +10,7 @@
  */
 
 const { MulterError } = require("multer");
+const { createLogger } = require("../services/logger");
 
 class ApiError extends Error {
   constructor(status, message, code = "ERROR", details) {
@@ -56,13 +57,13 @@ function errorHandler(err, req, res, next) {
   const normalized = normalize(err);
 
   if (normalized.status >= 500) {
-    // Keep the format string constant; the request values are arguments, not
-    // part of the format itself.
-    console.error("[error] %s %s:", req.method, req.originalUrl, err);
+    const log = createLogger({ requestId: req.requestId, route: `${req.method} ${req.originalUrl}` });
+    log.error("unhandled error", { status: normalized.status, error: err.message });
   }
 
   const body = { error: normalized.message, code: normalized.code };
   if (normalized.details) body.details = normalized.details;
+  if (req.requestId) body.requestId = req.requestId;
 
   res.status(normalized.status).json(body);
 }

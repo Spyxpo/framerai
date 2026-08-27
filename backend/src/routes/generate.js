@@ -101,7 +101,7 @@ router.post(
     }
 
     res.json(
-      await generateImage(prompt, numImages, { width, height, aspect, tier, seed, resolution })
+      await generateImage(prompt, numImages, { width, height, aspect, tier, seed, resolution }, req.requestId)
     );
   })
 );
@@ -115,7 +115,7 @@ router.post(
     const numFrames = v.integer("num_frames", { min: 1, max: 64, fallback: 16 });
     v.done();
 
-    res.json(await generateVideo(prompt, numFrames));
+    res.json(await generateVideo(prompt, numFrames, req.requestId));
   })
 );
 
@@ -127,7 +127,7 @@ router.post(
     const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
     v.done();
 
-    res.json(await generateAudio(prompt));
+    res.json(await generateAudio(prompt, {}, req.requestId));
   })
 );
 
@@ -141,7 +141,7 @@ router.post(
     const settings = readSettings(v);
     v.done();
 
-    res.json(await generateCode(prompt, language, settings));
+    res.json(await generateCode(prompt, language, settings, req.requestId));
   })
 );
 
@@ -157,7 +157,7 @@ router.post(
     v.done();
 
     const imagePath = `/uploads/images/${req.file.filename}`;
-    const result = await understandImage(req.file.path, prompt);
+    const result = await understandImage(req.file.path, prompt, req.requestId);
 
     res.json({ description: result.description, imagePath });
   })
@@ -175,10 +175,18 @@ router.post(
     v.done();
 
     const audioPath = `/uploads/audio/${req.file.filename}`;
-    const result = await transcribeAudio(req.file.path, prompt);
+    const result = await transcribeAudio(req.file.path, prompt, req.requestId);
 
     res.json({ text: result.text, audioPath, metadata: result.metadata });
   })
 );
+
+router.MAX_PROMPT_LENGTH = MAX_PROMPT_LENGTH;
+router.RESOLUTIONS = RESOLUTIONS;
+router.ASPECT_RATIOS = ASPECT_RATIOS;
+router.SIZE_TIERS = SIZE_TIERS;
+router.MIN_DIMENSION = MIN_DIMENSION;
+router.MAX_DIMENSION = MAX_DIMENSION;
+router.LANGUAGES = LANGUAGES;
 
 module.exports = router;

@@ -175,6 +175,36 @@ jobs:
         working-directory: backend
         run: npm test
 
+      - name: Check OpenAPI schema consistency
+        working-directory: backend
+        run: npm run openapi:check
+
+  backend-smoke:
+    name: Backend Smoke Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: E2E Smoke Test (Process-Level)
+        working-directory: backend
+        run: npm run test:smoke
+
   website:
     name: Website (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
