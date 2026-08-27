@@ -144,16 +144,83 @@ if __name__ == "__main__":
 }
 
 /**
- * Process a chat message and return a response, using the model when available.
+ * Canonical cognition-trace schema.
+ *
+ * A trace is only forwarded when it is structurally valid AND the request
+ * context permits it (privacy requirement: recalled memories may contain
+ * earlier user content, so traces are gated behind INCLUDE_TRACE or an
+ * operator-context header).
+ *
+ * Shape: {
+ *   memories?:   Array<{ text: string, score: number }>,
+ *   affect?:     Array<number>,               // affective vector
+ *   affect_adj?: number,                       // sampling temperature adjustment
+ *   sampling?:   Record<string, number>,       // top-k, top-p, etc.
+ *   tools?:      Array<{ name, input, output }>,
+ * }
  */
-async function processMessage(messages, requestType = "text", settings = {}) {
+function validateTrace(trace) {
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) return null;
+
+  const cleaned = {};
+  let hasContent = false;
+
+  if (Array.isArray(trace.memories) && trace.memories.length > 0) {
+    cleaned.memories = trace.memories.map((m) => ({
+      text: String(m?.text ?? ""),
+      score: Number(m?.score) || 0,
+    }));
+    hasContent = true;
+  }
+
+  if (Array.isArray(trace.affect) && trace.affect.length > 0) {
+    cleaned.affect = trace.affect.map((v) => Number(v) || 0);
+    hasContent = true;
+  }
+
+  if (trace.affect_adj != null && !isNaN(Number(trace.affect_adj))) {
+    cleaned.affect_adj = Number(trace.affect_adj);
+    hasContent = true;
+  }
+
+  if (trace.sampling && typeof trace.sampling === "object" && !Array.isArray(trace.sampling)) {
+    const samplingEntries = Object.entries(trace.sampling).map(([k, v]) => [k, Number(v) || 0]);
+    if (samplingEntries.length > 0) {
+      cleaned.sampling = Object.fromEntries(samplingEntries);
+      hasContent = true;
+    }
+  }
+
+  if (Array.isArray(trace.tools) && trace.tools.length > 0) {
+    cleaned.tools = trace.tools;
+    hasContent = true;
+  }
+
+  // Return null if trace is empty (no meaningful content)
+  return hasContent ? cleaned : null;
+}
+
+/**
+ * Returns true when the caller context allows cognition traces to be forwarded.
+ * Traces contain recalled memories which may include earlier user content, so
+ * they are only sent when explicitly opted in.
+ *
+ * @param {object|null} operatorContext - headers or flags from the caller
+ */
+function traceAllowed(operatorContext) {
+  if (process.env.INCLUDE_TRACE === "true") return true;
+  if (operatorContext?.operator === true) return true;
+  return false;
+}
+
+async function processMessage(messages, requestType = "text", settings = {}, requestId = null, operatorCtx = null) {
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings);
+      return await modelChat(intent, content, settings, requestId, operatorCtx);
     } catch (err) {
       console.warn(`[model] falling back to placeholder: ${err.message}`);
     }
@@ -162,7 +229,7 @@ async function processMessage(messages, requestType = "text", settings = {}) {
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}) {
+async function modelChat(intent, content, settings = {}, requestId = null, operatorCtx = null) {
   if (intent === "image" || intent === "video" || intent === "audio") {
     const result = await bridge.request(intent, { prompt: content, ...settings });
     return {
@@ -173,11 +240,25 @@ async function modelChat(intent, content, settings = {}) {
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content, ...settings });
+  const result = await bridge.request(op, { prompt: content, ...settings }, requestId);
+  const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
+  // Tool steps travel with the reply so the UI can show what was searched and
+  // read instead of presenting a sourced answer as if it came from the weights.
+  if (result.tools) metadata.tools = result.tools;
+  // Cognition trace — only forwarded when the operator context permits it
+  // (privacy: recalled memories may contain earlier user content).
+  // Strip it from the result if not allowed, even if Python sent it.
+  if (result.trace) {
+    if (traceAllowed(operatorCtx)) {
+      const validated = validateTrace(result.trace);
+      if (validated) metadata.trace = validated;
+    }
+    // If not allowed or invalid, trace is omitted
+  }
   return {
     type: intent === "code" ? "code" : "text",
     content: result.content,
-    metadata: { model: `framerai-${intent === "code" ? "code" : "text"}` },
+    metadata,
   };
 }
 
@@ -388,4 +469,5 @@ module.exports = {
   generateCode,
   transcribeAudio,
   understandImage,
+  validateTrace,
 };

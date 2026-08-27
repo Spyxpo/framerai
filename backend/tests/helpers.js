@@ -101,6 +101,8 @@ function mockModel(overrides = {}) {
     })),
     transcribeAudio: record("transcribeAudio", { text: "transcribed", metadata: { model: "test-model" } }),
     understandImage: record("understandImage", { description: "a description" }),
+    // validateTrace must be included for route-level defense-in-depth validation (Issue #164)
+    validateTrace: require(MODEL_MODULE).validateTrace,
     ...overrides,
   };
 

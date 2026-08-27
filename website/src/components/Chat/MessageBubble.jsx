@@ -2,6 +2,7 @@ import React from "react";
 import { User, Bot, Copy, Check, AlertCircle, RefreshCw } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
 import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
+import CognitionTrace from "./CognitionTrace";
 
 export default function MessageBubble({ message, isStreaming, onRetry }) {
   const [copied, setCopied] = React.useState(false);
@@ -103,6 +104,9 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
           {renderContent(message.content)}
         </div>
         {renderMedia()}
+        {!isUser && message.metadata?.trace && (
+          <CognitionTrace trace={message.metadata.trace} />
+        )}
         {!isUser && message.content && !isError && (
           <div className="message-actions">
             <button

@@ -6,6 +6,7 @@ const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { processMessage } = require("./model");
+const { validateTrace } = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
 
@@ -223,7 +224,23 @@ function setupWebSocket(wss) {
 
           // Process and stream response
           const messages = [{ role: "user", content }];
-          const response = await processMessage(messages, messageType, settings);
+          const operatorCtx = { operator: req?.headers?.["x-operator"] === "true" };
+          const response = await processMessage(messages, messageType, settings, null, operatorCtx);
+
+          // Privacy: validate and strip trace from response if not allowed (defense in depth)
+          const traceAllowed = process.env.INCLUDE_TRACE === "true" || operatorCtx.operator === true;
+          if (response.metadata?.trace) {
+            if (traceAllowed) {
+              const validated = validateTrace(response.metadata.trace);
+              if (validated) {
+                response.metadata.trace = validated;
+              } else {
+                delete response.metadata.trace;
+              }
+            } else {
+              delete response.metadata.trace;
+            }
+          }
 
           // Special handling for audio: stream PCM chunks
           if (response.type === "audio") {
@@ -237,14 +254,15 @@ function setupWebSocket(wss) {
 
           for (let i = 0; i < words.length; i++) {
             accumulated += (i > 0 ? " " : "") + words[i];
+            const isDone = i === words.length - 1;
             ws.send(
               JSON.stringify({
                 type: "stream",
                 conversationId,
                 content: accumulated,
-                done: i === words.length - 1,
+                done: isDone,
                 responseType: response.type,
-                metadata: i === words.length - 1 ? response.metadata : undefined,
+                metadata: isDone ? response.metadata : undefined,
               })
             );
             // Simulate token generation delay

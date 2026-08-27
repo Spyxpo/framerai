@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { randomUUID } = require("node:crypto");
-const { processMessage } = require("../services/model");
+const { processMessage, validateTrace } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const { generationLimiter } = require("../middleware/limiters");
@@ -91,7 +91,29 @@ router.post(
       conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
     }
 
-    const response = await processMessage(conv.messages, type, settings);
+    const response = await processMessage(conv.messages, type, settings, req.requestId, {
+      operator: req.headers["x-operator"] === "true",
+    });
+
+    // Privacy: validate and strip trace from response if not allowed (defense in depth).
+    // processMessage already filters, but this ensures traces can't leak even
+    // if mocked/bypassed for testing or if implementation changes.
+    const traceAllowed = process.env.INCLUDE_TRACE === "true" || req.headers["x-operator"] === "true";
+    if (response.metadata?.trace) {
+      if (traceAllowed) {
+        // Validate and clean the trace structure
+        const validated = validateTrace(response.metadata.trace);
+        if (validated) {
+          response.metadata.trace = validated;
+        } else {
+          delete response.metadata.trace;
+        }
+      } else {
+        // Not allowed - strip it
+        delete response.metadata.trace;
+      }
+    }
+
     const assistantMessage = {
       id: randomUUID(),
       role: "assistant",
@@ -104,5 +126,8 @@ router.post(
     res.json(assistantMessage);
   })
 );
+
+router.MESSAGE_TYPES = MESSAGE_TYPES;
+router.MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH;
 
 module.exports = router;
