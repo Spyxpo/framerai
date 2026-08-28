@@ -101,6 +101,10 @@ function mockModel(overrides = {}) {
     })),
     transcribeAudio: record("transcribeAudio", { text: "transcribed", metadata: { model: "test-model" } }),
     understandImage: record("understandImage", { description: "a description" }),
+    // The route layer re-validates and re-gates the trace as defence in depth
+    // (Issue #164), so the stub has to carry the real helpers through.
+    validateTrace: require(MODEL_MODULE).validateTrace,
+    traceAllowed: require(MODEL_MODULE).traceAllowed,
     ...overrides,
   };
 
