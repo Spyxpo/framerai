@@ -10,6 +10,7 @@
 const { randomUUID } = require("node:crypto");
 const bridge = require("./pythonBridge");
 const { logger } = require("./logger");
+const config = require("../config");
 
 const GENERATED_URL = "/uploads/generated";
 
@@ -206,11 +207,17 @@ function validateTrace(trace) {
  * Traces contain recalled memories which may include earlier user content, so
  * they are only sent when explicitly opted in.
  *
+ * `INCLUDE_TRACE` is a server-side switch and is always honoured. The operator
+ * flag comes from a request header, which a client can set for itself, so it is
+ * only honoured when a proxy is trusted to set it — the same rule the WebSocket
+ * rate limiter applies to `x-forwarded-for`. Without that guard anyone could
+ * ask for the trace by name and read back the recalled memories.
+ *
  * @param {object|null} operatorContext - headers or flags from the caller
  */
 function traceAllowed(operatorContext) {
   if (process.env.INCLUDE_TRACE === "true") return true;
-  if (operatorContext?.operator === true) return true;
+  if (config.trustProxy && operatorContext?.operator === true) return true;
   return false;
 }
 
@@ -471,4 +478,5 @@ module.exports = {
   transcribeAudio,
   understandImage,
   validateTrace,
+  traceAllowed,
 };

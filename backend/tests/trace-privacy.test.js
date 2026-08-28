@@ -15,8 +15,15 @@ const { mockModel, loadApp, newConversation } = require("./helpers");
 const APP_PATH = require.resolve("../src/app");
 const MODEL_PATH = require.resolve("../src/services/model");
 const CHAT_PATH = require.resolve("../src/routes/chat");
+const CONFIG_PATH = require.resolve("../src/config");
+
+// The operator header is client-settable, so it is only honoured behind a
+// trusted proxy. These tests run with TRUST_PROXY on; the untrusted case is
+// covered separately below.
+process.env.TRUST_PROXY = "true";
 
 function clearCache() {
+  delete require.cache[CONFIG_PATH];
   delete require.cache[APP_PATH];
   delete require.cache[MODEL_PATH];
   delete require.cache[CHAT_PATH];
@@ -181,4 +188,40 @@ test("backend enforces trace privacy at boundary", async () => {
 
   // Backend should strip the trace at the boundary
   assert.ok(!res.body.metadata.trace, "backend must enforce trace privacy at boundary");
+});
+
+test("operator header is ignored when no proxy is trusted", async (t) => {
+  const original = process.env.TRUST_PROXY;
+  process.env.TRUST_PROXY = "false";
+  t.after(() => {
+    if (original === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = original;
+    clearCache();
+  });
+
+  clearCache();
+  mockModel({
+    processMessage: () => ({
+      type: "text",
+      content: "reply",
+      metadata: {
+        model: "framerai-text",
+        // The worker sends a trace regardless; the boundary has to strip it.
+        trace: { memories: [{ text: "should not leak", score: 0.95 }] },
+      },
+    }),
+  });
+  const app = loadApp();
+  const id = await newConversation(app);
+
+  const res = await request(app)
+    .post(`/api/chat/conversations/${id}/messages`)
+    .set("x-operator", "true")
+    .send({ content: "hello" });
+
+  assert.equal(res.status, 200);
+  assert.ok(
+    !res.body.metadata.trace,
+    "a client that sets the operator header for itself must not unlock the trace"
+  );
 });

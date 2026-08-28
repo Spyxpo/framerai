@@ -5,8 +5,7 @@
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { processMessage } = require("./model");
-const { validateTrace } = require("./model");
+const { processMessage, validateTrace, traceAllowed } = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
 const { createLogger } = require("./logger");
@@ -230,15 +229,10 @@ function setupWebSocket(wss) {
           const response = await processMessage(messages, messageType, settings, null, operatorCtx);
 
           // Privacy: validate and strip trace from response if not allowed (defense in depth)
-          const traceAllowed = process.env.INCLUDE_TRACE === "true" || operatorCtx.operator === true;
           if (response.metadata?.trace) {
-            if (traceAllowed) {
-              const validated = validateTrace(response.metadata.trace);
-              if (validated) {
-                response.metadata.trace = validated;
-              } else {
-                delete response.metadata.trace;
-              }
+            const validated = traceAllowed(operatorCtx) ? validateTrace(response.metadata.trace) : null;
+            if (validated) {
+              response.metadata.trace = validated;
             } else {
               delete response.metadata.trace;
             }

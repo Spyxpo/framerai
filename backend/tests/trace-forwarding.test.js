@@ -17,8 +17,15 @@ const APP_PATH = require.resolve("../src/app");
 const MODEL_PATH = require.resolve("../src/services/model");
 const CHAT_PATH = require.resolve("../src/routes/chat");
 const WEBSOCKET_PATH = require.resolve("../src/services/websocket");
+const CONFIG_PATH = require.resolve("../src/config");
+
+// The operator header is client-settable, so it is only honoured behind a
+// trusted proxy. These tests run with TRUST_PROXY on; the untrusted case is
+// covered separately below.
+process.env.TRUST_PROXY = "true";
 
 function clearCache() {
+  delete require.cache[CONFIG_PATH];
   delete require.cache[APP_PATH];
   delete require.cache[MODEL_PATH];
   delete require.cache[CHAT_PATH];
@@ -341,4 +348,54 @@ test("WebSocket: trace omitted when operator context not set", async (t) => {
 
   assert.ok(final.metadata, "metadata should exist");
   assert.ok(!final.metadata.trace, "trace should be omitted without operator context");
+});
+
+test("WebSocket: operator header is ignored when no proxy is trusted", async (t) => {
+  const original = process.env.TRUST_PROXY;
+  process.env.TRUST_PROXY = "false";
+  t.after(() => {
+    if (original === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = original;
+    clearCache();
+  });
+
+  clearCache();
+  mockModel({
+    processMessage: () => ({
+      type: "text",
+      content: "reply",
+      metadata: {
+        model: "framerai-text",
+        // The worker sends a trace regardless; the boundary has to strip it.
+        trace: { memories: [{ text: "should not leak over ws", score: 0.9 }] },
+      },
+    }),
+  });
+
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const ws = new WebSocket(server.wsUrl, { headers: { "x-operator": "true" } });
+
+  const messages = await new Promise((resolve, reject) => {
+    const received = [];
+    ws.on("error", reject);
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "chat", content: "test", conversationId: "test-conv" }));
+    });
+    ws.on("message", (data) => {
+      const msg = JSON.parse(data);
+      received.push(msg);
+      if (msg.type === "stream" && msg.done) {
+        ws.close();
+        resolve(received);
+      }
+    });
+  });
+
+  const streams = messages.filter((m) => m.type === "stream");
+  const final = streams[streams.length - 1];
+
+  assert.ok(final.metadata, "metadata should exist");
+  assert.ok(!final.metadata.trace, "a self-set operator header must not unlock the trace");
 });
