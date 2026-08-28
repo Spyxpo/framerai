@@ -450,6 +450,166 @@ body {
   border-radius: var(--radius-full);
 }
 
+/* Cognition trace inspector */
+.cognition-trace {
+  margin-top: 10px;
+}
+
+.cognition-trace-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s;
+}
+
+.cognition-trace-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.cognition-trace-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 6px;
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-width: min(560px, 100%);
+}
+
+.trace-section {
+  /* Flex children default to min-width:auto, which would let a wide tool
+     payload push the panel past the bubble instead of scrolling inside it. */
+  min-width: 0;
+}
+
+.trace-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.trace-memory-list,
+.trace-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.trace-memory {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.trace-memory-score {
+  flex-shrink: 0;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--accent-hover);
+  background: var(--accent-muted);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+}
+
+.trace-memory-text {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.trace-affect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.trace-affect-val {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+
+.trace-affect-adj {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.trace-kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.trace-kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.trace-key {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.trace-val {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.trace-tool-list {
+  padding-left: 0;
+}
+
+.trace-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trace-tool-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.trace-tool-io {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.trace-tool-output {
+  color: var(--text-muted);
+}
+
 /* Generated media */
 .message-media {
   display: block;
