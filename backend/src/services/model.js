@@ -9,6 +9,8 @@
 
 const { randomUUID } = require("node:crypto");
 const bridge = require("./pythonBridge");
+const { logger } = require("./logger");
+const config = require("../config");
 
 const GENERATED_URL = "/uploads/generated";
 
@@ -144,27 +146,136 @@ if __name__ == "__main__":
 }
 
 /**
- * Process a chat message and return a response, using the model when available.
+ * Canonical cognition-trace schema.
+ *
+ * A trace is only forwarded when it is structurally valid AND the request
+ * context permits it (privacy requirement: recalled memories may contain
+ * earlier user content, so traces are gated behind INCLUDE_TRACE or an
+ * operator-context header).
+ *
+ * Shape: {
+ *   memories?:   Array<{ text: string, score: number }>,
+ *   affect?:     Array<number>,               // affective vector
+ *   affect_adj?: number,                       // sampling temperature adjustment
+ *   sampling?:   Record<string, number>,       // top-k, top-p, etc.
+ *   tools?:      Array<{ name, input, output }>,
+ * }
  */
-async function processMessage(messages, requestType = "text", settings = {}, options = {}) {
+function validateTrace(trace) {
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) return null;
+
+  const cleaned = {};
+  let hasContent = false;
+
+  if (Array.isArray(trace.memories) && trace.memories.length > 0) {
+    cleaned.memories = trace.memories.map((m) => ({
+      text: String(m?.text ?? ""),
+      score: Number(m?.score) || 0,
+    }));
+    hasContent = true;
+  }
+
+  if (Array.isArray(trace.affect) && trace.affect.length > 0) {
+    cleaned.affect = trace.affect.map((v) => Number(v) || 0);
+    hasContent = true;
+  }
+
+  if (trace.affect_adj != null && !isNaN(Number(trace.affect_adj))) {
+    cleaned.affect_adj = Number(trace.affect_adj);
+    hasContent = true;
+  }
+
+  if (trace.sampling && typeof trace.sampling === "object" && !Array.isArray(trace.sampling)) {
+    const samplingEntries = Object.entries(trace.sampling).map(([k, v]) => [k, Number(v) || 0]);
+    if (samplingEntries.length > 0) {
+      cleaned.sampling = Object.fromEntries(samplingEntries);
+      hasContent = true;
+    }
+  }
+
+  if (Array.isArray(trace.tools) && trace.tools.length > 0) {
+    cleaned.tools = trace.tools;
+    hasContent = true;
+  }
+
+  // Return null if trace is empty (no meaningful content)
+  return hasContent ? cleaned : null;
+}
+
+/**
+ * Returns true when the caller context allows cognition traces to be forwarded.
+ * Traces contain recalled memories which may include earlier user content, so
+ * they are only sent when explicitly opted in.
+ *
+ * `INCLUDE_TRACE` is a server-side switch and is always honoured. The operator
+ * flag comes from a request header, which a client can set for itself, so it is
+ * only honoured when a proxy is trusted to set it — the same rule the WebSocket
+ * rate limiter applies to `x-forwarded-for`. Without that guard anyone could
+ * ask for the trace by name and read back the recalled memories.
+ *
+ * @param {object|null} operatorContext - headers or flags from the caller
+ */
+function traceAllowed(operatorContext) {
+  if (process.env.INCLUDE_TRACE === "true") return true;
+  if (config.trustProxy && operatorContext?.operator === true) return true;
+  return false;
+}
+
+/**
+ * Normalizes options and requestId parameter combinations into a uniform object structure.
+ * Supports both options object ({ onApprovalRequest, requestId, operatorCtx }) and
+ * legacy positional arguments (requestId, operatorCtx).
+ */
+function normalizeModelOptions(requestIdOrOptions, operatorCtxParam) {
+  let requestId = null;
+  let operatorCtx = null;
+  let onApprovalRequest = null;
+  let optionsObj = {};
+
+  if (typeof requestIdOrOptions === "string") {
+    requestId = requestIdOrOptions;
+    operatorCtx = operatorCtxParam || null;
+    optionsObj = { requestId, operatorCtx };
+  } else if (requestIdOrOptions && typeof requestIdOrOptions === "object") {
+    optionsObj = requestIdOrOptions;
+    requestId = requestIdOrOptions.requestId || (typeof operatorCtxParam === "string" ? operatorCtxParam : null);
+    operatorCtx = requestIdOrOptions.operatorCtx || (typeof operatorCtxParam === "object" ? operatorCtxParam : null);
+    onApprovalRequest = requestIdOrOptions.onApprovalRequest || null;
+  } else {
+    operatorCtx = operatorCtxParam || null;
+    optionsObj = { operatorCtx };
+  }
+
+  return {
+    requestId,
+    operatorCtx,
+    onApprovalRequest,
+    options: optionsObj,
+  };
+}
+
+async function processMessage(messages, requestType = "text", settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings, options);
+      return await modelChat(intent, content, settings, opts.options);
     } catch (err) {
-      console.warn(`[model] falling back to placeholder: ${err.message}`);
+      logger.warn("falling back to placeholder", { error: err.message, requestId: opts.requestId });
     }
   }
 
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}, options = {}) {
+async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
+
   if (intent === "image" || intent === "video" || intent === "audio") {
-    const result = await bridge.request(intent, { prompt: content, ...settings }, options);
+    const result = await bridge.request(intent, { prompt: content, ...settings }, opts.options);
     return {
       type: intent,
       content: `Here is the ${intent} generated for: "${content}"`,
@@ -173,11 +284,21 @@ async function modelChat(intent, content, settings = {}, options = {}) {
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content, ...settings }, options);
+  const result = await bridge.request(op, { prompt: content, ...settings }, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
   // Tool steps travel with the reply so the UI can show what was searched and
   // read instead of presenting a sourced answer as if it came from the weights.
   if (result.tools) metadata.tools = result.tools;
+  // Cognition trace — only forwarded when the operator context permits it
+  // (privacy: recalled memories may contain earlier user content).
+  // Strip it from the result if not allowed, even if Python sent it.
+  if (result.trace) {
+    if (traceAllowed(opts.operatorCtx)) {
+      const validated = validateTrace(result.trace);
+      if (validated) metadata.trace = validated;
+    }
+    // If not allowed or invalid, trace is omitted
+  }
   return {
     type: intent === "code" ? "code" : "text",
     content: result.content,
@@ -250,7 +371,8 @@ function generateTextResponse(content, messages) {
   return `I understand your message: "${content}"\n\nAs FramerAI, I can help with text, code, image, video, and audio generation. To unlock full capabilities, train the model:\n\n\`\`\`bash\npython build.py --mode all --size tiny\n\`\`\`\n\nThen set MODEL_ENABLED=true and restart the backend.`;
 }
 
-async function generateImage(prompt, numImages = 1, size = {}) {
+async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   // The worker resolves the final dimensions: explicit width/height win, then an
   // aspect ratio at a size tier, then whatever the prompt itself asks for, then
   // the configured default. It reports back what it understood.
@@ -261,7 +383,7 @@ async function generateImage(prompt, numImages = 1, size = {}) {
 
   if (bridge.available()) {
     try {
-      const result = await bridge.request("image", payload);
+      const result = await bridge.request("image", payload, opts.options);
       return {
         id: randomUUID(),
         prompt,
@@ -277,7 +399,7 @@ async function generateImage(prompt, numImages = 1, size = {}) {
         },
       };
     } catch (err) {
-      console.warn(`[model] image fallback: ${err.message}`);
+      logger.warn("image fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -293,10 +415,11 @@ async function generateImage(prompt, numImages = 1, size = {}) {
   };
 }
 
-async function generateVideo(prompt, numFrames = 16) {
+async function generateVideo(prompt, numFrames = 16, requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
     try {
-      const result = await bridge.request("video", { prompt, num_frames: numFrames });
+      const result = await bridge.request("video", { prompt, num_frames: numFrames }, opts.options);
       return {
         id: randomUUID(),
         prompt,
@@ -304,7 +427,7 @@ async function generateVideo(prompt, numFrames = 16) {
         metadata: { frames: numFrames, model: "framerai-video" },
       };
     } catch (err) {
-      console.warn(`[model] video fallback: ${err.message}`);
+      logger.warn("video fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -315,10 +438,11 @@ async function generateVideo(prompt, numFrames = 16) {
   };
 }
 
-async function generateAudio(prompt, settings = {}) {
+async function generateAudio(prompt, settings = {}, requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
     try {
-      const result = await bridge.request("audio", { prompt, ...settings });
+      const result = await bridge.request("audio", { prompt, ...settings }, opts.options);
       return {
         id: randomUUID(),
         prompt,
@@ -326,7 +450,7 @@ async function generateAudio(prompt, settings = {}) {
         metadata: { model: "framerai-audio" },
       };
     } catch (err) {
-      console.warn(`[model] audio fallback: ${err.message}`);
+      logger.warn("audio fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -337,13 +461,14 @@ async function generateAudio(prompt, settings = {}) {
   };
 }
 
-async function generateCode(prompt, language = "python", settings = {}) {
+async function generateCode(prompt, language = "python", settings = {}, requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
     try {
-      const result = await bridge.request("code", { prompt, language, ...settings });
+      const result = await bridge.request("code", { prompt, language, ...settings }, opts.options);
       return { id: randomUUID(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
     } catch (err) {
-      console.warn(`[model] code fallback: ${err.message}`);
+      logger.warn("code fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -355,13 +480,14 @@ async function generateCode(prompt, language = "python", settings = {}) {
   };
 }
 
-async function transcribeAudio(audioPath, prompt = "Transcribe the audio:") {
+async function transcribeAudio(audioPath, prompt = "Transcribe the audio:", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
     try {
-      const result = await bridge.request("transcribe", { audio_path: audioPath, prompt });
+      const result = await bridge.request("transcribe", { audio_path: audioPath, prompt }, opts.options);
       return { text: result.content, metadata: { model: "framerai-audio" } };
     } catch (err) {
-      console.warn(`[model] transcribe fallback: ${err.message}`);
+      logger.warn("transcribe fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -370,13 +496,14 @@ async function transcribeAudio(audioPath, prompt = "Transcribe the audio:") {
   };
 }
 
-async function understandImage(imagePath, prompt = "Describe this image") {
+async function understandImage(imagePath, prompt = "Describe this image", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
     try {
-      const result = await bridge.request("understand", { image_path: imagePath, prompt });
+      const result = await bridge.request("understand", { image_path: imagePath, prompt }, opts.options);
       return { description: result.content };
     } catch (err) {
-      console.warn(`[model] understand fallback: ${err.message}`);
+      logger.warn("understand fallback", { error: err.message, requestId: opts.requestId });
     }
   }
   return {
@@ -392,4 +519,6 @@ module.exports = {
   generateCode,
   transcribeAudio,
   understandImage,
+  validateTrace,
+  traceAllowed,
 };

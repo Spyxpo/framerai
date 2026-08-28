@@ -509,6 +509,12 @@ def print_estimate(config: FramerConfig):
     print(f"  Weights (bf16)     {est['bf16_bytes'] / gb:>9.1f} GiB")
     print(f"  Training state     {est['adamw_bytes'] / gb:>9.1f} GiB "
           f"(weights + fp32 master + AdamW moments)")
+    print(f"  KV cache           {est['kv_cache_bytes'] / gb:>9.1f} GiB "
+          f"(bf16, one sequence at {config.max_seq_len:,} tokens)")
+    if config.context_extension > 1.0:
+        print(f"  Context            {config.max_seq_len:,} tokens "
+              f"({config.context_extension:.0f}x {config.rope_original_max_seq_len:,} "
+              f"via {config.rope_scaling_type} RoPE scaling)")
 
 
 def _make_parser() -> argparse.ArgumentParser:

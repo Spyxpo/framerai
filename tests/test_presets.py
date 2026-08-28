@@ -1,4 +1,4 @@
-"""Preset registry + parameter estimator tests (incl. the 2T flagship)."""
+"""Preset registry + parameter estimator tests (incl. the 3T flagship)."""
 
 import pytest
 
@@ -13,7 +13,12 @@ LARGE_MULTIMODAL = [
     "framer-200b-a20b",
     "framer-1t-a32b",
     "framer-2t-a49b",
+    "framer-3t-a64b",
 ]
+
+# Expert counts have to divide evenly across every mesh width the expert-parallel
+# placement supports, or the largest presets cannot be sharded at all.
+EP_MESHES = (8, 16, 32, 64, 128)
 
 
 def test_all_presets_build_configs():
@@ -29,9 +34,35 @@ def test_size_aliases():
     assert FramerConfig.from_preset("small").preset == "framer-small"
 
 
-def test_tiny_preset_image_train_resolution():
+def test_preset_image_train_resolutions():
     assert FramerConfig.from_preset("framer-tiny").image_train_resolution == 64
     assert FramerConfig.from_preset("framer-tiny-moe").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-small").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-medium").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-large").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-3b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-8b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-30b-a3b").image_train_resolution == 64
+    assert FramerConfig.from_preset("framer-160b-a16b").image_train_resolution == 512
+    assert FramerConfig.from_preset("framer-2t-a49b").image_train_resolution == 512
+
+
+def test_validate_rejects_high_resolution_pixel_unet():
+    with pytest.raises(ValueError, match="image_train_resolution.*cannot exceed 64"):
+        FramerConfig(image_gen_arch="unet", image_train_resolution=128).validate()
+
+
+def test_pixel_unet_forward_backward_pass():
+    import torch
+    cfg = FramerConfig.from_preset("framer-small")
+    model = FramerModel(cfg)
+    input_ids = torch.randint(0, cfg.vocab_size, (1, 8))
+    target_images = torch.randn(1, 3, cfg.image_train_resolution, cfg.image_train_resolution)
+    out = model(input_ids=input_ids, target_images=target_images)
+    assert "image_loss" in out
+    assert torch.isfinite(out["image_loss"])
+    out["image_loss"].backward()
+    assert model.diffusion.unet.conv_in.weight.grad is not None
 
 
 def test_trillion_preset_is_about_1t_without_instantiation():
@@ -65,6 +96,31 @@ def test_trillion_preset_counts_every_modality():
     assert est["active"] < 4e10  # sparse: a text token routes through ~32B
     assert est["multimodal_total"] > 1e10  # towers scaled with the backbone
     assert est["model_total"] == est["total"] + est["multimodal_total"]
+
+
+def test_flagship_preset_is_about_3t_across_every_modality():
+    """The 3T flagship: three trillion of text, image, video, and audio together."""
+    cfg = FramerConfig.from_preset("framer-3t-a64b")
+    est = estimate_params(cfg)
+    assert 2.95e12 < est["model_total"] < 3.1e12
+    assert 6e10 < est["active"] < 7e10  # top-6 routing, ~64B per text token
+    assert est["multimodal_total"] > 7e10  # towers scaled with the backbone
+    assert est["model_total"] == est["total"] + est["multimodal_total"]
+
+
+def test_flagship_towers_outgrow_the_2t_preset():
+    """The point of the preset is the towers, not only the expert count."""
+    two = estimate_params(FramerConfig.from_preset("framer-2t-a49b"))["multimodal"]
+    three = estimate_params(FramerConfig.from_preset("framer-3t-a64b"))["multimodal"]
+    for tower in ("vision_encoder", "audio_encoder", "image_diffusion", "video_diffusion"):
+        assert three[tower] > two[tower], tower
+
+
+@pytest.mark.parametrize("name", ["framer-2t-a49b", "framer-3t-a64b"])
+def test_flagship_experts_divide_across_every_mesh(name):
+    cfg = FramerConfig.from_preset(name)
+    for mesh in EP_MESHES:
+        assert cfg.n_experts % mesh == 0, f"{cfg.n_experts} experts do not shard {mesh} ways"
 
 
 def test_200b_preset():

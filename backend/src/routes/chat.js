@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { randomUUID } = require("node:crypto");
-const { processMessage } = require("../services/model");
+const { processMessage, validateTrace, traceAllowed } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const { generationLimiter } = require("../middleware/limiters");
@@ -91,7 +91,22 @@ router.post(
       conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
     }
 
-    const response = await processMessage(conv.messages, type, settings);
+    const operatorCtx = { operator: req.headers["x-operator"] === "true" };
+    const response = await processMessage(conv.messages, type, settings, req.requestId, operatorCtx);
+
+    // Privacy: validate and strip trace from response if not allowed (defense in depth).
+    // processMessage already filters, but this ensures traces can't leak even
+    // if mocked/bypassed for testing or if implementation changes. The gate is
+    // the same one processMessage uses, so there is one rule, not two.
+    if (response.metadata?.trace) {
+      const validated = traceAllowed(operatorCtx) ? validateTrace(response.metadata.trace) : null;
+      if (validated) {
+        response.metadata.trace = validated;
+      } else {
+        delete response.metadata.trace;
+      }
+    }
+
     const assistantMessage = {
       id: randomUUID(),
       role: "assistant",

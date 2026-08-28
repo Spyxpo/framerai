@@ -263,6 +263,11 @@ def estimate_params(config, strict: bool = False) -> dict:
         # rounded to 16 to leave room for gradients).
         "bf16_bytes": 2 * model_total,
         "adamw_bytes": 16 * model_total,
+        # KV cache for a single sequence at the full declared context, in bf16:
+        # a key and a value tensor per layer, two bytes each. It is per sequence
+        # rather than per batch, and at long context it is the number that
+        # decides whether the window is servable at all.
+        "kv_cache_bytes": 4 * n_layers * kv_dim * config.max_seq_len,
         "summary": (
             f"{config.preset or 'custom'}: {human_params(total)} text params, "
             f"{human_params(active)} active/token"
