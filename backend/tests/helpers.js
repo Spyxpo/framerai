@@ -68,7 +68,7 @@ function mockModel(overrides = {}) {
     return Promise.resolve(typeof result === "function" ? result(...args) : result);
   };
 
-  const exports = {
+  const targetExports = {
     processMessage: record("processMessage", (messages, type = "text", settings = {}, options = {}) => ({
       type,
       content: `reply to: ${messages[messages.length - 1].content}`,
@@ -109,12 +109,16 @@ function mockModel(overrides = {}) {
     ...overrides,
   };
 
-  require.cache[MODEL_MODULE] = {
-    id: MODEL_MODULE,
-    filename: MODEL_MODULE,
-    loaded: true,
-    exports,
-  };
+  if (require.cache[MODEL_MODULE] && require.cache[MODEL_MODULE].exports) {
+    Object.assign(require.cache[MODEL_MODULE].exports, targetExports);
+  } else {
+    require.cache[MODEL_MODULE] = {
+      id: MODEL_MODULE,
+      filename: MODEL_MODULE,
+      loaded: true,
+      exports: targetExports,
+    };
+  }
 
   return calls;
 }
@@ -132,15 +136,34 @@ function loadApp() {
  */
 async function startServer() {
   const { createServer } = require("../src/app");
-  const { app, server } = createServer();
+  const { app, server, wss } = createServer();
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   return {
     app,
     server,
+    wss,
     wsUrl: `ws://127.0.0.1:${server.address().port}/ws`,
-    stop: () => new Promise((resolve) => server.close(resolve)),
+    stop: () =>
+      new Promise((resolve) => {
+        if (wss) {
+          try {
+            if (wss.clients) {
+              for (const client of wss.clients) {
+                try {
+                  client.terminate();
+                } catch (_) {}
+              }
+            }
+            wss.close();
+          } catch (_) {}
+        }
+        if (typeof server.closeAllConnections === "function") {
+          server.closeAllConnections();
+        }
+        server.close(resolve);
+      }),
   };
 }
 

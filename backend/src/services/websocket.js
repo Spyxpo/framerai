@@ -5,7 +5,7 @@
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { processMessage, validateTrace, traceAllowed } = require("./model");
+const model = require("./model");
 const { generationCounter } = require("../middleware/limiters");
 const config = require("../config");
 const { createLogger } = require("./logger");
@@ -90,6 +90,21 @@ function parseWavFile(filePath) {
 }
 
 /**
+ * Safely send a JSON payload over WebSocket only if the connection is OPEN.
+ */
+function safeSend(ws, payload) {
+  if (ws && ws.readyState === 1 /* OPEN */) {
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
  * Stream audio in chunks over WebSocket.
  * Reads the generated WAV file, extracts PCM data, and sends it in time-based chunks.
  */
@@ -97,14 +112,14 @@ async function streamAudio(ws, response, conversationId, wsLog) {
   const audioUrl = response.metadata?.url;
   if (!audioUrl) {
     // No audio file available, send non-streaming response
-    ws.send(JSON.stringify({
+    safeSend(ws, {
       type: "stream",
       conversationId,
       content: response.content,
       done: true,
       responseType: "audio",
       metadata: response.metadata,
-    }));
+    });
     return;
   }
 
@@ -127,6 +142,8 @@ async function streamAudio(ws, response, conversationId, wsLog) {
 
     // Send audio chunks
     for (let i = 0; i < totalChunks; i++) {
+      if (ws.readyState !== 1 /* OPEN */) break;
+
       const start = i * bytesPerChunk;
       const end = Math.min(start + bytesPerChunk, pcmData.length);
       const chunk = pcmData.subarray(start, end);
@@ -153,24 +170,23 @@ async function streamAudio(ws, response, conversationId, wsLog) {
         },
       };
 
-      ws.send(JSON.stringify(message));
+      const sent = safeSend(ws, message);
 
       // Small delay between chunks to simulate streaming and avoid overwhelming the client
-      if (!isLast) {
-        await new Promise(r => setTimeout(r, 50));
-      }
+      if (!sent || isLast) break;
+      await new Promise(r => setTimeout(r, 50));
     }
   } catch (err) {
     wsLog.error("audio streaming failed", { error: err.message });
     // Fallback: send non-streaming response with URL
-    ws.send(JSON.stringify({
+    safeSend(ws, {
       type: "stream",
       conversationId,
       content: response.content,
       done: true,
       responseType: "audio",
       metadata: response.metadata,
-    }));
+    });
   }
 }
 
@@ -226,29 +242,25 @@ function setupWebSocket(wss) {
           if (generationCounter.enabled) {
             const { allowed, retryAfter } = generationCounter.hit(clientKey);
             if (!allowed) {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  conversationId,
-                  code: "RATE_LIMITED",
-                  message: `Too many generation requests. Try again in ${retryAfter}s.`,
-                })
-              );
+              safeSend(ws, {
+                type: "error",
+                conversationId,
+                code: "RATE_LIMITED",
+                message: `Too many generation requests. Try again in ${retryAfter}s.`,
+              });
               return;
             }
           }
 
           // Send acknowledgment
-          ws.send(
-            JSON.stringify({
-              type: "ack",
-              messageId: randomUUID(),
-              conversationId,
-            })
-          );
+          safeSend(ws, {
+            type: "ack",
+            messageId: randomUUID(),
+            conversationId,
+          });
 
           // Send typing indicator
-          ws.send(JSON.stringify({ type: "typing", conversationId }));
+          safeSend(ws, { type: "typing", conversationId });
 
           // Process and stream response
           const messages = [{ role: "user", content }];
@@ -259,24 +271,21 @@ function setupWebSocket(wss) {
               return;
             }
             pendingApprovals.set(approvalId, respond);
-            if (ws.readyState === ws.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "approval_request",
-                  approvalId,
-                  conversationId,
-                  command,
-                  argv,
-                  root,
-                })
-              );
-            } else {
+            const sent = safeSend(ws, {
+              type: "approval_request",
+              approvalId,
+              conversationId,
+              command,
+              argv,
+              root,
+            });
+            if (!sent) {
               pendingApprovals.delete(approvalId);
               respond(false);
             }
           };
 
-          const response = await processMessage(
+          const response = await model.processMessage(
             messages,
             messageType,
             settings,
@@ -286,7 +295,7 @@ function setupWebSocket(wss) {
 
           // Privacy: validate and strip trace from response if not allowed (defense in depth)
           if (response.metadata?.trace) {
-            const validated = traceAllowed(operatorCtx) ? validateTrace(response.metadata.trace) : null;
+            const validated = model.traceAllowed(operatorCtx) ? model.validateTrace(response.metadata.trace) : null;
             if (validated) {
               response.metadata.trace = validated;
             } else {
@@ -305,28 +314,31 @@ function setupWebSocket(wss) {
           let accumulated = "";
 
           for (let i = 0; i < words.length; i++) {
+            if (ws.readyState !== 1 /* OPEN */) break;
+
             accumulated += (i > 0 ? " " : "") + words[i];
             const isDone = i === words.length - 1;
-            ws.send(
-              JSON.stringify({
-                type: "stream",
-                conversationId,
-                content: accumulated,
-                done: isDone,
-                responseType: response.type,
-                metadata: isDone ? response.metadata : undefined,
-              })
-            );
+            const sent = safeSend(ws, {
+              type: "stream",
+              conversationId,
+              content: accumulated,
+              done: isDone,
+              responseType: response.type,
+              metadata: isDone ? response.metadata : undefined,
+            });
+
+            if (!sent || isDone) break;
+
             // Simulate token generation delay
             await new Promise((r) => setTimeout(r, 20 + Math.random() * 30));
           }
         }
 
         if (message.type === "ping") {
-          ws.send(JSON.stringify({ type: "pong" }));
+          safeSend(ws, { type: "pong" });
         }
       } catch (err) {
-        ws.send(JSON.stringify({ type: "error", message: err.message }));
+        safeSend(ws, { type: "error", message: err.message });
       }
     });
 
