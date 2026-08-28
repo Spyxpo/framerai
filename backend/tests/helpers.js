@@ -69,10 +69,11 @@ function mockModel(overrides = {}) {
   };
 
   const exports = {
-    processMessage: record("processMessage", (messages, type = "text") => ({
+    processMessage: record("processMessage", (messages, type = "text", settings = {}, options = {}) => ({
       type,
       content: `reply to: ${messages[messages.length - 1].content}`,
       metadata: { model: "test-model" },
+      options,
     })),
     generateImage: record("generateImage", (prompt, numImages, resolution) => ({
       id: "img-1",

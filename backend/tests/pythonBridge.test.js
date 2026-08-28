@@ -880,4 +880,90 @@ describe("pythonBridge worker pool", () => {
 
     assert.strictEqual(bridge.available(), false, "bridge should remain disabled after MAX_RESTART_ATTEMPTS cap");
   });
+
+  it("should handle approval_request and route response to worker stdin", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const startPromise = bridge.start();
+
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+
+    await startPromise;
+
+    let receivedApproval = null;
+    const reqPromise = bridge.request(
+      "chat",
+      { prompt: "run ls" },
+      {
+        onApprovalRequest: (info) => {
+          receivedApproval = info;
+          info.respond(true);
+        },
+      }
+    );
+
+    await new Promise((r) => setImmediate(r));
+    const worker = spawnedProcesses[0];
+
+    // Worker emits approval request over stdout
+    const approvalReq = {
+      type: "approval_request",
+      approval_id: "app-uuid-1",
+      command: "ls -la",
+      argv: ["ls", "-la"],
+      root: "/sandbox",
+    };
+    worker.stdout.emit("data", Buffer.from(JSON.stringify(approvalReq) + "\n"));
+
+    assert.ok(receivedApproval, "onApprovalRequest should be called");
+    assert.strictEqual(receivedApproval.approvalId, "app-uuid-1");
+    assert.strictEqual(receivedApproval.command, "ls -la");
+    assert.deepStrictEqual(receivedApproval.argv, ["ls", "-la"]);
+
+    // Verify response was written to worker stdin
+    const responseObj = JSON.parse(worker.lastWrite);
+    assert.strictEqual(responseObj.type, "approval_response");
+    assert.strictEqual(responseObj.approval_id, "app-uuid-1");
+    assert.strictEqual(responseObj.approved, true);
+
+    // Complete request
+    worker.simulateResponse(1, true, { content: "ls result" });
+    const res = await reqPromise;
+    assert.strictEqual(res.content, "ls result");
+  });
+
+  it("should fail closed when onApprovalRequest callback is absent or fails", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const startPromise = bridge.start();
+
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+
+    await startPromise;
+
+    const reqPromise = bridge.request("chat", { prompt: "run command" });
+    await new Promise((r) => setImmediate(r));
+
+    const worker = spawnedProcesses[0];
+    const approvalReq = {
+      type: "approval_request",
+      approval_id: "app-uuid-2",
+      command: "rm -rf /",
+      argv: ["rm", "-rf", "/"],
+      root: "/sandbox",
+    };
+    worker.stdout.emit("data", Buffer.from(JSON.stringify(approvalReq) + "\n"));
+
+    const responseObj = JSON.parse(worker.lastWrite);
+    assert.strictEqual(responseObj.type, "approval_response");
+    assert.strictEqual(responseObj.approval_id, "app-uuid-2");
+    assert.strictEqual(responseObj.approved, false);
+
+    worker.simulateResponse(1, false, "refused");
+    await reqPromise.catch(() => {});
+  });
 });

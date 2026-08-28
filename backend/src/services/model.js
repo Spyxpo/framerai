@@ -146,14 +146,14 @@ if __name__ == "__main__":
 /**
  * Process a chat message and return a response, using the model when available.
  */
-async function processMessage(messages, requestType = "text", settings = {}) {
+async function processMessage(messages, requestType = "text", settings = {}, options = {}) {
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings);
+      return await modelChat(intent, content, settings, options);
     } catch (err) {
       console.warn(`[model] falling back to placeholder: ${err.message}`);
     }
@@ -162,9 +162,9 @@ async function processMessage(messages, requestType = "text", settings = {}) {
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}) {
+async function modelChat(intent, content, settings = {}, options = {}) {
   if (intent === "image" || intent === "video" || intent === "audio") {
-    const result = await bridge.request(intent, { prompt: content, ...settings });
+    const result = await bridge.request(intent, { prompt: content, ...settings }, options);
     return {
       type: intent,
       content: `Here is the ${intent} generated for: "${content}"`,
@@ -173,7 +173,7 @@ async function modelChat(intent, content, settings = {}) {
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content, ...settings });
+  const result = await bridge.request(op, { prompt: content, ...settings }, options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
   // Tool steps travel with the reply so the UI can show what was searched and
   // read instead of presenting a sourced answer as if it came from the weights.

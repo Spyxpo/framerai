@@ -118,6 +118,27 @@ class Worker {
             }
             continue;
           }
+          if (msg.type === "approval_request") {
+            const currentReq = this.currentRequest;
+            if (currentReq && currentReq.options && typeof currentReq.options.onApprovalRequest === "function") {
+              try {
+                currentReq.options.onApprovalRequest({
+                  approvalId: msg.approval_id,
+                  command: msg.command,
+                  argv: msg.argv,
+                  root: msg.root,
+                  respond: (approved) => this.sendApprovalResponse(msg.approval_id, approved),
+                });
+              } catch (err) {
+                console.warn(`[model:worker-${this.id}] onApprovalRequest failed: ${err.message}`);
+                this.sendApprovalResponse(msg.approval_id, false);
+              }
+            } else {
+              this.sendApprovalResponse(msg.approval_id, false);
+            }
+            continue;
+          }
+
           if (msg.id != null && this.pending.has(msg.id)) {
             const { resolve: res, reject, timer } = this.pending.get(msg.id);
             clearTimeout(timer);
@@ -178,7 +199,25 @@ class Worker {
     });
   }
 
-  async execute(op, params) {
+  sendApprovalResponse(approvalId, approved) {
+    if (this.child && this.child.stdin && !this.child.killed) {
+      try {
+        this.child.stdin.write(
+          JSON.stringify({
+            type: "approval_response",
+            approval_id: approvalId,
+            approved: Boolean(approved),
+          }) + "\n"
+        );
+        return true;
+      } catch (err) {
+        console.warn(`[model:worker-${this.id}] sendApprovalResponse failed: ${err.message}`);
+      }
+    }
+    return false;
+  }
+
+  async execute(op, params, options = {}) {
     if (!this.ready || !this.child) {
       throw new Error("worker not ready");
     }
@@ -200,7 +239,7 @@ class Worker {
         if (this.onAvailable) this.onAvailable(this);
       }, REQUEST_TIMEOUT_MS);
 
-      const requestState = { resolve, reject, timer };
+      const requestState = { resolve, reject, timer, options };
       this.pending.set(id, requestState);
       this.currentRequest = requestState;
 
@@ -394,19 +433,19 @@ class WorkerPool {
       const worker = this.getAvailableWorker();
       if (!worker) break;
 
-      const { op, params, resolve, reject, timer } = this.queue.shift();
+      const { op, params, options, resolve, reject, timer } = this.queue.shift();
       clearTimeout(timer);
       worker
-        .execute(op, params)
+        .execute(op, params, options)
         .then(resolve)
         .catch(reject);
     }
   }
 
-  async execute(op, params) {
+  async execute(op, params, options = {}) {
     const worker = this.getAvailableWorker();
     if (worker) {
-      return worker.execute(op, params);
+      return worker.execute(op, params, options);
     }
 
     // All workers busy, queue the request with timeout
@@ -420,7 +459,7 @@ class WorkerPool {
         reject(new Error("queued request timed out"));
       }, REQUEST_TIMEOUT_MS);
 
-      this.queue.push({ op, params, resolve, reject, timer });
+      this.queue.push({ op, params, options, resolve, reject, timer });
     });
   }
 
@@ -474,9 +513,9 @@ async function ensurePool() {
   return pool;
 }
 
-async function request(op, params = {}) {
+async function request(op, params = {}, options = {}) {
   const p = await ensurePool();
-  return p.execute(op, params);
+  return p.execute(op, params, options);
 }
 
 function available() {

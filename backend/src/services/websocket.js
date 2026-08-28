@@ -185,9 +185,36 @@ function setupWebSocket(wss) {
     const clientKey = forwarded || req?.socket?.remoteAddress || clientId;
     console.log(`WebSocket client connected: ${clientId}`);
 
+    // Track approval state per session
+    let denyEverything = false;
+    const pendingApprovals = new Map();
+
+    const cleanupApprovals = () => {
+      for (const respond of pendingApprovals.values()) {
+        try {
+          respond(false);
+        } catch {
+          // ignore
+        }
+      }
+      pendingApprovals.clear();
+    };
+
     ws.on("message", async (data) => {
       try {
         const message = JSON.parse(data);
+
+        if (message.type === "approval_response") {
+          if (message.denyEverything) {
+            denyEverything = true;
+          }
+          if (message.approvalId && pendingApprovals.has(message.approvalId)) {
+            const respond = pendingApprovals.get(message.approvalId);
+            pendingApprovals.delete(message.approvalId);
+            respond(Boolean(message.approved));
+          }
+          return;
+        }
 
         if (message.type === "chat") {
           const { content, conversationId, messageType, settings } = parseChatFrame(message);
@@ -223,7 +250,30 @@ function setupWebSocket(wss) {
 
           // Process and stream response
           const messages = [{ role: "user", content }];
-          const response = await processMessage(messages, messageType, settings);
+          const onApprovalRequest = ({ approvalId, command, argv, root, respond }) => {
+            if (denyEverything) {
+              respond(false);
+              return;
+            }
+            pendingApprovals.set(approvalId, respond);
+            if (ws.readyState === ws.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "approval_request",
+                  approvalId,
+                  conversationId,
+                  command,
+                  argv,
+                  root,
+                })
+              );
+            } else {
+              pendingApprovals.delete(approvalId);
+              respond(false);
+            }
+          };
+
+          const response = await processMessage(messages, messageType, settings, { onApprovalRequest });
 
           // Special handling for audio: stream PCM chunks
           if (response.type === "audio") {
@@ -262,6 +312,11 @@ function setupWebSocket(wss) {
 
     ws.on("close", () => {
       console.log(`WebSocket client disconnected: ${clientId}`);
+      cleanupApprovals();
+    });
+
+    ws.on("error", () => {
+      cleanupApprovals();
     });
   });
 }
