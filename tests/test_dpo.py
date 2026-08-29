@@ -1,6 +1,5 @@
 """Unit tests for DPO (Direct Preference Optimization) pipeline."""
 
-import copy
 import os
 
 import torch
@@ -53,9 +52,19 @@ def test_dpo_training_pass(tmp_path):
     dataset = DPODataset(str(dpo_path), tokenizer, max_len=64)
     loader = DataLoader(dataset, batch_size=1)
 
-    policy_model = FramerModel(config)
-    ref_model = copy.deepcopy(policy_model)
     device = torch.device("cpu")
+    policy_model = FramerModel(config).to(device)
+
+    # Construct reference model using from_config_meta
+    ref_model = FramerModel.from_config_meta(config)
+    ref_model.to_empty(device=device)
+    ref_model.load_state_dict(policy_model.state_dict())
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
+
+    # Assert reference model is frozen
+    assert all(not p.requires_grad for p in ref_model.parameters())
 
     final_step = train_dpo(
         config=config,

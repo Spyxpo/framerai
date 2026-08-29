@@ -232,7 +232,7 @@ def evaluate_instruction_following(
     max_new_tokens: int = 128,
 ) -> BenchmarkResult:
     """Evaluate instruction following and tool-calling format adherence."""
-    from model.tools.loop import parse_tool_call
+    from model.tools.loop import ToolCallError, parse_tool_call
 
     if test_cases is None:
         test_cases = [
@@ -259,18 +259,29 @@ def evaluate_instruction_following(
         if completion.startswith(prompt):
             completion = completion[len(prompt):]
 
-        if completion.strip():
-            valid_format_count += 1
+        text = completion.strip()
+        expect_tool = bool(case.get("expect_tool", False))
 
-        if case.get("expect_tool"):
-            try:
-                call = parse_tool_call(completion)
-                if call is not None:
-                    valid_tool_count += 1
-            except Exception:
-                pass
+        if not text:
+            continue
+
+        is_valid_tool_call = False
+        has_tool_tag = "<tool_call>" in completion
+        try:
+            call = parse_tool_call(completion)
+            if call is not None and isinstance(call.name, str) and call.name:
+                is_valid_tool_call = True
+        except (ToolCallError, Exception):
+            is_valid_tool_call = False
+
+        if expect_tool:
+            if is_valid_tool_call:
+                valid_format_count += 1
+                valid_tool_count += 1
         else:
-            valid_tool_count += 1
+            if not has_tool_tag and text:
+                valid_format_count += 1
+                valid_tool_count += 1
 
     samples = len(test_cases)
     return BenchmarkResult(

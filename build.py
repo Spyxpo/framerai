@@ -574,8 +574,6 @@ def train_sft_model(config: FramerConfig, output_dir: str, data_dir: str = "data
 
 def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data", beta: float = 0.1, resume: str = None):
     """Run Direct Preference Optimization (DPO) pass."""
-    import copy
-
     from model.data import DPODataset
     from model.training import train_dpo
 
@@ -596,7 +594,12 @@ def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data
         if os.path.exists(ckpt_path):
             load_checkpoint(ckpt_path, model=policy_model)
 
-    ref_model = copy.deepcopy(policy_model).to(device)
+    ref_model = FramerModel.from_config_meta(config)
+    ref_model.to_empty(device=device)
+    ref_model.load_state_dict(policy_model.state_dict())
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
 
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
