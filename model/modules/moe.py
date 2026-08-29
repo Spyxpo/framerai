@@ -7,13 +7,15 @@ always-on shared experts capture computation common to every token.
 
 Two dispatch paths are provided:
 
-- **Grouped dispatch** (CUDA, large batches): Sorts tokens by expert assignment
-  and uses stacked weight tensors with einsum to compute all expert projections
-  in three vectorized operations (w1, w3, w2), eliminating the per-expert Python
-  loop. This is the throughput-optimized path for GPU workloads.
+- **Grouped dispatch** (default): Sorts token-expert assignments by expert ID,
+  uses ``bincount`` to obtain contiguous per-expert segments, then issues one
+  ``F.linear`` call per *non-empty* expert against that expert's token slice.
+  No per-token weight gathering; memory is O(M·D) + O(E·d_ff·D) rather than
+  O(M·d_ff·D). Correct on both CPU and CUDA; enables the CUDA fast path
+  without the catastrophic temporary-tensor explosion of advanced indexing.
 
-- **Loop dispatch** (CPU, tiny batches): The original per-expert gather/scatter
-  loop. Retained as a correctness reference and CPU-friendly fallback.
+- **Loop dispatch** (CPU, tiny batches, correctness reference): The original
+  per-expert gather/scatter loop.
 """
 
 import torch
@@ -83,10 +85,8 @@ class MoEFeedForward(nn.Module):
         return out.view(B, T, D), aux
 
     def _should_use_grouped_dispatch(self, x_flat):
-        """Select grouped dispatch for CUDA and sufficiently large workloads."""
-        # Grouped dispatch uses einsum, which benefits from GPU parallelism.
-        # On CPU or tiny batches, the loop fallback may be faster.
-        return x_flat.device.type == "cuda" and x_flat.shape[0] * self.top_k >= 32
+        """Use grouped dispatch on all devices for workloads above the threshold."""
+        return x_flat.shape[0] * self.top_k >= 32
 
     def _grouped_expert_forward(self, x_flat, topk_idx, topk_gates):
         """
@@ -128,28 +128,25 @@ class MoEFeedForward(nn.Module):
         # 4. Gather tokens: (M, D)
         sorted_tokens = x_flat[sorted_token_ids]
 
-        # 5. Stack expert weights into (E_local, ...) tensors
-        # CRITICAL: Use actual parameter tensors, not .data, so gradients flow
-        w1_stacked = torch.stack([e.w1.weight for e in self.experts], dim=0)  # (E_local, d_ff, D)
-        w3_stacked = torch.stack([e.w3.weight for e in self.experts], dim=0)  # (E_local, d_ff, D)
-        w2_stacked = torch.stack([e.w2.weight for e in self.experts], dim=0)  # (E_local, D, d_ff)
+        # 5. Per-expert token counts and contiguous segment offsets via bincount.
+        #    sorted_experts is already in ascending order, so each expert segment
+        #    forms a contiguous slice [offsets[e], offsets[e+1]).
+        counts = torch.bincount(sorted_experts, minlength=E_local)  # (E_local,)
+        offsets = torch.zeros(E_local + 1, dtype=torch.long, device=x_flat.device)
+        offsets[1:] = counts.cumsum(0)
 
-        # 6. Vectorized expert forward via einsum (NO per-expert Python loop)
-        # Each token selects its expert's weights via sorted_experts indexing
-        # einsum 'md,efd->mf' with e=sorted_experts: (M, D) x (M, d_ff, D) -> (M, d_ff)
-        w1_weights = w1_stacked[sorted_experts]  # (M, d_ff, D)
-        w3_weights = w3_stacked[sorted_experts]  # (M, d_ff, D)
-        w2_weights = w2_stacked[sorted_experts]  # (M, D, d_ff)
-
-        # Up-projections
-        w1_out = torch.einsum("md,mfd->mf", sorted_tokens, w1_weights)
-        w3_out = torch.einsum("md,mfd->mf", sorted_tokens, w3_weights)
-
-        # SwiGLU activation
-        hidden = F.silu(w1_out) * w3_out  # (M, d_ff)
-
-        # Down-projection
-        expert_outputs = torch.einsum("mf,mdf->md", hidden, w2_weights)  # (M, D)
+        # 6. One F.linear per non-empty local expert.
+        #    Slice sorted_tokens and call F.linear against the expert weight matrix.
+        #    No stacking, no per-token weight copy.
+        expert_outputs = torch.zeros(M, D, dtype=x_flat.dtype, device=x_flat.device)
+        for local_e in range(E_local):
+            start, end = offsets[local_e].item(), offsets[local_e + 1].item()
+            if start == end:
+                continue
+            tok_slice = sorted_tokens[start:end]           # (m_e, D)
+            exp = self.experts[local_e]
+            h = F.silu(F.linear(tok_slice, exp.w1.weight)) * F.linear(tok_slice, exp.w3.weight)
+            expert_outputs[start:end] = F.linear(h, exp.w2.weight)
 
         # Dropout (same semantics as FeedForward.forward)
         if self.training and E_local > 0:
