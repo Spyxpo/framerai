@@ -36,19 +36,14 @@ def get_batch_logps(
     """Compute per-sequence log probabilities over target completion tokens.
 
     logits: (batch_size, seq_len, vocab_size)
-    labels: (batch_size, seq_len)
+    labels: (batch_size, seq_len) - pre-shifted next-token targets
     """
     if logits.shape[1] != labels.shape[1]:
         raise ValueError(f"Logits seq len ({logits.shape[1]}) != labels seq len ({labels.shape[1]})")
 
-    # Shift logits and labels for next-token prediction
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = labels[:, 1:].contiguous()
-
-    log_probs = F.log_softmax(shift_logits, dim=-1)
-    # Clamp -100 to 0 for gather, then zero out via mask
-    mask = (shift_labels != ignore_index)
-    clamped_labels = shift_labels.masked_fill(~mask, 0)
+    log_probs = F.log_softmax(logits, dim=-1)
+    mask = (labels != ignore_index)
+    clamped_labels = labels.masked_fill(~mask, 0)
 
     per_token_logps = torch.gather(
         log_probs, dim=2, index=clamped_labels.unsqueeze(-1)

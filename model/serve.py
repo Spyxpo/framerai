@@ -210,6 +210,16 @@ def handle(gen, op, params, mind=None, tools=None):
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
 
+        messages = params.get("messages")
+        if messages:
+            from .tokenizer.chat_template import ChatTemplate
+
+            prompt = ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
+        elif prompt and not prompt.startswith("<"):
+            from .tokenizer.chat_template import ChatTemplate
+
+            prompt = ChatTemplate(version="v1").format_messages([{"role": "user", "content": prompt}], add_generation_prompt=True)
+
         tool_trace = None
         if active is not None:
             from .tools import run_tool_loop

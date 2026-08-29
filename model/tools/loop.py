@@ -91,8 +91,14 @@ class ToolTrace:
 
 def render_prompt(registry: ToolRegistry, prompt: str) -> str:
     """The instruction block, the tool schemas, and the user's prompt."""
+    from model.tokenizer.chat_template import ChatTemplate
+
     instructions = INSTRUCTIONS.replace("{tools}", registry.describe())
-    return f"{instructions}\n\nUser: {prompt}\nAssistant:"
+    messages = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": prompt},
+    ]
+    return ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
 
 
 def parse_tool_call(text: str) -> ToolCall | None:
