@@ -17,6 +17,8 @@ export function useChat(settings) {
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
+  const [pendingApproval, setPendingApproval] = useState(null);
+  const [denyEverything, setDenyEverything] = useState(false);
   const wsRef = useRef(null);
 
   // Read through a ref so sendMessage always sees the current settings without
@@ -59,6 +61,16 @@ export function useChat(settings) {
       .catch(() => {
         // Non-fatal: REST fallback will be used. No banner needed.
       });
+
+    ws.on("approval_request", (data) => {
+      setPendingApproval({
+        approvalId: data.approvalId,
+        conversationId: data.conversationId,
+        command: data.command,
+        argv: data.argv,
+        root: data.root,
+      });
+    });
 
     ws.on("stream", (data) => {
       if (data.type === "error") {
@@ -370,6 +382,23 @@ export function useChat(settings) {
     [activeConversation]
   );
 
+  const approveCommand = useCallback((approvalId) => {
+    if (wsRef.current) {
+      wsRef.current.sendApprovalResponse(approvalId, true, false);
+    }
+    setPendingApproval((prev) => (prev?.approvalId === approvalId ? null : prev));
+  }, []);
+
+  const denyCommand = useCallback((approvalId, shouldDenyEverything = false) => {
+    if (shouldDenyEverything) {
+      setDenyEverything(true);
+    }
+    if (wsRef.current) {
+      wsRef.current.sendApprovalResponse(approvalId, false, shouldDenyEverything);
+    }
+    setPendingApproval((prev) => (prev?.approvalId === approvalId ? null : prev));
+  }, []);
+
   return {
     conversations,
     activeConversation,
@@ -379,11 +408,15 @@ export function useChat(settings) {
     loadingConversations,
     loadingMessages,
     error,
+    pendingApproval,
+    denyEverything,
     createConversation,
     selectConversation,
     deleteConversation,
     clearAllConversations,
     sendMessage,
     dismissError,
+    approveCommand,
+    denyCommand,
   };
 }

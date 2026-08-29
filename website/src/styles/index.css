@@ -1415,3 +1415,85 @@ body {
   color: var(--error);
   border-color: var(--error);
 }
+
+/* CLI Approval Card */
+.cli-approval-card {
+  margin: 16px 24px 0 24px;
+  padding: 16px 20px;
+  background: var(--bg-secondary);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.cli-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 15px;
+  color: #facc15;
+  margin-bottom: 8px;
+}
+
+.cli-approval-prompt {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.cli-approval-cmd {
+  background: #090d16;
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-family: monospace;
+  font-size: 13px;
+  color: #38bdf8;
+  overflow-x: auto;
+  margin-bottom: 10px;
+}
+
+.cli-approval-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.cli-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.approve-btn {
+  background: #16a34a;
+  color: #fff;
+}
+
+.approve-btn:hover {
+  background: #15803d;
+}
+
+.deny-btn {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.deny-btn:hover {
+  background: var(--border);
+}
+
+.deny-all-btn {
+  background: #dc2626;
+  color: #fff;
+}
+
+.deny-all-btn:hover {
+  background: #b91c1c;
+}
