@@ -509,4 +509,63 @@ describe("Chat — send flow", () => {
     await user.click(screen.getByRole("button", { name: /generation settings/i }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
   });
+
+  describe("CLI Command Approval Prompt", () => {
+    it("renders approval prompt card with command, argv, and root when pendingApproval is present", () => {
+      const pendingApproval = {
+        approvalId: "test-app-1",
+        command: "cat /etc/passwd",
+        argv: ["cat", "/etc/passwd"],
+        root: "/sandbox/root",
+      };
+      render(<Chat {...chatProps({ pendingApproval })} />);
+
+      expect(screen.getByTestId("cli-approval-card")).toBeInTheDocument();
+      expect(screen.getByText("CLI Command Approval Required")).toBeInTheDocument();
+      expect(screen.getByText("cat /etc/passwd")).toBeInTheDocument();
+      expect(screen.getByText("/sandbox/root")).toBeInTheDocument();
+    });
+
+    it("calls onApproveCommand with approvalId when Approve button is clicked", async () => {
+      const onApproveCommand = vi.fn();
+      const pendingApproval = {
+        approvalId: "test-app-1",
+        command: "ls -la",
+        argv: ["ls", "-la"],
+        root: "/sandbox",
+      };
+      render(<Chat {...chatProps({ pendingApproval, onApproveCommand })} />);
+
+      await user.click(screen.getByRole("button", { name: /approve/i }));
+      expect(onApproveCommand).toHaveBeenCalledWith("test-app-1");
+    });
+
+    it("calls onDenyCommand with (approvalId, false) when Deny button is clicked", async () => {
+      const onDenyCommand = vi.fn();
+      const pendingApproval = {
+        approvalId: "test-app-1",
+        command: "ls -la",
+        argv: ["ls", "-la"],
+        root: "/sandbox",
+      };
+      render(<Chat {...chatProps({ pendingApproval, onDenyCommand })} />);
+
+      await user.click(screen.getByRole("button", { name: /^deny$/i }));
+      expect(onDenyCommand).toHaveBeenCalledWith("test-app-1", false);
+    });
+
+    it("calls onDenyCommand with (approvalId, true) when 'Deny all future commands' button is clicked", async () => {
+      const onDenyCommand = vi.fn();
+      const pendingApproval = {
+        approvalId: "test-app-1",
+        command: "ls -la",
+        argv: ["ls", "-la"],
+        root: "/sandbox",
+      };
+      render(<Chat {...chatProps({ pendingApproval, onDenyCommand })} />);
+
+      await user.click(screen.getByRole("button", { name: /deny all future commands/i }));
+      expect(onDenyCommand).toHaveBeenCalledWith("test-app-1", true);
+    });
+  });
 });

@@ -9,6 +9,9 @@ export default function Chat({
   streaming,
   loadingMessages,
   error,
+  pendingApproval,
+  onApproveCommand,
+  onDenyCommand,
   sidebarOpen,
   onSend,
   onToggleSidebar,
@@ -345,6 +348,53 @@ export default function Chat({
           <button className="error-banner-dismiss" onClick={() => setTranscribeError(null)} aria-label="Dismiss error">
             <X size={14} aria-hidden="true" />
           </button>
+        </div>
+      )}
+
+      {/* CLI Command Approval Prompt */}
+      {pendingApproval && (
+        <div className="cli-approval-card" role="alert" aria-live="assertive" data-testid="cli-approval-card">
+          <div className="cli-approval-header">
+            <AlertTriangle size={18} className="cli-approval-icon" aria-hidden="true" />
+            <span>CLI Command Approval Required</span>
+          </div>
+          <div className="cli-approval-body">
+            <p className="cli-approval-prompt">
+              The model requests approval to run the following shell command:
+            </p>
+            <pre className="cli-approval-cmd">
+              <code>{pendingApproval.command}</code>
+            </pre>
+            <div className="cli-approval-meta">
+              <div><strong>Working Root:</strong> {pendingApproval.root}</div>
+              {Array.isArray(pendingApproval.argv) && (
+                <div><strong>argv:</strong> {JSON.stringify(pendingApproval.argv)}</div>
+              )}
+            </div>
+            <div className="cli-approval-actions">
+              <button
+                type="button"
+                className="btn btn-primary approve-btn"
+                onClick={() => onApproveCommand?.(pendingApproval.approvalId)}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary deny-btn"
+                onClick={() => onDenyCommand?.(pendingApproval.approvalId, false)}
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger deny-all-btn"
+                onClick={() => onDenyCommand?.(pendingApproval.approvalId, true)}
+              >
+                Deny all future commands
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

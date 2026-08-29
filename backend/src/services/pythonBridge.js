@@ -120,6 +120,27 @@ class Worker {
             }
             continue;
           }
+          if (msg.type === "approval_request") {
+            const currentReq = this.currentRequest;
+            if (currentReq && currentReq.options && typeof currentReq.options.onApprovalRequest === "function") {
+              try {
+                currentReq.options.onApprovalRequest({
+                  approvalId: msg.approval_id,
+                  command: msg.command,
+                  argv: msg.argv,
+                  root: msg.root,
+                  respond: (approved) => this.sendApprovalResponse(msg.approval_id, approved),
+                });
+              } catch (err) {
+                console.warn(`[model:worker-${this.id}] onApprovalRequest failed: ${err.message}`);
+                this.sendApprovalResponse(msg.approval_id, false);
+              }
+            } else {
+              this.sendApprovalResponse(msg.approval_id, false);
+            }
+            continue;
+          }
+
           if (msg.id != null && this.pending.has(msg.id)) {
             const { resolve: res, reject, timer } = this.pending.get(msg.id);
             clearTimeout(timer);
@@ -180,12 +201,53 @@ class Worker {
     });
   }
 
-  async execute(op, params, timeoutMs = REQUEST_TIMEOUT_MS, requestId = null) {
+  sendApprovalResponse(approvalId, approved) {
+    if (this.child && this.child.stdin && !this.child.killed) {
+      try {
+        this.child.stdin.write(
+          JSON.stringify({
+            type: "approval_response",
+            approval_id: approvalId,
+            approved: Boolean(approved),
+          }) + "\n"
+        );
+        return true;
+      } catch (err) {
+        console.warn(`[model:worker-${this.id}] sendApprovalResponse failed: ${err.message}`);
+      }
+    }
+    return false;
+  }
+
+  async execute(op, params, optionsOrTimeout = REQUEST_TIMEOUT_MS, requestIdParam = null) {
     if (!this.ready || !this.child) {
       throw new Error("worker not ready");
     }
     if (this.busy) {
       throw new Error("worker busy");
+    }
+
+    let timeoutMs = REQUEST_TIMEOUT_MS;
+    let requestId = null;
+    let options = {};
+
+    if (typeof optionsOrTimeout === "number") {
+      timeoutMs = optionsOrTimeout;
+      if (typeof requestIdParam === "string") {
+        requestId = requestIdParam;
+      } else if (requestIdParam && typeof requestIdParam === "object") {
+        options = requestIdParam;
+        requestId = options.requestId || null;
+      }
+    } else if (optionsOrTimeout && typeof optionsOrTimeout === "object") {
+      options = optionsOrTimeout;
+      timeoutMs = typeof options.timeoutMs === "number" ? options.timeoutMs : REQUEST_TIMEOUT_MS;
+      requestId = options.requestId || (typeof requestIdParam === "string" ? requestIdParam : null);
+    } else if (typeof optionsOrTimeout === "string") {
+      requestId = optionsOrTimeout;
+      if (requestIdParam && typeof requestIdParam === "object") {
+        options = requestIdParam;
+      }
     }
 
     this.busy = true;
@@ -205,7 +267,7 @@ class Worker {
         if (this.onAvailable) this.onAvailable(this);
       }, timeoutMs);
 
-      const requestState = { resolve, reject, timer };
+      const requestState = { resolve, reject, timer, options };
       this.pending.set(id, requestState);
       this.currentRequest = requestState;
 
@@ -396,33 +458,43 @@ class WorkerPool {
       const worker = this.getAvailableWorker();
       if (!worker) break;
 
-      const { op, params, resolve, reject, timer, deadline, requestId } = this.queue.shift();
+      const { op, params, options, resolve, reject, timer, deadline } = this.queue.shift();
       clearTimeout(timer);
 
       // Calculate remaining time from original deadline
-      const remainingMs = deadline - Date.now();
+      const remainingMs = deadline ? deadline - Date.now() : REQUEST_TIMEOUT_MS;
       if (remainingMs <= 0) {
         // Already past deadline while in queue
         reject(new Error("queued request timed out"));
         continue;
       }
 
+      const execOptions = { ...(options || {}), timeoutMs: remainingMs };
       worker
-        .execute(op, params, remainingMs, requestId)
+        .execute(op, params, execOptions)
         .then(resolve)
         .catch(reject);
     }
   }
 
-  async execute(op, params, requestId = null) {
+  async execute(op, params, optionsOrRequestId = null, operatorCtxParam = null) {
+    let options = {};
+    if (typeof optionsOrRequestId === "string") {
+      options = { requestId: optionsOrRequestId, operatorCtx: operatorCtxParam };
+    } else if (optionsOrRequestId && typeof optionsOrRequestId === "object") {
+      options = { ...optionsOrRequestId };
+      if (operatorCtxParam) options.operatorCtx = operatorCtxParam;
+    }
+
     const worker = this.getAvailableWorker();
     if (worker) {
-      return worker.execute(op, params, REQUEST_TIMEOUT_MS, requestId);
+      return worker.execute(op, params, options);
     }
 
     // All workers busy, queue the request with absolute deadline
     return new Promise((resolve, reject) => {
-      const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+      const timeoutMs = typeof options.timeoutMs === "number" ? options.timeoutMs : REQUEST_TIMEOUT_MS;
+      const deadline = Date.now() + timeoutMs;
 
       const timer = setTimeout(() => {
         // Remove from queue
@@ -431,9 +503,9 @@ class WorkerPool {
           this.queue.splice(idx, 1);
         }
         reject(new Error("queued request timed out"));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
 
-      this.queue.push({ op, params, resolve, reject, timer, deadline, requestId });
+      this.queue.push({ op, params, options, resolve, reject, timer, deadline });
     });
   }
 
@@ -487,9 +559,9 @@ async function ensurePool() {
   return pool;
 }
 
-async function request(op, params = {}, requestId = null) {
+async function request(op, params = {}, optionsOrRequestId = null, operatorCtx = null) {
   const p = await ensurePool();
-  return p.execute(op, params, requestId);
+  return p.execute(op, params, optionsOrRequestId, operatorCtx);
 }
 
 function available() {

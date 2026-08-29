@@ -26,12 +26,15 @@ export default function App() {
     loadingConversations,
     loadingMessages,
     error,
+    pendingApproval,
     createConversation,
     selectConversation,
     deleteConversation,
     clearAllConversations,
     sendMessage,
     dismissError,
+    approveCommand,
+    denyCommand,
   } = useChat(settings);
 
   // The settings panel shows which checkpoint the backend is serving.
@@ -107,6 +110,9 @@ export default function App() {
         streaming={streaming}
         loadingMessages={loadingMessages}
         error={error}
+        pendingApproval={pendingApproval}
+        onApproveCommand={approveCommand}
+        onDenyCommand={denyCommand}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
