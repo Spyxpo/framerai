@@ -433,9 +433,18 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
 
     # Register benchmark suites
     from model.eval import EvalHarness
-    from model.eval.benchmarks import evaluate_code_benchmark, evaluate_text_benchmark
+    from model.eval.benchmarks import (
+        evaluate_code_benchmark,
+        evaluate_instruction_following,
+        evaluate_text_benchmark,
+    )
 
     harness = EvalHarness(model, str(device))
+
+    @harness.suite("instruction-following")
+    def _instruction_following(model, device, **_):
+        result = evaluate_instruction_following(generator)
+        return {**result.metrics, "samples": result.samples}
 
     @harness.suite("wikitext-2")
     def _wikitext(model, device, **_):
@@ -517,10 +526,108 @@ def print_estimate(config: FramerConfig):
               f"via {config.rope_scaling_type} RoPE scaling)")
 
 
+def train_sft_model(config: FramerConfig, output_dir: str, data_dir: str = "data", resume: str = None):
+    """Run Supervised Fine-Tuning (SFT) pass."""
+    from model.data import SFTDataset
+    from model.training import train_sft
+
+    device = get_device(config.device)
+    distributed = init_distributed(device)
+    world = get_world_size()
+
+    if is_main_process():
+        logger.info(f"SFT Training on {device} | world_size={world}")
+
+    model = FramerModel(config).to(device)
+    if resume:
+        load_checkpoint(resume, model=model)
+    else:
+        init_path = os.path.join(output_dir, "model_init.pt")
+        if os.path.exists(init_path):
+            load_checkpoint(init_path, model=model)
+
+    tokenizer_path = os.path.join(output_dir, "tokenizer")
+    tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
+
+    dataset = SFTDataset(data_dir, tokenizer, max_len=min(config.max_seq_len, 512))
+    if len(dataset) == 0:
+        sample_path = os.path.join(os.path.dirname(__file__), "data", "examples", "sft_sample.jsonl")
+        if os.path.exists(sample_path):
+            logger.warning(f"No SFT data found in '{data_dir}'. Using sample SFT dataset.")
+            dataset = SFTDataset(sample_path, tokenizer, max_len=min(config.max_seq_len, 512))
+
+    if len(dataset) == 0:
+        raise ValueError("No SFT data available.")
+
+    sampler = DistributedSampler(dataset) if distributed else None
+    loader = DataLoader(
+        dataset, batch_size=config.batch_size,
+        shuffle=(sampler is None), sampler=sampler,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    model = maybe_wrap_fsdp(model, config, device)
+    train_sft(config, model, loader, device, output_dir, logger_obj=logger)
+    cleanup_distributed()
+    return model
+
+
+def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data", beta: float = 0.1, resume: str = None):
+    """Run Direct Preference Optimization (DPO) pass."""
+    import copy
+
+    from model.data import DPODataset
+    from model.training import train_dpo
+
+    device = get_device(config.device)
+    distributed = init_distributed(device)
+    world = get_world_size()
+
+    if is_main_process():
+        logger.info(f"DPO Training on {device} | beta={beta} | world_size={world}")
+
+    policy_model = FramerModel(config).to(device)
+    if resume:
+        load_checkpoint(resume, model=policy_model)
+    else:
+        final_path = os.path.join(output_dir, "model_final.pt")
+        init_path = os.path.join(output_dir, "model_init.pt")
+        ckpt_path = final_path if os.path.exists(final_path) else init_path
+        if os.path.exists(ckpt_path):
+            load_checkpoint(ckpt_path, model=policy_model)
+
+    ref_model = copy.deepcopy(policy_model).to(device)
+
+    tokenizer_path = os.path.join(output_dir, "tokenizer")
+    tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
+
+    dataset = DPODataset(data_dir, tokenizer, max_len=min(config.max_seq_len, 512))
+    if len(dataset) == 0:
+        sample_path = os.path.join(os.path.dirname(__file__), "data", "examples", "dpo_sample.jsonl")
+        if os.path.exists(sample_path):
+            logger.warning(f"No DPO data found in '{data_dir}'. Using sample DPO dataset.")
+            dataset = DPODataset(sample_path, tokenizer, max_len=min(config.max_seq_len, 512))
+
+    if len(dataset) == 0:
+        raise ValueError("No DPO data available.")
+
+    sampler = DistributedSampler(dataset) if distributed else None
+    loader = DataLoader(
+        dataset, batch_size=config.batch_size,
+        shuffle=(sampler is None), sampler=sampler,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    policy_model = maybe_wrap_fsdp(policy_model, config, device)
+    train_dpo(config, policy_model, ref_model, loader, device, output_dir, beta=beta, logger=logger)
+    cleanup_distributed()
+    return policy_model
+
+
 def _make_parser() -> argparse.ArgumentParser:
     """Return the argument parser. Extracted so tests can invoke it directly."""
     parser = argparse.ArgumentParser(description="FramerAI Model Builder")
-    parser.add_argument("--mode", choices=["build", "train", "export", "eval", "all"], default="build", help="Operation mode")
+    parser.add_argument("--mode", choices=["build", "train", "sft", "dpo", "export", "eval", "all"], default="build", help="Operation mode")
     parser.add_argument("--output-dir", default="checkpoints", help="Output directory")
     parser.add_argument("--export-dir", default=None, help="Export directory")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
@@ -529,6 +636,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", default="data", help="Directory with local training data (.txt / .jsonl)")
     parser.add_argument("--train-modalities", action="store_true",
                         help="Also train the image and audio generators on local caption pairs")
+    parser.add_argument("--beta", type=float, default=0.1, help="DPO beta scale hyperparameter (default 0.1)")
 
     # Model config overrides
     parser.add_argument("--d-model", type=int, default=None, help="Model dimension")
@@ -666,6 +774,12 @@ def main():
     if args.mode in ("train", "all"):
         train_model(config, args.output_dir, args.resume, args.data_dir,
                     args.train_modalities, shard_dir=args.shard_dir)
+
+    if args.mode == "sft":
+        train_sft_model(config, args.output_dir, args.data_dir, args.resume)
+
+    if args.mode == "dpo":
+        train_dpo_model(config, args.output_dir, args.data_dir, args.beta, args.resume)
 
     if args.mode in ("export", "all"):
         export_model(config, args.output_dir, args.export_dir)

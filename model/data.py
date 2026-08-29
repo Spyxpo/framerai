@@ -101,6 +101,135 @@ def build_text_dataset(data_dir: str, tokenizer, max_len: int = 512):
 
 
 # ---------------------------------------------------------------------------
+# Post-training SFT and DPO Datasets (Issue #159)
+# ---------------------------------------------------------------------------
+
+class SFTDataset(Dataset):
+    """Supervised Fine-Tuning dataset with chat template and prompt loss masking."""
+
+    def __init__(self, data_dir: str, tokenizer, chat_template=None, max_len: int = 512):
+        from .tokenizer.chat_template import ChatTemplate
+
+        self.tokenizer = tokenizer
+        self.template = chat_template or ChatTemplate()
+        self.max_len = max_len
+        self.samples = []
+
+        if os.path.isdir(data_dir):
+            paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl"), recursive=True))
+        elif os.path.isfile(data_dir):
+            paths = [data_dir]
+        else:
+            paths = []
+
+        for path in paths:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    messages = self._parse_record(record)
+                    if messages:
+                        item = self.template.encode_conversation(messages, tokenizer, max_len=max_len)
+                        self.samples.append(item)
+
+    def _parse_record(self, record: dict) -> list[dict]:
+        if "messages" in record and isinstance(record["messages"], list):
+            return record["messages"]
+        if "prompt" in record and "response" in record:
+            return [
+                {"role": "user", "content": record["prompt"]},
+                {"role": "assistant", "content": record["response"]},
+            ]
+        if "instruction" in record:
+            instr = record["instruction"]
+            if record.get("input"):
+                instr = f"{instr}\n{record['input']}"
+            resp = record.get("output") or record.get("response", "")
+            if resp:
+                return [
+                    {"role": "user", "content": instr},
+                    {"role": "assistant", "content": resp},
+                ]
+        return []
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+class DPODataset(Dataset):
+    """Direct Preference Optimization dataset for chosen vs. rejected pairs."""
+
+    def __init__(self, data_dir: str, tokenizer, chat_template=None, max_len: int = 512):
+        from .tokenizer.chat_template import ChatTemplate
+
+        self.tokenizer = tokenizer
+        self.template = chat_template or ChatTemplate()
+        self.max_len = max_len
+        self.samples = []
+
+        if os.path.isdir(data_dir):
+            paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl"), recursive=True))
+        elif os.path.isfile(data_dir):
+            paths = [data_dir]
+        else:
+            paths = []
+
+        for path in paths:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    pair = self._parse_record(record)
+                    if pair:
+                        chosen_item = self.template.encode_conversation(pair["chosen"], tokenizer, max_len=max_len)
+                        rejected_item = self.template.encode_conversation(pair["rejected"], tokenizer, max_len=max_len)
+                        self.samples.append({
+                            "chosen_input_ids": chosen_item["input_ids"],
+                            "chosen_labels": chosen_item["labels"],
+                            "rejected_input_ids": rejected_item["input_ids"],
+                            "rejected_labels": rejected_item["labels"],
+                        })
+
+    def _parse_record(self, record: dict) -> dict | None:
+        if "prompt" in record and "chosen" in record and "rejected" in record:
+            prompt = str(record["prompt"])
+            chosen = str(record["chosen"])
+            rejected = str(record["rejected"])
+            return {
+                "chosen": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": chosen},
+                ],
+                "rejected": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": rejected},
+                ],
+            }
+        return None
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+# ---------------------------------------------------------------------------
 # Streaming, packed token shards (scales past in-memory tokenization)
 # ---------------------------------------------------------------------------
 

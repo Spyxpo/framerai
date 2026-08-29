@@ -224,3 +224,60 @@ def evaluate_code_benchmark(
         },
         samples=len(cases),
     )
+
+
+def evaluate_instruction_following(
+    generator,
+    test_cases: list[dict] = None,
+    max_new_tokens: int = 128,
+) -> BenchmarkResult:
+    """Evaluate instruction following and tool-calling format adherence."""
+    from model.tools.loop import parse_tool_call
+
+    if test_cases is None:
+        test_cases = [
+            {
+                "prompt": "<user>Search the web for FramerAI.<assistant>",
+                "expect_tool": True,
+            },
+            {
+                "prompt": "<user>Say hello.<assistant>",
+                "expect_tool": False,
+            },
+        ]
+
+    valid_format_count = 0
+    valid_tool_count = 0
+
+    for case in test_cases:
+        prompt = case["prompt"]
+        completion = generator.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,
+        )
+        if completion.startswith(prompt):
+            completion = completion[len(prompt):]
+
+        if completion.strip():
+            valid_format_count += 1
+
+        if case.get("expect_tool"):
+            try:
+                call = parse_tool_call(completion)
+                if call is not None:
+                    valid_tool_count += 1
+            except Exception:
+                pass
+        else:
+            valid_tool_count += 1
+
+    samples = len(test_cases)
+    return BenchmarkResult(
+        benchmark="instruction-following",
+        metrics={
+            "format_adherence": valid_format_count / max(1, samples),
+            "tool_call_validity": valid_tool_count / max(1, samples),
+        },
+        samples=samples,
+    )

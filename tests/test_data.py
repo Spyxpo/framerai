@@ -92,3 +92,33 @@ def test_audio_caption_dataset_examples():
     assert item["input_ids"].shape == (32,)
     assert item["target_audio"].dim() == 3  # (1, n_mels, frames)
     assert item["target_audio"].shape[1] == config.audio_n_mels
+
+
+def test_sft_dataset_loading(tmp_path):
+    from model.data import SFTDataset
+
+    sft_file = tmp_path / "sft.jsonl"
+    sft_file.write_text('{"prompt": "Hello", "response": "Hi!"}\n')
+
+    tok = _tokenizer()
+    ds = SFTDataset(str(sft_file), tok, max_len=64)
+    assert len(ds) == 1
+    sample = ds[0]
+    assert "input_ids" in sample and "labels" in sample
+    assert sample["input_ids"].shape == (64,)
+    assert sample["labels"].shape == (64,)
+
+
+def test_dpo_dataset_loading(tmp_path):
+    from model.data import DPODataset
+
+    dpo_file = tmp_path / "dpo.jsonl"
+    dpo_file.write_text('{"prompt": "Hello", "chosen": "Hi!", "rejected": "Bye!"}\n')
+
+    tok = _tokenizer()
+    ds = DPODataset(str(dpo_file), tok, max_len=64)
+    assert len(ds) == 1
+    sample = ds[0]
+    assert "chosen_input_ids" in sample and "rejected_input_ids" in sample
+    assert sample["chosen_input_ids"].shape == (64,)
+    assert sample["rejected_input_ids"].shape == (64,)

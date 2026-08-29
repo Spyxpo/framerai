@@ -62,7 +62,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the
       attention-factor compensation). It was accepted by the config and silently applied no
       extension at all; `validate()` now rejects an unrecognised `rope_scaling_type`.
-- [ ] Add instruction and preference post-training (chat template, SFT, DPO).
+- [x] Add instruction and preference post-training (chat template, SFT, DPO).
 - [x] Add a tool protocol and a bounded tool-calling loop (`model/tools/`), with internet
       search and page fetch behind `--tools web`. Standard library only, no API key.
 - [x] Add command line access behind `--tools cli`: a sandboxed shell with a three-mode
