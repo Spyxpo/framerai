@@ -167,4 +167,3 @@ class ChatTemplate:
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
-

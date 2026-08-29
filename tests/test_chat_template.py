@@ -102,4 +102,3 @@ def test_inference_integration_with_render_prompt():
     assert rendered.startswith("<system>")
     assert "<user>Hello world" in rendered
     assert rendered.endswith("<assistant>")
-
