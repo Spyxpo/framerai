@@ -29,8 +29,10 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import os
+import select
 import sys
 import uuid
 
@@ -38,6 +40,46 @@ import uuid
 def _print(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def make_stdio_approver(root: str, timeout_sec: float = 30.0):
+    """An approver callback for ShellPolicy that requests approval over stdio."""
+    def approve(command: str, argv: list[str]) -> bool:
+        approval_id = str(uuid.uuid4())
+        _print({
+            "type": "approval_request",
+            "approval_id": approval_id,
+            "command": command,
+            "argv": argv,
+            "root": root,
+        })
+        try:
+            has_fd = True
+            try:
+                sys.stdin.fileno()
+            except (AttributeError, io.UnsupportedOperation, ValueError, OSError):
+                has_fd = False
+
+            if has_fd:
+                rlist, _, _ = select.select([sys.stdin], [], [], float(timeout_sec))
+                if not rlist:
+                    return False
+
+            line = sys.stdin.readline()
+            if not line:
+                return False
+            data = json.loads(line.strip())
+            if not isinstance(data, dict):
+                return False
+            if data.get("type") != "approval_response":
+                return False
+            if data.get("approval_id") != approval_id:
+                return False
+            return bool(data.get("approved", False))
+        except Exception:
+            return False
+
+    return approve
 
 
 def _save_image(images, out_dir):
@@ -410,6 +452,10 @@ def main():
         "--cli-timeout", type=float, default=float(os.environ.get("MODEL_CLI_TIMEOUT", 30.0)),
         help="wall-clock seconds a command may run before its process group is killed",
     )
+    parser.add_argument(
+        "--cli-approval-timeout", type=float, default=float(os.environ.get("MODEL_CLI_APPROVAL_TIMEOUT", 30.0)),
+        help="wall-clock seconds to wait for command approval in ask mode before failing closed",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -429,8 +475,15 @@ def main():
         try:
             from model.tools import ShellPolicy, build_registry
 
+            approver = None
+            if args.cli_mode == "ask":
+                approver = make_stdio_approver(args.cli_root, args.cli_approval_timeout)
+
             policy = ShellPolicy(
-                mode=args.cli_mode, root=args.cli_root, timeout=args.cli_timeout
+                mode=args.cli_mode,
+                root=args.cli_root,
+                timeout=args.cli_timeout,
+                approve=approver,
             )
             tools = build_registry(args.tools, cli_policy=policy)
         except Exception as exc:  # noqa: BLE001 - a bad toolset must not block serving

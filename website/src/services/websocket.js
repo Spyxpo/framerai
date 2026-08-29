@@ -56,6 +56,15 @@ export class WebSocketClient {
     }
   }
 
+  sendApprovalResponse(approvalId, approved, denyEverything = false) {
+    this.send({
+      type: "approval_response",
+      approvalId,
+      approved: Boolean(approved),
+      denyEverything: Boolean(denyEverything),
+    });
+  }
+
   disconnect() {
     if (this.ws) {
       this.ws.close();

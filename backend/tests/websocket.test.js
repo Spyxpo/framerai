@@ -174,3 +174,174 @@ test("existing text streaming still works after audio changes", async (t) => {
   assert.equal(final.done, true);
   assert.equal(final.responseType, "text");
 });
+
+test("WebSocket approval request round trip and session isolation", async (t) => {
+  let triggerApproval = null;
+  mockModel({
+    processMessage: (messages, type, settings, options) => {
+      if (options && typeof options.onApprovalRequest === "function") {
+        triggerApproval = options.onApprovalRequest;
+      }
+      return new Promise((resolve) => {
+        setImmediate(() => {
+          resolve({
+            type: "text",
+            content: "approved response",
+            metadata: { model: "test-model" },
+          });
+        });
+      });
+    },
+  });
+
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const clientA = new WebSocket(server.wsUrl);
+  const clientB = new WebSocket(server.wsUrl);
+
+  const messagesA = [];
+  const messagesB = [];
+
+  await Promise.all([
+    new Promise((r) => clientA.on("open", r)),
+    new Promise((r) => clientB.on("open", r)),
+  ]);
+
+  clientA.on("message", (data) => messagesA.push(JSON.parse(data)));
+  clientB.on("message", (data) => messagesB.push(JSON.parse(data)));
+
+  clientA.send(JSON.stringify({ type: "chat", content: "run ls", conversationId: "conv-A" }));
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(triggerApproval, "triggerApproval callback should be passed");
+
+  let approvalResult = null;
+  triggerApproval({
+    approvalId: "approval-101",
+    command: "ls -la",
+    argv: ["ls", "-la"],
+    root: "/sandbox",
+    respond: (approved) => {
+      approvalResult = approved;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Verify approval request frame was delivered to Client A only
+  const reqFrameA = messagesA.find((m) => m.type === "approval_request");
+  const reqFrameB = messagesB.find((m) => m.type === "approval_request");
+
+  assert.ok(reqFrameA, "Client A should receive approval_request frame");
+  assert.equal(reqFrameA.approvalId, "approval-101");
+  assert.equal(reqFrameA.command, "ls -la");
+  assert.equal(reqFrameB, undefined, "Client B must NOT receive Client A's approval request");
+
+  // Test session isolation: Client B trying to respond to Client A's approval ID must be ignored
+  clientB.send(JSON.stringify({ type: "approval_response", approvalId: "approval-101", approved: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(approvalResult, null, "Client B approval response must be ignored due to session isolation");
+
+  // Client A responds with approval
+  clientA.send(JSON.stringify({ type: "approval_response", approvalId: "approval-101", approved: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(approvalResult, true, "Client A approval response should succeed");
+
+  clientA.close();
+  clientB.close();
+});
+
+test("WebSocket disconnect fails closed pending approvals", async (t) => {
+  let triggerApproval = null;
+  mockModel({
+    processMessage: (messages, type, settings, options) => {
+      if (options && typeof options.onApprovalRequest === "function") {
+        triggerApproval = options.onApprovalRequest;
+      }
+      return Promise.resolve({ type: "text", content: "done", metadata: {} });
+    },
+  });
+
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const ws = new WebSocket(server.wsUrl);
+  await new Promise((r) => ws.on("open", r));
+
+  ws.send(JSON.stringify({ type: "chat", content: "run task", conversationId: "conv-disc" }));
+  await new Promise((r) => setTimeout(r, 50));
+
+  let approvalResult = null;
+  triggerApproval({
+    approvalId: "approval-disc",
+    command: "pwd",
+    argv: ["pwd"],
+    root: "/sandbox",
+    respond: (approved) => {
+      approvalResult = approved;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(approvalResult, null);
+
+  ws.close();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(approvalResult, false, "Disconnect must fail closed returning false");
+});
+
+test("WebSocket denyEverything mode automatically denies future requests", async (t) => {
+  let triggerApproval = null;
+  mockModel({
+    processMessage: (messages, type, settings, options) => {
+      if (options && typeof options.onApprovalRequest === "function") {
+        triggerApproval = options.onApprovalRequest;
+      }
+      return Promise.resolve({ type: "text", content: "done", metadata: {} });
+    },
+  });
+
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const ws = new WebSocket(server.wsUrl);
+  await new Promise((r) => ws.on("open", r));
+
+  ws.send(JSON.stringify({ type: "chat", content: "cmd 1", conversationId: "c1" }));
+  await new Promise((r) => setTimeout(r, 50));
+
+  let firstApproved = null;
+  triggerApproval({
+    approvalId: "app-1",
+    command: "first",
+    argv: ["first"],
+    root: "/root",
+    respond: (app) => {
+      firstApproved = app;
+    },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // User denies and sets denyEverything: true
+  ws.send(JSON.stringify({ type: "approval_response", approvalId: "app-1", approved: false, denyEverything: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(firstApproved, false);
+
+  // Subsequent approval request arrives on same session
+  let secondApproved = null;
+  triggerApproval({
+    approvalId: "app-2",
+    command: "second",
+    argv: ["second"],
+    root: "/root",
+    respond: (app) => {
+      secondApproved = app;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(secondApproved, false, "Subsequent request should be auto-denied when denyEverything is active");
+
+  ws.close();
+});
