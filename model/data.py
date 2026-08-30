@@ -8,6 +8,9 @@ model. Three modalities are supported:
   pair. Image and audio caption records also contribute their caption text.
 - image-caption: ``.jsonl`` records with ``image`` (path) and ``caption``.
 - audio-caption: ``.jsonl`` records with ``audio`` (path) and ``text``.
+- document: ``.jsonl`` records with ``document`` (path to a PDF or text file).
+  A record that also carries ``text`` uses it verbatim; otherwise the pages are
+  read through :mod:`model.document`, in reading order and with page markers.
 
 Paths inside ``.jsonl`` records are resolved relative to the file that contains
 them.
@@ -21,6 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
+from .document import DocumentError, read_document
 from .modules.audio_encoder import AudioFrontEnd
 
 # ---------------------------------------------------------------------------
@@ -68,6 +72,47 @@ def iter_text_records(data_dir: str):
                     continue
                 text = _record_to_text(record)
                 if text:
+                    yield text
+
+    yield from iter_document_records(data_dir)
+
+
+def iter_document_records(data_dir: str, max_pages: int | None = None):
+    """Yield page text from ``{"document": path}`` records in a directory.
+
+    A record that already carries ``text`` is left to :func:`iter_text_records`,
+    which yields it verbatim; this reads only the records that do not, so a
+    document contributes its text exactly once. A file that cannot be read is
+    skipped with its reason rather than failing the whole corpus, because one
+    damaged document in a large corpus should not stop a training run.
+    """
+    if not data_dir or not os.path.isdir(data_dir):
+        return
+
+    for path in sorted(glob.glob(os.path.join(data_dir, "**", "*.jsonl"), recursive=True)):
+        base = os.path.dirname(path)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "document" not in record or "text" in record:
+                    continue
+                raw = record["document"]
+                doc_path = raw if os.path.isabs(raw) else os.path.join(base, raw)
+                if not os.path.exists(doc_path):
+                    continue
+                try:
+                    document = read_document(doc_path, max_pages=max_pages)
+                except DocumentError as exc:
+                    print(f"[data] skipping '{doc_path}': {exc}")
+                    continue
+                text = document.to_text()
+                if text.strip():
                     yield text
 
 

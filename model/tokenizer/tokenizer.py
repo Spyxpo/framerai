@@ -49,6 +49,9 @@ class FramerTokenizer:
         "<audio_frame>": 1,
         "<tool>": 2,
         "<tool_call>": 3,
+        "<doc>": 4,
+        "<doc_end>": 5,
+        "<page>": 6,
     }
 
     def __init__(

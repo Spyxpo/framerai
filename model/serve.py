@@ -349,6 +349,34 @@ def handle(gen, op, params, mind=None, tools=None):
         tensor = _load_image(params["image_path"], gen.model.config.image_size)
         return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
 
+    if op == "document":
+        from .document import DocumentError, read_document
+
+        try:
+            document = read_document(
+                params["document_path"], max_pages=params.get("max_pages")
+            )
+        except DocumentError as exc:
+            # A missing optional reader is a deployment fact, not a crash: the
+            # caller gets the reason and can install it or send something else.
+            return {"error": str(exc), "code": "DOCUMENT_UNREADABLE"}
+
+        text = document.to_text(max_pages=params.get("max_pages"))
+        scanned = [page.number for page in document.scanned_pages]
+        result = {
+            "pages": len(document),
+            "title": document.title,
+            "scanned_pages": scanned,
+            "text": text,
+        }
+        if prompt:
+            result["content"] = gen.generate_text(
+                f"{text}\n\n{prompt}",
+                max_new_tokens=params.get("max_new_tokens", 256),
+                **_sampling(params),
+            )
+        return result
+
     raise ValueError(f"Unknown op: {op}")
 
 
