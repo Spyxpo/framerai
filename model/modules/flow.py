@@ -102,7 +102,15 @@ class ODESampler(nn.Module):
         device="cpu",
         steps: int = None,
         generator: torch.Generator = None,
+        clamp_fn=None,
     ) -> torch.Tensor:
+        """Solve from noise to data.
+
+        ``clamp_fn(x, t)`` runs after each step when given. It is how a window
+        of video is held to the frames that came before it: without a hook the
+        solver has no way to say "these positions are already decided", and a
+        long clip has to be generated as independent pieces that do not join.
+        """
         steps = steps or self.steps
         x = torch.randn(shape, device=device, generator=generator)
         timeline = torch.linspace(0.0, 1.0, steps + 1, device=device)
@@ -123,6 +131,9 @@ class ODESampler(nn.Module):
                     context, null_context, cfg_scale,
                 )
                 x = x + dt * 0.5 * (velocity + velocity_next)
+
+            if clamp_fn is not None:
+                x = clamp_fn(x, t_next)
 
         return x
 

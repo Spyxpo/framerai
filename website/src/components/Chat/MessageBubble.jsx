@@ -77,7 +77,22 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
       return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated image"} />;
     }
     if (message.type === "video") {
-      return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated video"} />;
+      // Written as a real container now rather than as an animated GIF, so it
+      // needs a video element and the controls that come with one. A GIF from
+      // the fallback path still renders here.
+      if (url.endsWith(".gif")) {
+        return <img className="message-media" src={url} alt={message.metadata?.prompt || "Generated video"} />;
+      }
+      return (
+        <video
+          className="message-media"
+          src={url}
+          controls
+          loop
+          playsInline
+          aria-label={message.metadata?.prompt || "Generated video"}
+        />
+      );
     }
     if (message.type === "audio") {
       return <audio className="message-audio" src={url} controls aria-label="Generated audio" />;

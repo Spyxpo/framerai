@@ -504,8 +504,54 @@
                   "num_frames": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 64,
-                    "default": 16
+                    "maximum": 512,
+                    "default": 16,
+                    "description": "Duration in frames. Requests longer than one denoising window are generated as overlapped windows with latent carry-over."
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 64,
+                    "maximum": 2048,
+                    "description": "Required alongside height."
+                  },
+                  "height": {
+                    "type": "integer",
+                    "minimum": 64,
+                    "maximum": 2048,
+                    "description": "Required alongside width."
+                  },
+                  "aspect": {
+                    "type": "string",
+                    "enum": [
+                      "1:1",
+                      "4:3",
+                      "3:4",
+                      "3:2",
+                      "2:3",
+                      "16:9",
+                      "9:16",
+                      "21:9"
+                    ]
+                  },
+                  "tier": {
+                    "type": "integer",
+                    "enum": [
+                      256,
+                      512,
+                      768,
+                      1024
+                    ]
+                  },
+                  "fps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60,
+                    "description": "Frame rate the clip is conditioned on and written at."
+                  },
+                  "seed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
                   }
                 }
               }
@@ -1324,7 +1370,7 @@
           "num_frames": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 512
           }
         }
       },

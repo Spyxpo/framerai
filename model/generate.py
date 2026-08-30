@@ -431,17 +431,32 @@ class FramerGenerator:
             )
 
     def _sample_video(self, request, frames, fps, context, generator):
-        """Sample, passing duration and size through when the decoder takes them."""
-        sampler = self.model.video_gen.sample
+        """Sample, passing duration and size through when the decoder takes them.
+
+        A request longer than the decoder's window goes through the overlapped
+        path, so duration is bounded by memory over time rather than by what
+        fits in one denoising window. Anything that fits keeps the single-window
+        path exactly as it was.
+        """
+        generator_module = self.model.video_gen
+        window = getattr(self.model.config, "video_frames", frames)
+
+        if frames > window and hasattr(generator_module, "sample_long"):
+            return generator_module.sample_long(
+                1, context, self.device,
+                frames=frames, height=request.height, width=request.width,
+                fps=fps, generator=generator, window_frames=window,
+            )
+
         try:
-            return sampler(
+            return generator_module.sample(
                 1, context, self.device,
                 frames=frames, height=request.height, width=request.width,
                 fps=fps, generator=generator,
             )
         except TypeError:
             # The 3D U-Net's sampler takes only (batch_size, context, device).
-            return sampler(1, context, self.device)
+            return generator_module.sample(1, context, self.device)
 
     @torch.no_grad()
     def generate_code(

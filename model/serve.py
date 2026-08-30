@@ -88,10 +88,50 @@ def _save_image(images, out_dir):
     return name
 
 
-def _save_video(frames, out_dir):
+DEFAULT_VIDEO_FPS = 24
+
+
+def _save_video(frames, out_dir, fps=None):
+    """Write a clip, honouring the frame rate it was generated at.
+
+    The rate used to be hardcoded at 100 ms a frame, so every clip came back at
+    10 fps whatever was asked for and whatever the model was conditioned on.
+    MP4 is written when a video writer is available, since a palette of 256
+    colours is a hard ceiling on quality that no frame rate fixes; GIF remains
+    the fallback so the path works with nothing installed beyond Pillow.
+    """
+    # `fps or DEFAULT` would swallow an explicit 0, turning a caller error into
+    # a silent default, so absence and zero are distinguished here.
+    rate = DEFAULT_VIDEO_FPS if fps is None else float(fps)
+    if rate <= 0:
+        raise ValueError(f"fps must be positive, got {fps}")
+
+    name = f"{uuid.uuid4()}.mp4"
+    path = os.path.join(out_dir, name)
+    try:
+        import cv2
+        import numpy as np
+
+        height, width = frames[0].height, frames[0].width
+        writer = cv2.VideoWriter(
+            path, cv2.VideoWriter_fourcc(*"mp4v"), rate, (width, height)
+        )
+        if not writer.isOpened():
+            raise RuntimeError("no usable mp4 encoder")
+        for frame in frames:
+            writer.write(cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2BGR))
+        writer.release()
+        return name
+    except Exception:  # noqa: BLE001 - fall back rather than fail the request
+        if os.path.exists(path):
+            os.remove(path)
+
     name = f"{uuid.uuid4()}.gif"
     path = os.path.join(out_dir, name)
-    frames[0].save(path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+    frames[0].save(
+        path, save_all=True, append_images=frames[1:],
+        duration=max(1, round(1000.0 / rate)), loop=0,
+    )
     return name
 
 
@@ -406,10 +446,11 @@ def handle(gen, op, params, mind=None, tools=None):
             seed=params.get("seed"),
             return_request=True,
         )
+        fps = params.get("fps") or getattr(gen.model.config, "video_fps", DEFAULT_VIDEO_FPS)
         return {
-            "file": _save_video(frames, out_dir),
+            "file": _save_video(frames, out_dir, fps=fps),
             "frames": len(frames),
-            "fps": params.get("fps"),
+            "fps": fps,
             **request.to_dict(),
         }
 

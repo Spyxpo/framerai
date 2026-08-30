@@ -498,16 +498,30 @@ async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOption
   };
 }
 
-async function generateVideo(prompt, numFrames = 16, requestIdOrOptions = null) {
+async function generateVideo(prompt, numFrames = 16, size = {}, requestIdOrOptions = null) {
+  // Older callers passed the request id where the size now sits.
+  if (typeof size === "string" || (size && size.requestId && requestIdOrOptions === null)) {
+    requestIdOrOptions = size;
+    size = {};
+  }
   const opts = normalizeModelOptions(requestIdOrOptions);
+
   if (bridge.available()) {
     try {
-      const result = await bridge.request("video", { prompt, num_frames: numFrames }, opts.options);
+      const params = { prompt, num_frames: numFrames };
+      for (const key of ["width", "height", "aspect", "tier", "fps", "seed"]) {
+        if (size[key] !== undefined && size[key] !== null) params[key] = size[key];
+      }
+      const result = await bridge.request("video", params, opts.options);
+      // The frame count came back as the number requested rather than the
+      // number produced, so a clip the decoder trimmed reported a length it
+      // did not have.
+      const frames = Number.isFinite(result.frames) ? result.frames : numFrames;
       return {
         id: randomUUID(),
         prompt,
-        video: { url: `${GENERATED_URL}/${result.file}`, frames: numFrames, placeholder: false },
-        metadata: { frames: numFrames, model: "framerai-video" },
+        video: { url: `${GENERATED_URL}/${result.file}`, frames, fps: result.fps, placeholder: false },
+        metadata: { frames, fps: result.fps, model: "framerai-video" },
       };
     } catch (err) {
       logger.warn("video fallback", { error: err.message, requestId: opts.requestId });

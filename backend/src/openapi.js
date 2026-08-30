@@ -331,9 +331,33 @@ function generateOpenApiSpec() {
                     num_frames: {
                       type: "integer",
                       minimum: 1,
-                      maximum: 64,
+                      maximum: generateRoutes.MAX_FRAMES,
                       default: 16,
+                      description:
+                        "Duration in frames. Requests longer than one denoising window " +
+                        "are generated as overlapped windows with latent carry-over.",
                     },
+                    width: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_DIMENSION,
+                      maximum: generateRoutes.MAX_DIMENSION,
+                      description: "Required alongside height.",
+                    },
+                    height: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_DIMENSION,
+                      maximum: generateRoutes.MAX_DIMENSION,
+                      description: "Required alongside width.",
+                    },
+                    aspect: { type: "string", enum: generateRoutes.ASPECT_RATIOS },
+                    tier: { type: "integer", enum: generateRoutes.SIZE_TIERS },
+                    fps: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_FPS,
+                      maximum: generateRoutes.MAX_FPS,
+                      description: "Frame rate the clip is conditioned on and written at.",
+                    },
+                    seed: { type: "integer", minimum: 0, maximum: 2 ** 31 - 1 },
                   },
                 },
               },

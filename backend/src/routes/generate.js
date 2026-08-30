@@ -16,7 +16,7 @@ const {
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const config = require("../config");
-const { readSettings } = require("../generationSettings");
+const { readSettings, ASPECT_RATIOS, SIZE_TIERS } = require("../generationSettings");
 const modelLimits = require("../modelLimits");
 
 // The documented floor; the accepted length rises with the loaded model's window.
@@ -24,14 +24,17 @@ const MAX_PROMPT_LENGTH = modelLimits.BASE_PROMPT_CHARS;
 // Square-only sizes, kept so existing clients keep working. Prefer
 // width/height or aspect + tier.
 const RESOLUTIONS = [64, 128, 256, 512];
-const ASPECT_RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9"];
-const SIZE_TIERS = [256, 512, 768, 1024];
 const MIN_DIMENSION = 64;
 const MAX_DIMENSION = 2048;
 // Document types the ingestion path understands. Kept as an explicit list
 // rather than a prefix, because "application/" covers far more than this.
 const DOCUMENT_MIME_TYPES = ["application/pdf", "text/plain", "text/markdown"];
 const MAX_DOCUMENT_PAGES = 2000;
+// Duration is bounded by the overlapped-window path rather than by a single
+// denoising window, so the frame ceiling is no longer one window's worth.
+const MAX_FRAMES = 512;
+const MIN_FPS = 1;
+const MAX_FPS = 60;
 const LANGUAGES = [
   "python",
   "javascript",
@@ -156,10 +159,27 @@ router.post(
   asyncHandler(async (req, res) => {
     const v = validator(req.body);
     const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
-    const numFrames = v.integer("num_frames", { min: 1, max: 64, fallback: 16 });
+    const numFrames = v.integer("num_frames", { min: 1, max: MAX_FRAMES, fallback: 16 });
+    // The worker has accepted every one of these all along; the route exposed
+    // none of them, so a client could ask for neither a size nor a frame rate
+    // nor a reproducible seed.
+    const width = v.integer("width", { min: MIN_DIMENSION, max: MAX_DIMENSION });
+    const height = v.integer("height", { min: MIN_DIMENSION, max: MAX_DIMENSION });
+    const aspect = v.oneOf("aspect", ASPECT_RATIOS);
+    const tier = v.oneOf("tier", SIZE_TIERS);
+    const fps = v.integer("fps", { min: MIN_FPS, max: MAX_FPS });
+    const seed = v.integer("seed", { min: 0, max: 2 ** 31 - 1 });
     v.done();
 
-    res.json(await generateVideo(prompt, numFrames, req.requestId));
+    if ((width === undefined) !== (height === undefined)) {
+      throw ApiError.badRequest("Request validation failed", [
+        { field: width === undefined ? "width" : "height", message: "is required alongside the other" },
+      ]);
+    }
+
+    res.json(
+      await generateVideo(prompt, numFrames, { width, height, aspect, tier, fps, seed }, req.requestId)
+    );
   })
 );
 
@@ -274,5 +294,8 @@ router.MAX_DIMENSION = MAX_DIMENSION;
 router.LANGUAGES = LANGUAGES;
 router.DOCUMENT_MIME_TYPES = DOCUMENT_MIME_TYPES;
 router.MAX_DOCUMENT_PAGES = MAX_DOCUMENT_PAGES;
+router.MAX_FRAMES = MAX_FRAMES;
+router.MIN_FPS = MIN_FPS;
+router.MAX_FPS = MAX_FPS;
 
 module.exports = router;
