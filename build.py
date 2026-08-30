@@ -465,6 +465,30 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
         # Flatten metrics and add sample count
         return {**result.metrics, "samples": result.samples}
 
+    @harness.suite("dense-text")
+    def _dense_text(model, device, **_):
+        # Whether the words inside an image were read, which the image metrics
+        # do not answer and every document use depends on.
+        from model.eval import dense_text
+
+        return dense_text.dense_text_accuracy(generator)
+
+    @harness.suite("long-context")
+    def _long_context(model, device, **_):
+        # A window is a number in a config until something retrieves from it.
+        # Reported per length bucket, so the length where it stops working is
+        # visible rather than averaged into one figure.
+        from model.eval import longcontext
+
+        return {
+            **{f"single_fact.{k}": v for k, v in
+               longcontext.single_fact_accuracy(model, tokenizer, device, seed=config.seed).items()},
+            **{f"multi_hop.{k}": v for k, v in
+               longcontext.multi_hop_accuracy(model, tokenizer, device, seed=config.seed).items()},
+            **{f"aggregation.{k}": v for k, v in
+               longcontext.aggregation_accuracy(model, tokenizer, device, seed=config.seed).items()},
+        }
+
     # Run evaluation
     logger.info("Running benchmarks...")
     report = harness.run()
@@ -518,8 +542,9 @@ def print_estimate(config: FramerConfig):
     print(f"  Weights (bf16)     {est['bf16_bytes'] / gb:>9.1f} GiB")
     print(f"  Training state     {est['adamw_bytes'] / gb:>9.1f} GiB "
           f"(weights + fp32 master + AdamW moments)")
+    cache_dtype = "int8" if est.get("kv_cache_dtype") == "int8" else "bf16"
     print(f"  KV cache           {est['kv_cache_bytes'] / gb:>9.1f} GiB "
-          f"(bf16, one sequence at {config.max_seq_len:,} tokens)")
+          f"({cache_dtype}, one sequence at {config.max_seq_len:,} tokens)")
     if config.context_extension > 1.0:
         print(f"  Context            {config.max_seq_len:,} tokens "
               f"({config.context_extension:.0f}x {config.rope_original_max_seq_len:,} "

@@ -38,6 +38,10 @@ class FramerGenerator:
         self.model = model.to(device).eval()
         self.tokenizer = tokenizer
         self.device = device
+        # What the last call had to give up to fit the context window. Reported
+        # rather than hidden, so a short or truncated answer is explicable.
+        self.last_prompt_tokens_dropped = 0
+        self.last_max_new_tokens = 0
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, tokenizer_path: str, device: str = "auto"):
@@ -62,7 +66,26 @@ class FramerGenerator:
         input_ids = torch.tensor([tokens], device=self.device)
         return self.model.forward_lm(input_ids)["hidden"]
 
-    def _prefill(self, input_ids, prefix_embeds=None, chunk_size=None):
+    def _chunk_modality_embeds(self, piece, modality_embeds, consumed):
+        """The slice of each modality's embeddings whose placeholders are here.
+
+        Chunked prefill hands the backbone a window of the prompt at a time,
+        and the scatter requires exactly as many embeddings as the window has
+        placeholder tokens. So the embeddings are walked alongside the chunks
+        rather than passed whole to every one of them.
+        """
+        chunk_embeds = {}
+        for placeholder_id, embeds in modality_embeds.items():
+            slots = int((piece == placeholder_id).sum().item())
+            if not slots:
+                continue
+            flat = embeds.reshape(-1, embeds.shape[-1])
+            taken = consumed[placeholder_id]
+            chunk_embeds[placeholder_id] = flat[taken:taken + slots].unsqueeze(0)
+            consumed[placeholder_id] = taken + slots
+        return chunk_embeds
+
+    def _prefill(self, input_ids, prefix_embeds=None, chunk_size=None, modality_embeds=None):
         """Seed the KV cache from a prompt, one chunk at a time.
 
         A single-shot prefill runs the whole prompt through the backbone in one
@@ -78,16 +101,120 @@ class FramerGenerator:
         chunk = chunk_size or DEFAULT_PREFILL_CHUNK
         starts = list(range(0, input_ids.shape[1], chunk)) or [0]
         past, logits = None, None
+        consumed = {placeholder: 0 for placeholder in (modality_embeds or {})}
         for start in starts:
+            piece = input_ids[:, start:start + chunk]
+            chunk_embeds = (
+                self._chunk_modality_embeds(piece, modality_embeds, consumed)
+                if modality_embeds
+                else None
+            )
             out = self.model.forward_lm(
-                input_ids[:, start:start + chunk],
+                piece,
                 prefix_embeds=prefix_embeds if start == 0 else None,
+                modality_embeds=chunk_embeds,
                 past_kvs=past,
                 use_cache=True,
             )
             past = out["past_kvs"]
             logits = out["logits"][:, -1, :]
         return past, logits
+
+    def _fit_to_window(self, prompt: str, max_new_tokens: int, modality_embeds: list):
+        """Fit a request inside the context window, and record what it cost.
+
+        The window has to hold the prompt, whatever the modalities occupy, and
+        everything about to be generated. Nothing used to reserve any of that,
+        so an over-long request reached the backbone and produced positions the
+        model was never trained for, returning degraded output with no
+        diagnostic. Here the room is divided up front: a share is held back for
+        the answer, the prompt is trimmed to the rest keeping its end, and the
+        generation length is clamped to what is actually left.
+
+        Both decisions land on ``last_prompt_tokens_dropped`` and
+        ``last_max_new_tokens`` so a caller can say why an answer came out short
+        rather than guessing.
+        """
+        self.last_prompt_tokens_dropped = 0
+        self.last_max_new_tokens = max_new_tokens
+
+        window = int(getattr(self.model.config, "max_seq_len", 0) or 0)
+        if not window:
+            return prompt, max_new_tokens
+
+        modality_tokens = sum(e.shape[1] for e in modality_embeds)
+        # Interleaved placement writes an opening and closing marker per
+        # modality into the sequence; prefix placement does not.
+        markers = 2 * len(modality_embeds) if self._interleaving() else 0
+        room = window - modality_tokens - markers - 2  # start and end tokens
+
+        if room < 2:
+            raise ValueError(
+                f"the attached modalities need {modality_tokens + markers} of the "
+                f"{window}-token context window, leaving no room for a prompt or "
+                f"an answer. Send fewer modalities, lower the tile count, or use "
+                f"a preset with a larger window."
+            )
+
+        # Hold back a share of the room for the answer, so a large
+        # max_new_tokens cannot squeeze the prompt down to nothing and a long
+        # prompt cannot leave the model with no room to reply.
+        reserved = min(max_new_tokens, max(1, room // 4))
+        prompt_budget = max(1, room - reserved)
+
+        ids = self.tokenizer.encode(prompt, add_special=False)
+        if len(ids) > prompt_budget:
+            prompt = self.tokenizer.decode(ids[-prompt_budget:])
+            self.last_prompt_tokens_dropped = len(ids) - prompt_budget
+
+        used = min(len(ids), prompt_budget)
+        self.last_max_new_tokens = max(1, min(max_new_tokens, room - used))
+        return prompt, self.last_max_new_tokens
+
+    def _interleaving(self) -> bool:
+        """True when the model asks for modalities placed, not prepended."""
+        return getattr(self.model.config, "mm_token_placement", "prefix") == "interleaved"
+
+    def _interleaved_prompt(self, prompt: str, image_embeds=None, audio_embeds=None):
+        """Build a prompt with modality runs where the prompt mentions them.
+
+        Prefix concatenation puts every image ahead of the whole prompt, so
+        "compare the first with the second" loses which is which. Here the
+        ``<img>`` and ``<audio>`` markers in the prompt say where a modality
+        belongs, and its embeddings are scattered into the placeholder run left
+        at that position. A prompt with no marker keeps the old order, with the
+        modality first, so nothing has to change to keep working.
+        """
+        from .data import InterleavedSequenceBuilder
+
+        builder = InterleavedSequenceBuilder(self.tokenizer)
+        segments, remaining = [], prompt
+        for marker, embeds, kind in (
+            ("<img>", image_embeds, "image"),
+            ("<audio>", audio_embeds, "audio"),
+        ):
+            if embeds is None:
+                continue
+            count = embeds.shape[1]
+            if marker in remaining:
+                before, remaining = remaining.split(marker, 1)
+                if before:
+                    segments.append(("text", before))
+                segments.append((kind, count))
+            else:
+                segments.insert(0, (kind, count))
+        if remaining:
+            segments.append(("text", remaining))
+
+        built = builder.build(segments)
+        tokens = [self.tokenizer.sos_id] + built["input_ids"] + [self.tokenizer.eos_id]
+
+        modality_embeds = {}
+        if image_embeds is not None:
+            modality_embeds[builder.image_patch] = image_embeds
+        if audio_embeds is not None:
+            modality_embeds[builder.audio_frame] = audio_embeds
+        return tokens, modality_embeds
 
     @torch.no_grad()
     def generate_text(
@@ -109,18 +236,29 @@ class FramerGenerator:
         ``prefill_chunk_size`` tokens (default :data:`DEFAULT_PREFILL_CHUNK`),
         which is what makes a context of a million tokens reachable.
         """
-        tokens = self.tokenizer.encode(prompt, add_special=True)
+        image_embeds = audio_embeds = None
+        if image is not None:
+            image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
+        if audio is not None:
+            audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
+
+        present = [e for e in (image_embeds, audio_embeds) if e is not None]
+        prompt, max_new_tokens = self._fit_to_window(prompt, max_new_tokens, present)
+
+        prefix_embeds, modality_embeds = None, None
+        if self._interleaving() and (image_embeds is not None or audio_embeds is not None):
+            tokens, modality_embeds = self._interleaved_prompt(prompt, image_embeds, audio_embeds)
+        else:
+            tokens = self.tokenizer.encode(prompt, add_special=True)
+            parts = [e for e in (image_embeds, audio_embeds) if e is not None]
+            prefix_embeds = torch.cat(parts, dim=1) if parts else None
+
         input_ids = torch.tensor([tokens], device=self.device)
 
-        prefix_parts = []
-        if image is not None:
-            prefix_parts.append(self.model.forward_vision(image.unsqueeze(0).to(self.device)))
-        if audio is not None:
-            prefix_parts.append(self.model.forward_audio(audio.unsqueeze(0).to(self.device)))
-        prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
-
         # Prefill the prompt (+ modality prefix) and seed the cache.
-        past, logits = self._prefill(input_ids, prefix_embeds, prefill_chunk_size)
+        past, logits = self._prefill(
+            input_ids, prefix_embeds, prefill_chunk_size, modality_embeds=modality_embeds
+        )
 
         generated = list(tokens)
         for _ in range(max_new_tokens):
@@ -293,17 +431,32 @@ class FramerGenerator:
             )
 
     def _sample_video(self, request, frames, fps, context, generator):
-        """Sample, passing duration and size through when the decoder takes them."""
-        sampler = self.model.video_gen.sample
+        """Sample, passing duration and size through when the decoder takes them.
+
+        A request longer than the decoder's window goes through the overlapped
+        path, so duration is bounded by memory over time rather than by what
+        fits in one denoising window. Anything that fits keeps the single-window
+        path exactly as it was.
+        """
+        generator_module = self.model.video_gen
+        window = getattr(self.model.config, "video_frames", frames)
+
+        if frames > window and hasattr(generator_module, "sample_long"):
+            return generator_module.sample_long(
+                1, context, self.device,
+                frames=frames, height=request.height, width=request.width,
+                fps=fps, generator=generator, window_frames=window,
+            )
+
         try:
-            return sampler(
+            return generator_module.sample(
                 1, context, self.device,
                 frames=frames, height=request.height, width=request.width,
                 fps=fps, generator=generator,
             )
         except TypeError:
             # The 3D U-Net's sampler takes only (batch_size, context, device).
-            return sampler(1, context, self.device)
+            return generator_module.sample(1, context, self.device)
 
     @torch.no_grad()
     def generate_code(

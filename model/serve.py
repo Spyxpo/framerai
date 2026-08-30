@@ -88,10 +88,50 @@ def _save_image(images, out_dir):
     return name
 
 
-def _save_video(frames, out_dir):
+DEFAULT_VIDEO_FPS = 24
+
+
+def _save_video(frames, out_dir, fps=None):
+    """Write a clip, honouring the frame rate it was generated at.
+
+    The rate used to be hardcoded at 100 ms a frame, so every clip came back at
+    10 fps whatever was asked for and whatever the model was conditioned on.
+    MP4 is written when a video writer is available, since a palette of 256
+    colours is a hard ceiling on quality that no frame rate fixes; GIF remains
+    the fallback so the path works with nothing installed beyond Pillow.
+    """
+    # `fps or DEFAULT` would swallow an explicit 0, turning a caller error into
+    # a silent default, so absence and zero are distinguished here.
+    rate = DEFAULT_VIDEO_FPS if fps is None else float(fps)
+    if rate <= 0:
+        raise ValueError(f"fps must be positive, got {fps}")
+
+    name = f"{uuid.uuid4()}.mp4"
+    path = os.path.join(out_dir, name)
+    try:
+        import cv2
+        import numpy as np
+
+        height, width = frames[0].height, frames[0].width
+        writer = cv2.VideoWriter(
+            path, cv2.VideoWriter_fourcc(*"mp4v"), rate, (width, height)
+        )
+        if not writer.isOpened():
+            raise RuntimeError("no usable mp4 encoder")
+        for frame in frames:
+            writer.write(cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2BGR))
+        writer.release()
+        return name
+    except Exception:  # noqa: BLE001 - fall back rather than fail the request
+        if os.path.exists(path):
+            os.remove(path)
+
     name = f"{uuid.uuid4()}.gif"
     path = os.path.join(out_dir, name)
-    frames[0].save(path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+    frames[0].save(
+        path, save_all=True, append_images=frames[1:],
+        duration=max(1, round(1000.0 / rate)), loop=0,
+    )
     return name
 
 
@@ -118,20 +158,89 @@ def _save_audio(waveform, sample_rate, out_dir):
     return name
 
 
+def _window_report(gen, requested_max_new_tokens):
+    """What the context window cost this request, when it cost anything.
+
+    Silence here is the old behaviour: a prompt was truncated or an answer cut
+    short and nothing said so. The keys appear only when something was given
+    up, so an ordinary reply is unchanged.
+    """
+    report = {}
+    dropped = getattr(gen, "last_prompt_tokens_dropped", 0)
+    granted = getattr(gen, "last_max_new_tokens", requested_max_new_tokens)
+    if dropped:
+        report["prompt_tokens_dropped"] = dropped
+    if granted and granted < requested_max_new_tokens:
+        report["max_new_tokens_granted"] = granted
+    return report
+
+
 def _sampling(params):
     """Sampling controls the caller set, leaving the rest to the generator."""
     keys = ("temperature", "top_k", "top_p")
     return {k: params[k] for k in keys if params.get(k) is not None}
 
 
-def _load_image(path, size):
-    """Load an image file as a (3, size, size) tensor in the model's range."""
+def _load_image(path, config):
+    """Load an image file as a (3, H, W) tensor in the model's range.
+
+    With tiling on, aspect ratio is kept: the tiler picks its grid from the
+    shape, so squashing a tall page into a square here would tell it every page
+    is square and cost the extra rows of tiles that make the text legible. The
+    long side is capped so a very large scan does not turn into an unbounded
+    tensor, and the short side covers at least one tile. With tiling off the
+    old fixed square is what the encoder expects, so that is what it gets.
+    """
     import numpy as np
     import torch
     from PIL import Image
 
-    img = Image.open(path).convert("RGB").resize((size, size))
+    tile = config.image_size
+    img = Image.open(path).convert("RGB")
+
+    if getattr(config, "vision_tiling", False):
+        max_tiles = max(1, int(getattr(config, "vision_max_tiles", 12)))
+        width, height = img.size
+        longest = max(width, height)
+        cap = tile * max_tiles
+        if longest > cap:
+            scale = cap / longest
+            img = img.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+        width, height = img.size
+        shortest = min(width, height)
+        if shortest < tile:
+            scale = tile / shortest
+            img = img.resize((max(tile, round(width * scale)), max(tile, round(height * scale))))
+    else:
+        img = img.resize((tile, tile))
+
     return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
+
+
+def _read_attachments(gen, attachments):
+    """Turn resolved attachments into an image tensor and any document text.
+
+    The backend has already checked that every path sits inside its uploads
+    root, so this opens what it is given. A document that cannot be read
+    contributes a note rather than raising, because one unreadable attachment
+    should not lose the rest of the turn.
+    """
+    image = None
+    documents = []
+    for item in attachments or []:
+        kind, path = item.get("kind"), item.get("path")
+        if not path:
+            continue
+        if kind == "image" and image is None:
+            image = _load_image(path, gen.model.config)
+        elif kind == "document":
+            from .document import DocumentError, read_document
+
+            try:
+                documents.append(read_document(path).to_text())
+            except DocumentError as exc:
+                documents.append(f"[document could not be read: {exc}]")
+    return image, documents
 
 
 def _load_frames(path, size, limit=32):
@@ -230,6 +339,8 @@ def handle(gen, op, params, mind=None, tools=None):
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
+        image, documents = _read_attachments(gen, params.get("attachments"))
+
         if messages and not prompt:
             from .tokenizer.chat_template import ChatTemplate
 
@@ -243,6 +354,13 @@ def handle(gen, op, params, mind=None, tools=None):
                 [{"role": "user", "content": prompt}], add_generation_prompt=True
             )
 
+        if documents:
+            # Applied after the chat template has resolved the prompt, so an
+            # attachment reaches the model whether the turn arrived as a single
+            # prompt or as a conversation. The document goes ahead of the
+            # question, so the answer is grounded in what was attached.
+            prompt = "\n\n".join([*documents, prompt]) if prompt else "\n\n".join(documents)
+
         if mind is not None:
             reply, trace = mind.converse(
                 prompt,
@@ -255,13 +373,13 @@ def handle(gen, op, params, mind=None, tools=None):
             if tool_trace is not None:
                 result["tools"] = tool_trace.to_dict()
             return result
-        return {
-            "content": gen.generate_text(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                **_sampling(params),
-            )
-        }
+        content = gen.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            image=image,
+            **_sampling(params),
+        )
+        return {"content": content, **_window_report(gen, max_new_tokens)}
 
     if op == "search":
         tool = _require_tool(tools, "web_search", op)
@@ -328,10 +446,11 @@ def handle(gen, op, params, mind=None, tools=None):
             seed=params.get("seed"),
             return_request=True,
         )
+        fps = params.get("fps") or getattr(gen.model.config, "video_fps", DEFAULT_VIDEO_FPS)
         return {
-            "file": _save_video(frames, out_dir),
+            "file": _save_video(frames, out_dir, fps=fps),
             "frames": len(frames),
-            "fps": params.get("fps"),
+            "fps": fps,
             **request.to_dict(),
         }
 
@@ -346,8 +465,36 @@ def handle(gen, op, params, mind=None, tools=None):
         return {"content": gen.transcribe(wav)}
 
     if op == "understand":
-        tensor = _load_image(params["image_path"], gen.model.config.image_size)
+        tensor = _load_image(params["image_path"], gen.model.config)
         return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
+
+    if op == "document":
+        from .document import DocumentError, read_document
+
+        try:
+            document = read_document(
+                params["document_path"], max_pages=params.get("max_pages")
+            )
+        except DocumentError as exc:
+            # A missing optional reader is a deployment fact, not a crash: the
+            # caller gets the reason and can install it or send something else.
+            return {"error": str(exc), "code": "DOCUMENT_UNREADABLE"}
+
+        text = document.to_text(max_pages=params.get("max_pages"))
+        scanned = [page.number for page in document.scanned_pages]
+        result = {
+            "pages": len(document),
+            "title": document.title,
+            "scanned_pages": scanned,
+            "text": text,
+        }
+        if prompt:
+            result["content"] = gen.generate_text(
+                f"{text}\n\n{prompt}",
+                max_new_tokens=params.get("max_new_tokens", 256),
+                **_sampling(params),
+            )
+        return result
 
     raise ValueError(f"Unknown op: {op}")
 
@@ -359,7 +506,7 @@ def _handle_mind(gen, op, params, mind):
     config = gen.model.config
 
     if op == "see":
-        image = _load_image(params["image_path"], config.image_size)
+        image = _load_image(params["image_path"], config)
         trace = mind.perceive_image(
             image, caption=params.get("caption", ""), describe=params.get("describe", True)
         )
@@ -512,7 +659,21 @@ def main():
             mind_error = str(exc)
 
     # One ready line, always: the bridge waits for exactly one.
-    ready = {"ready": True, "mind": mind is not None, "tools": tools.names() if tools else []}
+    # The backend caps its own inputs from these, so a preset with a million
+    # token window is not held to the same fixed limits as a laptop one.
+    config = gen.model.config
+    ready = {
+        "ready": True,
+        "mind": mind is not None,
+        "tools": tools.names() if tools else [],
+        "info": {
+            "max_seq_len": int(config.max_seq_len),
+            "image_size": int(config.image_size),
+            "vocab_size": int(config.vocab_size),
+            "text_only": bool(config.text_only),
+            "mm_token_placement": getattr(config, "mm_token_placement", "prefix"),
+        },
+    }
     if tools and "shell" in tools:
         ready["cli_mode"] = args.cli_mode
     if mind_error:

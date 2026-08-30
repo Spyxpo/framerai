@@ -125,6 +125,109 @@ class LatentVideoGenerator(nn.Module):
         return video[:, :, :frames]
 
 
+    @torch.no_grad()
+    def sample_long(
+        self,
+        batch_size: int = 1,
+        context: torch.Tensor = None,
+        device: str = "cpu",
+        frames: int = None,
+        height: int = None,
+        width: int = None,
+        fps: int = None,
+        cfg_scale: float = None,
+        steps: int = None,
+        generator: torch.Generator = None,
+        window_frames: int = None,
+        overlap_frames: int = None,
+    ) -> torch.Tensor:
+        """Generate a clip longer than one denoising window.
+
+        A single window bounds duration by whatever fits in memory at once, so
+        a long shot could only be made as separate clips, and separate clips do
+        not join: the seam between them is a visible cut, which is exactly what
+        the temporal consistency metric exists to catch.
+
+        Here the windows overlap. Each one after the first has its opening
+        latent frames held to the closing frames of the one before, through the
+        solver's clamp hook, so content carries across the join instead of being
+        reinvented. The causal VAE decodes the assembled latents in one pass,
+        which is what it was built for: frame t never sees frame t+1, so a
+        longer sequence is not a different computation.
+
+        Memory now scales with the window rather than with the duration.
+        """
+        # Absence and zero are distinguished: `x or default` would turn an
+        # explicit 0 into a default and skip the guards below entirely.
+        frames = self.frames if frames is None else frames
+        height = self.resolution if height is None else height
+        width = self.resolution if width is None else width
+        window_frames = self.frames if window_frames is None else window_frames
+        overlap_frames = self.frames // 4 if overlap_frames is None else overlap_frames
+
+        if window_frames < 1:
+            raise ValueError(f"window_frames must be positive, got {window_frames}")
+        if not 0 <= overlap_frames < window_frames:
+            raise ValueError(
+                f"overlap_frames ({overlap_frames}) must be at least 0 and "
+                f"less than window_frames ({window_frames})"
+            )
+
+        # Everything below is in latent frames: that is what the solver works
+        # in, and what the carry-over has to line up with.
+        _, latent_channels, window_latents, latent_h, latent_w = self.vae.latent_shape(
+            batch_size, window_frames, height, width
+        )
+        window_shape = (batch_size, latent_channels, window_latents, latent_h, latent_w)
+        overlap_latents = (
+            0 if overlap_frames == 0
+            else min(window_latents - 1, self.vae.latent_shape(batch_size, overlap_frames, height, width)[2])
+        )
+        total_latents = self.vae.latent_shape(batch_size, frames, height, width)[2]
+
+        fps_value = float(fps or self.fps)
+        fps_batch = torch.full((batch_size,), fps_value, device=device)
+
+        def velocity_fn(z, t, ctx):
+            return self.denoiser(z, t, ctx, fps=fps_batch[: z.shape[0]])
+
+        scale = self.cfg_scale if cfg_scale is None else cfg_scale
+        assembled, carried = None, None
+
+        while assembled is None or assembled.shape[2] < total_latents:
+            clamp_fn = None
+            if carried is not None and overlap_latents:
+                held = carried
+
+                def clamp_fn(x, t, held=held):
+                    # The opening frames are already decided, so the solver is
+                    # told so at every step rather than being asked to rediscover
+                    # them and then corrected once at the end.
+                    x = x.clone()
+                    x[:, :, :overlap_latents] = held
+                    return x
+
+            window = self.sampler.sample(
+                velocity_fn, window_shape, context=context, null_context=self.null_context,
+                cfg_scale=scale, device=device, steps=steps, generator=generator,
+                clamp_fn=clamp_fn,
+            )
+
+            if assembled is None:
+                assembled = window
+            else:
+                # The overlap is already in the assembled sequence.
+                assembled = torch.cat([assembled, window[:, :, overlap_latents:]], dim=2)
+
+            if overlap_latents:
+                carried = assembled[:, :, -overlap_latents:]
+            if window_latents - overlap_latents <= 0:  # pragma: no cover - guarded above
+                break
+
+        video = self.vae.decode(assembled[:, :, :total_latents]).clamp(-1, 1)
+        return video[:, :, :frames]
+
+
 def build_video_generator(config):
     """Return the video generator the config selects."""
     from .video_generator import VideoGenerator

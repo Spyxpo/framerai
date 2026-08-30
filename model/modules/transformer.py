@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..configs.model_config import ROPE_SCALING_TYPES
+from .kv_cache import DEFAULT_BLOCK_SIZE, KVCache
 
 
 class RMSNorm(nn.Module):
@@ -146,6 +147,18 @@ class RotaryPositionalEmbedding(nn.Module):
         return torch.where(wavelength < high_wavelength, inv_freq, blended)
 
     def forward(self, seq_len: int, offset: int = 0, device=None) -> tuple:
+        end = offset + seq_len
+        if end > self.max_seq_len:
+            # Positions are computed rather than looked up in a table, so going
+            # past the window silently produces angles the model never trained
+            # on and returns degraded output. A configured window is a claim
+            # about what was trained; exceeding it is a caller error, not a mode.
+            raise ValueError(
+                f"position {end} is past the configured context window "
+                f"({self.max_seq_len}). Shorten the prompt, lower "
+                f"max_new_tokens, or raise max_seq_len with a rope scaling "
+                f"factor that covers the extension."
+            )
         device = device or self.inv_freq.device
         positions = torch.arange(offset, offset + seq_len, device=device).float()
         if self.scaling_type == "linear" and self.scaling_factor > 1.0:
@@ -198,6 +211,9 @@ class CausalSelfAttention(nn.Module):
         rope_low_freq_factor: float = 1.0,
         rope_high_freq_factor: float = 4.0,
         rope_original_max_seq_len: int = None,
+        kv_cache_paged: bool = True,
+        kv_cache_block_size: int = DEFAULT_BLOCK_SIZE,
+        kv_cache_dtype: str = "auto",
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -213,6 +229,10 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(n_heads * self.head_dim, d_model, bias=False)
         self.resid_dropout = nn.Dropout(dropout)
+
+        self.kv_cache_paged = kv_cache_paged
+        self.kv_cache_block_size = kv_cache_block_size
+        self.kv_cache_quantized = kv_cache_dtype == "int8"
 
         self.use_qk_norm = use_qk_norm
         if use_qk_norm:
@@ -254,11 +274,24 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
 
-        # Append to the cache.
-        if past_kv is not None:
-            k = torch.cat([past_kv[0], k], dim=2)
-            v = torch.cat([past_kv[1], v], dim=2)
-        present = (k, v) if use_cache else None
+        # Append to the cache. Concatenating rebuilt the whole history on every
+        # decoded token; the paged cache writes into a buffer grown in blocks
+        # and hands back a slice, so a decode step copies nothing.
+        present = None
+        if self.kv_cache_paged and use_cache:
+            cache = past_kv if isinstance(past_kv, KVCache) else KVCache(
+                block_size=self.kv_cache_block_size, quantized=self.kv_cache_quantized
+            )
+            if past_kv is not None and not isinstance(past_kv, KVCache):
+                cache.append(past_kv[0], past_kv[1])
+            k, v = cache.append(k, v)
+            present = cache
+        else:
+            if past_kv is not None:
+                k = torch.cat([past_kv[0], k], dim=2)
+                v = torch.cat([past_kv[1], v], dim=2)
+            if use_cache:
+                present = (k, v)
 
         # Expand GQA heads for the attention matmul.
         k = repeat_kv(k, self.n_rep)
@@ -336,6 +369,9 @@ class TransformerBlock(nn.Module):
         rope_low_freq_factor: float = 1.0,
         rope_high_freq_factor: float = 4.0,
         rope_original_max_seq_len: int = None,
+        kv_cache_paged: bool = True,
+        kv_cache_block_size: int = DEFAULT_BLOCK_SIZE,
+        kv_cache_dtype: str = "auto",
         ffn: nn.Module = None,
     ):
         super().__init__()
@@ -348,6 +384,9 @@ class TransformerBlock(nn.Module):
             rope_low_freq_factor=rope_low_freq_factor,
             rope_high_freq_factor=rope_high_freq_factor,
             rope_original_max_seq_len=rope_original_max_seq_len,
+            kv_cache_paged=kv_cache_paged,
+            kv_cache_block_size=kv_cache_block_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
         self.norm2 = RMSNorm(d_model)
         # ffn may be a dense FeedForward or a MoEFeedForward (returns aux loss).

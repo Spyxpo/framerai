@@ -67,9 +67,20 @@ REST and WebSocket API (Node/Express), and a chat interface (React).
 - **Audio generation** - text-to-audio and speech via discrete acoustic tokens from a residual
   vector-quantized codec, decoded through a neural vocoder, with speaker conditioning.
 - **Image understanding** - a vision encoder with dynamic high-resolution tiling, placed
-  inline with the text rather than prepended to it.
+  inline with the text rather than prepended to it, on the inference path as well as
+  in training. Aspect ratio is preserved, so a tall page is not squashed into a square
+  before the tiler ever sees it.
+- **Document understanding** - PDFs read as ordered pages: the text layer is recovered
+  in reading order rather than in the order the producer emitted it, pages carry
+  markers so an answer can cite one, and a page with no text layer is reported as a
+  scan rather than as an empty page.
+- **Attachments** - images and documents can be attached to a chat turn and reach the
+  model, over both the REST and the WebSocket path.
 - **Audio understanding** - an audio encoder transcribes and describes uploaded audio.
 - **Streaming** - WebSocket-based real-time token streaming.
+- **Long context that is measured, not declared** - retrieval is evaluated across the
+  window by depth, prompts are bounded against it instead of extrapolating past it,
+  and the KV cache is paged and optionally 8-bit so the window is allocatable.
 - **BPE tokenizer** - byte-level tokenizer with multimodal special tokens.
 - **From-scratch training** - trains on a local corpus you provide; no API keys, no teacher models.
 - **Cognition layer** *(optional)* - a persistent mind around the model: episodic and semantic
@@ -205,6 +216,10 @@ Supported formats:
 - `*.jsonl` - `{"text": ...}`, `{"prompt": ..., "response": ...}`, or `{"instruction": ..., "output": ...}`.
 - image-caption `*.jsonl` - `{"image": path, "caption": ...}` (with `--train-modalities`).
 - audio-caption `*.jsonl` - `{"audio": path, "text": ...}` (with `--train-modalities`).
+- document `*.jsonl` - `{"document": path}` for a PDF or text file, read into pages in
+  reading order. A record that also carries `text` uses it verbatim instead. Reading
+  PDFs needs the optional `pypdf` package; without it the record is skipped with its
+  reason rather than failing the run.
 
 To also train the image and audio generators on caption pairs:
 
@@ -256,6 +271,17 @@ The three trillion-scale presets carry a **1,048,576-token context**, reached wi
 scaling from the length each backbone pretrains at. Context costs no parameters - RoPE holds
 no per-position weights - but it does cost KV cache, which the estimator reports per
 sequence.
+
+That cache is what decides whether the window is servable: on `framer-1t-a32b` a single
+sequence at the full context is 256 GiB in bf16, more than the weights. It is stored in
+blocks grown on demand rather than concatenated per decoded token, and
+`kv_cache_dtype="int8"` holds it as 8-bit with a scale per token and head, which takes the
+same sequence to 130 GiB. `--estimate` reports whichever the config selects, scales
+included, so the figure is what a run allocates.
+
+A prompt is bounded against the window rather than extrapolated past it: the room is
+divided up front, a share is held for the answer, and the prompt is trimmed keeping its
+end. What a request had to give up is reported rather than left to be guessed at.
 
 Legacy `--size tiny|small|medium|large` still works as an alias for the `framer-*` presets.
 
@@ -365,10 +391,12 @@ The REST API is fully documented via the OpenAPI 3.1 specification served at `/a
 | GET | `/api/chat/conversations` | List conversations |
 | POST | `/api/chat/conversations/:id/messages` | Send message |
 | POST | `/api/generate/image` | Generate image from text (`width`+`height`, or `aspect`+`tier`, or `seed`; `resolution` is the deprecated square-only alias) |
-| POST | `/api/generate/video` | Generate video from text |
+| POST | `/api/generate/video` | Generate video from text (`num_frames`, `width`+`height` or `aspect`+`tier`, `fps`, `seed`) |
 | POST | `/api/generate/audio` | Generate audio/speech from text |
 | POST | `/api/generate/code` | Generate code |
 | POST | `/api/generate/understand` | Analyze an uploaded image |
+| POST | `/api/generate/document` | Read an uploaded document, in reading order and with page markers |
+| POST | `/api/generate/upload` | Store an image or document for a chat turn to attach (runs no model) |
 | POST | `/api/generate/transcribe` | Transcribe an uploaded audio file |
 | WS | `/ws` | Real-time streaming |
 
@@ -378,7 +406,8 @@ The REST API is fully documented via the OpenAPI 3.1 specification served at `/a
 
 - **Content-Type**: `application/json`
 - **Fields**:
-  - `prompt` *(required, string, max 4000)*: Text description of the image.
+  - `prompt` *(required, string)*: Text description of the image. The length accepted
+    follows the loaded model's context window, with 4000 characters as the floor.
   - `num_images` *(optional, int 1–4, default 1)*: Number of images to generate.
   - `width` & `height` *(optional, int 64–2048)*: Explicit dimensions (must be provided together).
   - `aspect` *(optional, string)*: Aspect ratio (`"1:1"`, `"4:3"`, `"3:4"`, `"3:2"`, `"2:3"`, `"16:9"`, `"9:16"`, `"21:9"`).
@@ -425,8 +454,15 @@ curl -s http://localhost:3001/api/generate/image \
 
 - **Content-Type**: `application/json`
 - **Fields**:
-  - `prompt` *(required, string, max 4000)*: Text description of the video.
-  - `num_frames` *(optional, int 1–64, default 16)*: Number of video frames to generate.
+  - `prompt` *(required, string)*: Text description of the video.
+  - `num_frames` *(optional, int 1–512, default 16)*: Duration in frames. A request
+    longer than one denoising window is generated as overlapped windows with latent
+    carry-over, so the join is continuous rather than a cut.
+  - `width` & `height` *(optional, int 64–2048)*: Explicit dimensions (given together).
+  - `aspect` *(optional, string)*: Aspect ratio, same set as image generation.
+  - `tier` *(optional, int)*: Size tier (`256`, `512`, `768`, `1024`).
+  - `fps` *(optional, int 1–60)*: Frame rate the clip is conditioned on and written at.
+  - `seed` *(optional, int)*: Fixes the sample for reproducibility.
 
 ```bash
 curl -s http://localhost:3001/api/generate/video \
@@ -826,6 +862,7 @@ framerai/
 ├── model/                      # Model architecture & training
 │   ├── modules/
 │   │   ├── transformer.py      # Core transformer (RoPE, SwiGLU, RMSNorm)
+│   │   ├── kv_cache.py         # Block-paged KV cache, optional 8-bit storage
 │   │   ├── vision_encoder.py   # ViT image encoder
 │   │   ├── audio_encoder.py    # Mel-spectrogram audio encoder
 │   │   ├── diffusion.py        # U-Net diffusion for images
@@ -849,6 +886,7 @@ framerai/
 │   │   ├── self_model.py       # Competence, interests, goals, narrative
 │   │   └── consolidation.py    # Sleep: replay, concept formation, forgetting
 │   ├── data.py                 # Local-corpus datasets
+│   ├── document.py             # PDF pages in reading order, with page markers
 │   ├── framer.py               # Unified FramerModel
 │   ├── generate.py             # Inference & generation utilities
 │   └── serve.py                # Inference worker for the backend

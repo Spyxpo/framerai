@@ -27,14 +27,17 @@ function trustProxy() {
 }
 
 module.exports = {
-  // Largest JSON body express will parse. Prompts are capped well below this.
-  jsonBodyLimit: process.env.JSON_BODY_LIMIT || "1mb",
+  // Largest JSON body express will parse. A prompt filling a million-token
+  // window is a few megabytes of text, so 1mb made the largest presets
+  // unreachable through the API whatever their own limits said.
+  jsonBodyLimit: process.env.JSON_BODY_LIMIT || "8mb",
 
   // Largest single upload accepted by the image and audio routes.
   maxFileSize: int("MAX_FILE_SIZE", 50 * 1024 * 1024),
 
-  // Largest WebSocket frame accepted before the connection is closed.
-  maxWsPayload: int("MAX_WS_PAYLOAD", 1024 * 1024),
+  // Largest WebSocket frame accepted before the connection is closed. Matches
+  // the JSON body limit, so the streaming path is not the narrower one.
+  maxWsPayload: int("MAX_WS_PAYLOAD", 8 * 1024 * 1024),
 
   trustProxy: trustProxy(),
 
