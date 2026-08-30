@@ -139,6 +139,36 @@ class FramerGenerator:
         return self.tokenizer.decode(generated)
 
     @torch.no_grad()
+    def generate_chat(
+        self,
+        messages: list[dict],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        image: torch.Tensor = None,
+        audio: torch.Tensor = None,
+        prefill_chunk_size: int = None,
+    ) -> str:
+        """Generate an assistant continuation for structured conversation messages using ChatTemplate."""
+        from .tokenizer.chat_template import ChatTemplate
+
+        prompt = ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
+        raw_output = self.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            image=image,
+            audio=audio,
+            prefill_chunk_size=prefill_chunk_size,
+        )
+        if raw_output.startswith(prompt):
+            return raw_output[len(prompt):]
+        return raw_output
+
+    @torch.no_grad()
     def generate_image(
         self,
         prompt: str,

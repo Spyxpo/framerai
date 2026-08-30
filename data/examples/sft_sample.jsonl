@@ -1,0 +1,4 @@
+{"instruction": "What is FramerAI?", "output": "FramerAI is a high-performance multimodal AI assistant supporting text, code, image, video, and audio tasks."}
+{"prompt": "Write a Python function to compute Fibonacci numbers.", "response": "def fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b"}
+{"messages": [{"role": "user", "content": "Can you search the web for the latest PyTorch release?"}, {"role": "assistant", "tool_calls": "{\"name\": \"web_search\", \"arguments\": {\"query\": \"PyTorch latest release\"}}"}, {"role": "tool", "name": "web_search", "content": "PyTorch 2.9 released with native ONNX exporter enhancements."}, {"role": "assistant", "content": "The latest PyTorch release is PyTorch 2.9, which features enhanced ONNX export capabilities."}]}
+{"instruction": "List 3 primary colors.", "output": "1. Red\n2. Blue\n3. Yellow"}

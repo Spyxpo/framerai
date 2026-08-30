@@ -224,3 +224,71 @@ def evaluate_code_benchmark(
         },
         samples=len(cases),
     )
+
+
+def evaluate_instruction_following(
+    generator,
+    test_cases: list[dict] = None,
+    max_new_tokens: int = 128,
+) -> BenchmarkResult:
+    """Evaluate instruction following and tool-calling format adherence."""
+    from model.tools.loop import ToolCallError, parse_tool_call
+
+    if test_cases is None:
+        test_cases = [
+            {
+                "prompt": "<user>Search the web for FramerAI.<assistant>",
+                "expect_tool": True,
+            },
+            {
+                "prompt": "<user>Say hello.<assistant>",
+                "expect_tool": False,
+            },
+        ]
+
+    valid_format_count = 0
+    valid_tool_count = 0
+
+    for case in test_cases:
+        prompt = case["prompt"]
+        completion = generator.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,
+        )
+        if completion.startswith(prompt):
+            completion = completion[len(prompt):]
+
+        text = completion.strip()
+        expect_tool = bool(case.get("expect_tool", False))
+
+        if not text:
+            continue
+
+        is_valid_tool_call = False
+        has_tool_tag = "<tool_call>" in completion
+        try:
+            call = parse_tool_call(completion)
+            if call is not None and isinstance(call.name, str) and call.name:
+                is_valid_tool_call = True
+        except (ToolCallError, Exception):
+            is_valid_tool_call = False
+
+        if expect_tool:
+            if is_valid_tool_call:
+                valid_format_count += 1
+                valid_tool_count += 1
+        else:
+            if not has_tool_tag and text:
+                valid_format_count += 1
+                valid_tool_count += 1
+
+    samples = len(test_cases)
+    return BenchmarkResult(
+        benchmark="instruction-following",
+        metrics={
+            "format_adherence": valid_format_count / max(1, samples),
+            "tool_call_validity": valid_tool_count / max(1, samples),
+        },
+        samples=samples,
+    )
