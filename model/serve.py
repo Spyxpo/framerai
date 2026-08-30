@@ -134,6 +134,32 @@ def _load_image(path, size):
     return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
 
 
+def _read_attachments(gen, attachments):
+    """Turn resolved attachments into an image tensor and any document text.
+
+    The backend has already checked that every path sits inside its uploads
+    root, so this opens what it is given. A document that cannot be read
+    contributes a note rather than raising, because one unreadable attachment
+    should not lose the rest of the turn.
+    """
+    image = None
+    documents = []
+    for item in attachments or []:
+        kind, path = item.get("kind"), item.get("path")
+        if not path:
+            continue
+        if kind == "image" and image is None:
+            image = _load_image(path, gen.model.config.image_size)
+        elif kind == "document":
+            from .document import DocumentError, read_document
+
+            try:
+                documents.append(read_document(path).to_text())
+            except DocumentError as exc:
+                documents.append(f"[document could not be read: {exc}]")
+    return image, documents
+
+
 def _load_frames(path, size, limit=32):
     """Load a video file as a (T, 3, size, size) tensor. Needs opencv-python."""
     import torch
@@ -230,6 +256,12 @@ def handle(gen, op, params, mind=None, tools=None):
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
+        image, documents = _read_attachments(gen, params.get("attachments"))
+        if documents:
+            # The document goes ahead of the question so the answer is grounded
+            # in what was attached rather than in the weights alone.
+            prompt = "\n\n".join([*documents, prompt]) if prompt else "\n\n".join(documents)
+
         if messages and not prompt:
             from .tokenizer.chat_template import ChatTemplate
 
@@ -259,6 +291,7 @@ def handle(gen, op, params, mind=None, tools=None):
             "content": gen.generate_text(
                 prompt,
                 max_new_tokens=max_new_tokens,
+                image=image,
                 **_sampling(params),
             )
         }

@@ -185,3 +185,52 @@ def test_an_unreadable_document_does_not_stop_the_corpus(tmp_path, capsys):
     texts = list(iter_document_records(str(tmp_path)))
     assert len(texts) == 1 and "readable content" in texts[0]
     assert "skipping" in capsys.readouterr().out
+
+
+class _StubConfig:
+    image_size = 8
+
+
+class _StubGen:
+    model = type("M", (), {"config": _StubConfig()})()
+
+
+def test_attachments_contribute_document_text(tmp_path):
+    from model.serve import _read_attachments
+
+    doc = tmp_path / "brief.txt"
+    doc.write_text("the attached content")
+
+    image, documents = _read_attachments(
+        _StubGen(), [{"kind": "document", "path": str(doc)}]
+    )
+    assert image is None
+    assert len(documents) == 1 and "the attached content" in documents[0]
+
+
+def test_an_unreadable_attachment_does_not_lose_the_turn(tmp_path):
+    from model.serve import _read_attachments
+
+    good = tmp_path / "good.txt"
+    good.write_text("readable")
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(b"not a document")
+
+    _, documents = _read_attachments(
+        _StubGen(),
+        [
+            {"kind": "document", "path": str(bad)},
+            {"kind": "document", "path": str(good)},
+        ],
+    )
+    assert len(documents) == 2
+    assert "could not be read" in documents[0]
+    assert "readable" in documents[1]
+
+
+def test_attachments_without_paths_are_skipped():
+    from model.serve import _read_attachments
+
+    image, documents = _read_attachments(_StubGen(), [{"kind": "image"}, {}])
+    assert image is None and documents == []
+    assert _read_attachments(_StubGen(), None) == (None, [])

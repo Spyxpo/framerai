@@ -8,6 +8,8 @@
  */
 
 const { randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const bridge = require("./pythonBridge");
 const { logger } = require("./logger");
 const config = require("../config");
@@ -254,15 +256,69 @@ function normalizeModelOptions(requestIdOrOptions, operatorCtxParam) {
   };
 }
 
+const UPLOADS_ROOT = path.join(__dirname, "..", "..", "uploads");
+const UPLOAD_PREFIX = "/uploads/";
+// Which encoder an attachment reaches, keyed by the directory it was stored in.
+const ATTACHMENT_KINDS = {
+  images: "image",
+  audio: "audio",
+  documents: "document",
+  generated: "image",
+};
+
+/**
+ * Turn client-supplied attachment references into paths the worker may open.
+ *
+ * Only files this server stored are addressable. Each reference is resolved and
+ * then checked to still sit under the uploads root, so a "../" in a supplied
+ * name cannot walk out into the rest of the filesystem. Anything that fails a
+ * check is dropped with a log line rather than passed on, because a bad
+ * reference should cost the caller its attachment, not the whole request.
+ */
+function resolveAttachments(attachments, requestId = null) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+
+  const resolved = [];
+  for (const entry of attachments) {
+    const raw = typeof entry === "string" ? entry : entry && entry.path;
+    if (typeof raw !== "string" || !raw.startsWith(UPLOAD_PREFIX)) {
+      logger.warn("attachment ignored", { reason: "not an uploads path", requestId });
+      continue;
+    }
+
+    const full = path.resolve(UPLOADS_ROOT, raw.slice(UPLOAD_PREFIX.length));
+    if (!full.startsWith(UPLOADS_ROOT + path.sep)) {
+      logger.warn("attachment ignored", { reason: "outside the uploads root", requestId });
+      continue;
+    }
+
+    const bucket = path.relative(UPLOADS_ROOT, full).split(path.sep)[0];
+    const kind = ATTACHMENT_KINDS[bucket];
+    if (!kind) {
+      logger.warn("attachment ignored", { reason: `unknown bucket '${bucket}'`, requestId });
+      continue;
+    }
+    if (!fs.existsSync(full)) {
+      logger.warn("attachment ignored", { reason: "no such file", requestId });
+      continue;
+    }
+    resolved.push({ path: full, kind });
+  }
+  return resolved;
+}
+
 async function processMessage(messages, requestType = "text", settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
   const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
+  // Attachments were validated and stored and then never read, so nothing a
+  // user attached had ever reached the model.
+  const attachments = resolveAttachments(lastMessage.attachments, opts.requestId);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings, opts.options);
+      return await modelChat(intent, content, settings, opts.options, null, attachments);
     } catch (err) {
       logger.warn("falling back to placeholder", { error: err.message, requestId: opts.requestId });
     }
@@ -271,7 +327,7 @@ async function processMessage(messages, requestType = "text", settings = {}, req
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
+async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null, attachments = []) {
   const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
 
   if (intent === "image" || intent === "video" || intent === "audio") {
@@ -284,8 +340,13 @@ async function modelChat(intent, content, settings = {}, requestIdOrOptions = nu
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content, ...settings }, opts.options);
+  const params = { prompt: content, ...settings };
+  if (attachments.length) params.attachments = attachments;
+  const result = await bridge.request(op, params, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
+  // Report what actually reached the model, so a dropped attachment is visible
+  // rather than looking like the model ignored it.
+  if (attachments.length) metadata.attachments = attachments.map((a) => a.kind);
   // Tool steps travel with the reply so the UI can show what was searched and
   // read instead of presenting a sourced answer as if it came from the weights.
   if (result.tools) metadata.tools = result.tools;
@@ -559,6 +620,7 @@ module.exports = {
   transcribeAudio,
   understandImage,
   readDocument,
+  resolveAttachments,
   validateTrace,
   traceAllowed,
 };
