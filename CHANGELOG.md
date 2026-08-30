@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prompts past `max_seq_len` extrapolated RoPE instead of failing.** The
+  tokenizer had no truncation argument, generation did not check, and RoPE
+  computes positions on the fly, so an over-long request produced angles the
+  model never trained on and returned degraded output with no diagnostic. The
+  window is now divided up front: a share is reserved for the answer, the prompt
+  is trimmed keeping its end, generation is clamped to what is left, and both
+  decisions are reported. A position past the window raises.
+- **The API capped input far below the model's own window.** A message was
+  limited to 8000 characters, a prompt to 4000, `max_new_tokens` to 2048, and the
+  body to 1 MB, whatever was loaded, so the presets declaring a 1,048,576-token
+  context were unreachable through it. Limits now follow the window the worker
+  reports, with the old constants as the floor.
+- **Conversation history never reached the model.** `generate_chat` and a
+  `messages` parameter had been in the worker all along with no caller: the
+  service reduced the list to its last message, and the WebSocket path built a
+  one-element array. The conversation store is now shared by both transports.
+- **Inference used neither tiling nor interleaved placement.** `encode_image_tiles`
+  was reached only from training, contrastive pretraining and evaluation, while a
+  served request ran the plain encoder on an image squashed to a fixed square. The
+  inference path now tiles, keeps aspect ratio, and honours
+  `mm_token_placement="interleaved"`.
+- **Video ignored the frame rate it was asked for.** The writer hardcoded 100 ms a
+  frame, so every clip was 10 fps whatever the request said and whatever the
+  decoder had been conditioned on. The route also exposed only a prompt and a
+  frame count although the worker accepted size, rate and seed, the chat path
+  dropped the aspect ratio and size tier the settings panel collects, and the
+  reported frame count was the number requested rather than produced.
+- **nginx cut long generations at sixty seconds**, well inside the backend's
+  three-minute budget, because no `proxy_read_timeout` was set.
 - **Video generation raised `RuntimeError` on every forward pass.** The 3D U-Net
   sized its timestep embedding from the input channel count instead of the base
   channel count, so `forward_video`, `VideoGenerator.sample`, and the
@@ -60,6 +89,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Document understanding** (`model/document.py`). PDFs are a first-class input:
+  page text is extracted, sorted back into reading order by finding the column
+  gutter rather than trusting the content stream's order, and joined with page
+  markers so a page number survives into the sequence and can be cited. A page
+  with no text layer is reported as a scan rather than as an empty page. The PDF
+  reader and the page rasteriser are both optional and lazily imported, and
+  rasterisation is a pluggable backend so no copyleft renderer becomes a
+  dependency. `POST /api/generate/document` reads an uploaded document, and
+  `{"document": path}` records train on one.
+- **Chat attachments reach the model.** The `attachments` array was validated,
+  stored, and never read; the website always sent an empty one, and the only
+  file input accepted audio. `POST /api/generate/upload` stores an image or
+  document and returns the path a later turn references, the composer uploads on
+  pick so an attachment can be removed before sending, and both the REST and
+  WebSocket paths deliver it.
+- **Long-context retrieval evaluation** (`model/eval/longcontext.py`): single-fact
+  retrieval swept across the window by depth, multi-hop retrieval, and window-wide
+  aggregation, each a forced choice against a known chance rate. Perplexity stays
+  low on long text while retrieval fails, so it could never have answered this.
+- **Dense text recognition evaluation** (`model/eval/dense_text.py`): a character
+  and word error rate over rendered text, reported per font size. The audio side
+  has had this metric since the harness was written; the image side had none.
+- **Block-paged KV cache** (`model/modules/kv_cache.py`), with optional int8
+  storage. On `framer-1t-a32b` a million-token sequence falls from 256 GiB to
+  130 GiB, and `--estimate` reports the cache the config selects rather than a
+  bf16 one it does not.
+- **Few-step image sampling** (`FlowDistiller`). A student distilled against the
+  guided teacher produces the guided field itself, so a step costs one denoiser
+  forward instead of two and the step count drops to single digits: four steps
+  against fifty is twenty-five times fewer calls. Opt-in, because the guidance
+  scale is baked into the student.
+- **Video longer than one denoising window** (`LatentVideoGenerator.sample_long`),
+  through overlapped windows with latent carry-over, so duration is bounded by
+  memory over time rather than by what fits in one window.
 - **Cognition layer** (`model/cognition/`), optional and off by default. A
   checkpoint answers every prompt from its weights and the current context and
   keeps nothing; this wraps it in a persistent mind. `EpisodicMemory` stores each

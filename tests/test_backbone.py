@@ -72,9 +72,14 @@ def test_chunked_prefill_parity():
 
 
 def test_rope_scaling_runs_beyond_train_length():
-    cfg = tiny_config(max_seq_len=64, rope_scaling_factor=4.0, rope_scaling_type="linear")
+    # max_seq_len is the window the config claims, and rope_original_max_seq_len
+    # is the length it was trained at: a 4x extension of 64 is a 256 window.
+    cfg = tiny_config(
+        max_seq_len=256, rope_original_max_seq_len=64,
+        rope_scaling_factor=4.0, rope_scaling_type="linear",
+    )
     model = FramerModel(cfg).eval()
-    long_ids = random_ids(cfg, batch=1, length=200)  # > max_seq_len
+    long_ids = random_ids(cfg, batch=1, length=200)  # > the trained length
     with torch.no_grad():
         logits = model.forward_lm(long_ids)["logits"]
     assert logits.shape == (1, 200, cfg.vocab_size) and torch.isfinite(logits).all()

@@ -41,10 +41,12 @@ website/dist/
 backend/uploads/images/*
 backend/uploads/videos/*
 backend/uploads/audio/*
+backend/uploads/documents/*
 backend/uploads/generated/*
 !backend/uploads/images/.gitkeep
 !backend/uploads/videos/.gitkeep
 !backend/uploads/audio/.gitkeep
+!backend/uploads/documents/.gitkeep
 !backend/uploads/generated/.gitkeep
 
 # IDE

@@ -273,7 +273,9 @@ def test_guidance_extrapolates_away_from_the_null_field():
         half = x.shape[0] // 2
         return torch.cat([torch.ones_like(x[:half]), torch.zeros_like(x[half:])], dim=0)
 
-    guided = ODESampler._guided(
+    # Guidance now reads instance state, because a distilled sampler must not
+    # apply it a second time on top of a student that already produces it.
+    guided = ODESampler()._guided(
         velocity_fn, torch.zeros(2, 4, 4, 4), torch.zeros(2),
         torch.randn(2, 5, 16), torch.zeros(1, 1, 16), cfg_scale=3.0,
     )

@@ -331,9 +331,33 @@ function generateOpenApiSpec() {
                     num_frames: {
                       type: "integer",
                       minimum: 1,
-                      maximum: 64,
+                      maximum: generateRoutes.MAX_FRAMES,
                       default: 16,
+                      description:
+                        "Duration in frames. Requests longer than one denoising window " +
+                        "are generated as overlapped windows with latent carry-over.",
                     },
+                    width: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_DIMENSION,
+                      maximum: generateRoutes.MAX_DIMENSION,
+                      description: "Required alongside height.",
+                    },
+                    height: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_DIMENSION,
+                      maximum: generateRoutes.MAX_DIMENSION,
+                      description: "Required alongside width.",
+                    },
+                    aspect: { type: "string", enum: generateRoutes.ASPECT_RATIOS },
+                    tier: { type: "integer", enum: generateRoutes.SIZE_TIERS },
+                    fps: {
+                      type: "integer",
+                      minimum: generateRoutes.MIN_FPS,
+                      maximum: generateRoutes.MAX_FPS,
+                      description: "Frame rate the clip is conditioned on and written at.",
+                    },
+                    seed: { type: "integer", minimum: 0, maximum: 2 ** 31 - 1 },
                   },
                 },
               },
@@ -430,6 +454,120 @@ function generateOpenApiSpec() {
               },
             },
             "400": errorResponseRef(400, "Validation error"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/upload": {
+        post: {
+          summary: "Store a file for a later chat turn to reference",
+          description:
+            "Stores an image or document and returns the path a chat message may attach. " +
+            "Runs no model: attaching is not asking.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["file"],
+                  properties: {
+                    file: {
+                      type: "string",
+                      format: "binary",
+                      description: `Image or document to attach (image/*, ${generateRoutes.DOCUMENT_MIME_TYPES.join(", ")}, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Stored attachment",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["path", "kind"],
+                    properties: {
+                      path: { type: "string" },
+                      kind: { type: "string", enum: ["image", "document", "audio"] },
+                      name: { type: "string" },
+                      size: { type: "integer" },
+                      mimetype: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or unattachable file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/document": {
+        post: {
+          summary: "Read an uploaded document",
+          description:
+            "Uploads a document and returns its text in reading order, with page markers. " +
+            "Answers a prompt about the document when one is given. Pages that carry no " +
+            "text layer are reported in scannedPages rather than silently returned empty.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["document"],
+                  properties: {
+                    document: {
+                      type: "string",
+                      format: "binary",
+                      description: `Document to read (${generateRoutes.DOCUMENT_MIME_TYPES.join(", ")}, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                    prompt: {
+                      type: "string",
+                      maxLength: generateRoutes.MAX_PROMPT_LENGTH,
+                      description: "Optional question about the document.",
+                    },
+                    max_pages: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: generateRoutes.MAX_DOCUMENT_PAGES,
+                      description: "Read at most this many pages.",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Extracted document text",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["text", "pages", "documentPath"],
+                    properties: {
+                      text: { type: "string" },
+                      pages: { type: "integer" },
+                      title: { type: "string" },
+                      scannedPages: { type: "array", items: { type: "integer" } },
+                      content: { type: "string" },
+                      documentPath: { type: "string" },
+                      metadata: { type: "object", additionalProperties: true },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error, invalid file type, or unreadable document"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
             "429": errorResponseRef(429, "Rate limit exceeded"),
           },
         },
