@@ -9,6 +9,7 @@ from .distributed import (
     is_main_process,
     maybe_wrap_fsdp,
 )
+from .dpo import compute_dpo_loss, get_batch_logps, train_dpo
 from .expert_parallel import (
     ExpertParallelPlan,
     build_device_mesh,
@@ -19,6 +20,7 @@ from .expert_parallel import (
 from .optim import build_optimizer
 from .precision import autocast_context, resolve_precision
 from .schedule import build_scheduler, lr_at_step
+from .sft import train_sft
 from .trainer import train_language_model
 
 __all__ = [
@@ -34,6 +36,10 @@ __all__ = [
     "get_world_size",
     "maybe_wrap_fsdp",
     "train_language_model",
+    "train_sft",
+    "train_dpo",
+    "get_batch_logps",
+    "compute_dpo_loss",
     "save_sharded",
     "load_sharded",
     "save_full",

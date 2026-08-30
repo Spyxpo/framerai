@@ -1,0 +1,3 @@
+{"prompt": "What is the capital of France?", "chosen": "The capital of France is Paris.", "rejected": "France is a country in Western Europe."}
+{"prompt": "How do I print Hello World in Python?", "chosen": "In Python, you can print Hello World using: print('Hello, World!')", "rejected": "You can write a file or something."}
+{"prompt": "Explain gradient descent in one sentence.", "chosen": "Gradient descent is an optimization algorithm that iteratively adjusts model parameters in the direction of steepest loss decrease.", "rejected": "It makes models learn."}

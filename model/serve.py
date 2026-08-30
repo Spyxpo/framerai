@@ -210,6 +210,7 @@ def handle(gen, op, params, mind=None, tools=None):
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
 
+        messages = params.get("messages")
         tool_trace = None
         if active is not None:
             from .tools import run_tool_loop
@@ -217,8 +218,9 @@ def handle(gen, op, params, mind=None, tools=None):
             def generate(text):
                 return gen.generate_text(text, max_new_tokens=max_new_tokens, **_sampling(params))
 
+            tool_input = messages if messages else prompt
             reply, tool_trace = run_tool_loop(
-                generate, active, prompt, max_steps=params.get("max_tool_steps", 4)
+                generate, active, tool_input, max_steps=params.get("max_tool_steps", 4)
             )
             if mind is None:
                 # The trace carries every query and page, so an answer sourced
@@ -227,6 +229,19 @@ def handle(gen, op, params, mind=None, tools=None):
             # With a mind attached the tools gather; the mind still answers, so
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
+
+        if messages and not prompt:
+            from .tokenizer.chat_template import ChatTemplate
+
+            prompt = ChatTemplate(version="v1").format_messages(
+                messages, add_generation_prompt=True
+            )
+        elif prompt and not prompt.startswith("<"):
+            from .tokenizer.chat_template import ChatTemplate
+
+            prompt = ChatTemplate(version="v1").format_messages(
+                [{"role": "user", "content": prompt}], add_generation_prompt=True
+            )
 
         if mind is not None:
             reply, trace = mind.converse(
