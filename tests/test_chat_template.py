@@ -204,4 +204,3 @@ def test_serve_path_chat_template_single_application(monkeypatch):
     assert "Tools:" in p4
     assert "<user>what is rectified flow" in p4
     assert p4.endswith("<assistant>")
-
