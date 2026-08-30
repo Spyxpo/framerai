@@ -75,7 +75,7 @@ describe("pythonBridge worker pool", () => {
   beforeEach(() => {
     // Reset module state
     delete require.cache[require.resolve("../src/services/pythonBridge")];
-    spawnedProcesses = [];
+    spawnedProcesses.length = 0; // Clear array without reassigning
 
     // Setup environment
     process.env.MODEL_ENABLED = "true";
@@ -112,7 +112,7 @@ describe("pythonBridge worker pool", () => {
 
     // Cleanup
     mockSpawn = null;
-    spawnedProcesses = [];
+    spawnedProcesses.length = 0; // Clear array without reassigning
     if (bridge && bridge._pool && bridge._pool()) {
       try {
         bridge._pool().shutdown();
@@ -1021,4 +1021,179 @@ describe("pythonBridge worker pool", () => {
     worker.simulateResponse(1, false, "refused");
     await reqPromise.catch(() => {});
   });
+
+  // Regression tests for timeout race condition - these must run sequentially
+  // because they use long waits for worker restart lifecycle
+  describe("timeout race condition regression tests", { concurrency: 1 }, () => {
+    it("REGRESSION TEST: timeout should NOT allow worker reuse before Python request actually completes", async () => {
+    // This test verifies the fix for the race condition:
+    // When execute() times out, the worker must be terminated/restarted
+    // rather than marked available, because the underlying Python process
+    // may still be executing the timed-out request.
+
+    process.env.MODEL_WORKERS = "1"; // Single worker to force reuse scenario
+    process.env.MODEL_TIMEOUT_MS = "50"; // Very short timeout
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // Track all messages sent to worker stdin
+    const sentMessages = [];
+    worker.onStdinWrite = (data) => {
+      sentMessages.push(JSON.parse(data));
+    };
+
+    // Request A with short timeout - keep Python response pending
+    const reqAPromise = bridge.request("chat", { prompt: "request-A" });
+    await new Promise((r) => setImmediate(r));
+
+    assert.strictEqual(sentMessages.length, 1, "request A should be sent");
+    const msgA = sentMessages[0];
+    assert.strictEqual(msgA.params.prompt, "request-A");
+
+    // Attach rejection handler immediately to avoid unhandled rejection warnings
+    const timeoutCheck = reqAPromise.catch((err) => {
+      if (!/timed out/.test(err.message)) {
+        throw err; // Re-throw if it's not the expected timeout error
+      }
+    });
+
+    // Wait for request A to timeout (50ms timeout + margin)
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify request A timed out
+    await timeoutCheck;
+
+    // FIX VERIFICATION: Give time for worker exit handler and replacement to spawn
+    // The timeout calls child.kill() → exit event → onExit → handleWorkerExit (async!) → spawn replacement
+    // handleWorkerExit is async and schedules the replacement with setTimeout(..., 500ms backoff)
+    await new Promise((r) => setTimeout(r, 700)); // 500ms backoff + 200ms margin
+
+    // A replacement worker should have spawned after timeout kill
+    assert.ok(spawnedProcesses.length >= 2, `replacement worker should spawn after timeout kill (spawned: ${spawnedProcesses.length})`);
+    const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.notStrictEqual(replacement, worker, "replacement should be a different worker");
+
+    // Make replacement ready
+    replacement.simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    // Now send request B - it should go to the replacement worker, not the killed one
+    const reqBPromise = bridge.request("chat", { prompt: "request-B" });
+    await new Promise((r) => setImmediate(r));
+
+    // Request B should be sent to the replacement worker
+    assert.ok(replacement.lastWrite, "replacement worker should receive request B");
+    const msgB = JSON.parse(replacement.lastWrite);
+    assert.strictEqual(msgB.params.prompt, "request-B");
+
+    // Complete request B normally
+    replacement.simulateResponse(msgB.id, true, { content: "response-B" });
+    const resultB = await reqBPromise;
+    assert.strictEqual(resultB.content, "response-B", "request B should complete with correct response");
+  });
+
+  it("REGRESSION TEST: approval_request after timeout should not route to wrong currentRequest", async () => {
+    // This test verifies the fix for approval routing confusion:
+    // When request A times out, the worker is killed. Late approval_request
+    // messages from A should not be routed to a subsequent request B on a
+    // replacement worker.
+
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "50";
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    let approvalAReceived = null;
+    let approvalBReceived = null;
+
+    // Request A with approval callback
+    const reqAPromise = bridge.request(
+      "chat",
+      { prompt: "request-A needs approval" },
+      {
+        onApprovalRequest: (info) => {
+          approvalAReceived = info;
+          info.respond(true);
+        },
+      }
+    );
+    await new Promise((r) => setImmediate(r));
+
+    const msgA = JSON.parse(worker.lastWrite);
+
+    // Attach rejection handler immediately to avoid unhandled rejection warnings
+    const timeoutCheck = reqAPromise.catch((err) => {
+      if (!/timed out/.test(err.message)) {
+        throw err; // Re-throw if it's not the expected timeout error
+      }
+    });
+
+    // Wait for request A to timeout
+    await new Promise((r) => setTimeout(r, 100));
+    await timeoutCheck;
+
+    // FIX VERIFICATION: Give time for worker exit and replacement to spawn
+    // The timeout calls child.kill() → exit event → onExit → handleWorkerExit (async!) → spawn replacement
+    // handleWorkerExit is async and schedules the replacement with setTimeout(..., 500ms backoff)
+    // Wait for backoff delay + margin. Use a single setTimeout to block other tests from starting.
+    await new Promise((r) => setTimeout(r, 700)); // 500ms backoff + 200ms margin
+
+    // A replacement worker should have spawned (the original worker was killed on timeout)
+    assert.ok(spawnedProcesses.length >= 2, `replacement worker should spawn after timeout kill (spawned: ${spawnedProcesses.length})`);
+    const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.notStrictEqual(replacement, worker, "replacement should be a different worker");
+
+    // Make replacement ready
+    replacement.simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    // Request B with different approval callback on replacement worker
+    const reqBPromise = bridge.request(
+      "chat",
+      { prompt: "request-B different approval" },
+      {
+        onApprovalRequest: (info) => {
+          approvalBReceived = info;
+          info.respond(false);
+        },
+      }
+    );
+    await new Promise((r) => setImmediate(r));
+
+    const msgB = JSON.parse(replacement.lastWrite);
+
+    // FIX VERIFICATION: Even if we simulate a late approval from the dead worker,
+    // it won't reach request B because the old worker is dead and replacement
+    // is a fresh instance with separate state
+    const approvalFromDeadWorker = {
+      type: "approval_request",
+      approval_id: "approval-from-A",
+      command: "command-from-A",
+      argv: ["cmd-A"],
+      root: "/sandbox",
+    };
+
+    // Simulate approval from dead worker (should be ignored)
+    worker.stdout.emit("data", Buffer.from(JSON.stringify(approvalFromDeadWorker) + "\n"));
+    await new Promise((r) => setImmediate(r));
+
+    // B's callback should NOT have received A's approval
+    assert.strictEqual(approvalBReceived, null, "Request B should not receive approval from dead worker's request A");
+
+    // Complete request B normally
+    replacement.simulateResponse(msgB.id, true, { content: "response-B" });
+    await reqBPromise;
+  });
+});
+
 });
