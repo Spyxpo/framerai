@@ -333,11 +333,13 @@ def test_the_report_serialises():
 def test_the_default_harness_covers_every_modality():
     model = FramerModel(eval_config()).eval()
     harness = default_harness(model)
-    assert harness.names == ["audio", "image", "text", "video"]
+    assert harness.names == ["audio", "image", "long_context", "text", "video"]
 
 
 def test_the_default_harness_runs_end_to_end():
-    config = eval_config()
+    # A window wide enough for a retrieval case, which the other suites do not
+    # care about and the long-context one cannot run without.
+    config = eval_config(max_seq_len=512)
     model = FramerModel(config).eval()
     harness = default_harness(model)
 
@@ -345,6 +347,11 @@ def test_the_default_harness_runs_end_to_end():
     images = torch.randn(4, 3, 32, 32)
     clips = torch.randn(4, 3, 2, 16, 16)
     waveform = torch.randn(1, 512)
+
+    from model.tokenizer import FramerTokenizer
+
+    tokenizer = FramerTokenizer(vocab_size=config.vocab_size)
+    tokenizer.train(["operations continued without incident"], target_vocab_size=config.vocab_size)
 
     report = harness.run(inputs={
         "text": {"batches": [(ids, ids)]},
@@ -354,6 +361,9 @@ def test_the_default_harness_runs_end_to_end():
             "reference": waveform, "estimate": waveform,
             "transcript": "hello world", "hypothesis": "hello world",
         },
+        # The long-context suite builds its own material; it needs the
+        # tokenizer because that material is text rather than tensors.
+        "long_context": {"tokenizer": tokenizer, "lengths": [32]},
     })
 
     assert report.skipped == {}, report.skipped
@@ -366,7 +376,7 @@ def test_the_default_harness_runs_end_to_end():
 def test_the_default_harness_reports_what_it_could_not_run():
     model = FramerModel(eval_config()).eval()
     report = default_harness(model).run()
-    assert set(report.skipped) == {"text", "image", "audio", "video"}
+    assert set(report.skipped) == {"text", "image", "audio", "video", "long_context"}
     assert all("needs" in reason for reason in report.skipped.values())
 
 

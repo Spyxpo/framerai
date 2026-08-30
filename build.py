@@ -465,6 +465,22 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
         # Flatten metrics and add sample count
         return {**result.metrics, "samples": result.samples}
 
+    @harness.suite("long-context")
+    def _long_context(model, device, **_):
+        # A window is a number in a config until something retrieves from it.
+        # Reported per length bucket, so the length where it stops working is
+        # visible rather than averaged into one figure.
+        from model.eval import longcontext
+
+        return {
+            **{f"single_fact.{k}": v for k, v in
+               longcontext.single_fact_accuracy(model, tokenizer, device, seed=config.seed).items()},
+            **{f"multi_hop.{k}": v for k, v in
+               longcontext.multi_hop_accuracy(model, tokenizer, device, seed=config.seed).items()},
+            **{f"aggregation.{k}": v for k, v in
+               longcontext.aggregation_accuracy(model, tokenizer, device, seed=config.seed).items()},
+        }
+
     # Run evaluation
     logger.info("Running benchmarks...")
     report = harness.run()

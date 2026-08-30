@@ -99,6 +99,7 @@ def default_harness(model, device: str = "cpu") -> EvalHarness:
     """A harness with one suite per modality, using the model's own extractors."""
     from . import audio as audio_metrics
     from . import image as image_metrics
+    from . import longcontext
     from . import text as text_metrics
     from . import video as video_metrics
 
@@ -134,6 +135,24 @@ def default_harness(model, device: str = "cpu") -> EvalHarness:
         if not values:
             raise ValueError("audio eval needs waveforms or a transcript pair")
         return values
+
+    @harness.suite("long_context")
+    def _long_context(model, device, tokenizer=None, lengths=None, seed=0, chunk=4096, **_):
+        # A declared window is a number in a config until something retrieves
+        # from it. Needs the tokenizer because the material is text, not tensors.
+        if tokenizer is None:
+            raise ValueError("long-context eval needs a `tokenizer`")
+        return {
+            "single_fact": longcontext.single_fact_accuracy(
+                model, tokenizer, device, lengths=lengths, seed=seed, chunk=chunk
+            ),
+            "multi_hop": longcontext.multi_hop_accuracy(
+                model, tokenizer, device, lengths=lengths, seed=seed, chunk=chunk
+            ),
+            "aggregation": longcontext.aggregation_accuracy(
+                model, tokenizer, device, lengths=lengths, seed=seed, chunk=chunk
+            ),
+        }
 
     @harness.suite("video")
     def _video(model, device, real=None, fake=None, **_):

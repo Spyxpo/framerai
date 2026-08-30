@@ -6,6 +6,12 @@ FramerAI checkpoints* and not comparable to published FID or FVD numbers.
 """
 
 from .harness import EvalHarness, EvalReport, default_harness
+from .longcontext import (
+    aggregation_accuracy,
+    length_buckets,
+    multi_hop_accuracy,
+    single_fact_accuracy,
+)
 from .metrics import (
     cosine_alignment,
     frechet_distance,
@@ -23,4 +29,8 @@ __all__ = [
     "gaussian_statistics",
     "cosine_alignment",
     "levenshtein",
+    "single_fact_accuracy",
+    "multi_hop_accuracy",
+    "aggregation_accuracy",
+    "length_buckets",
 ]
