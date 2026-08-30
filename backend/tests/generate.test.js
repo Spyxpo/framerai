@@ -23,9 +23,20 @@ const app = loadApp();
 
 // Uploads land in the real uploads directory, so remove what the run created.
 const uploaded = [];
+
+// A rejected upload is written to disk before the handler ever sees it, and its
+// stored name never reaches the response, so the documents directory is diffed
+// rather than relying on the response body to name what to remove.
+const documentsDir = path.join(__dirname, "..", "uploads", "documents");
+const documentsBefore = new Set(fs.existsSync(documentsDir) ? fs.readdirSync(documentsDir) : []);
+
 after(() => {
   for (const relative of uploaded) {
     fs.rmSync(path.join(__dirname, "..", relative), { force: true });
+  }
+  if (!fs.existsSync(documentsDir)) return;
+  for (const name of fs.readdirSync(documentsDir)) {
+    if (!documentsBefore.has(name)) fs.rmSync(path.join(documentsDir, name), { force: true });
   }
 });
 
@@ -206,6 +217,41 @@ test("an upload of the wrong media type is refused", async () => {
 
   assert.equal(res.status, 400);
   assert.match(res.body.error, /Expected audio upload/);
+});
+
+test("document accepts a PDF upload and returns extracted text", async () => {
+  const res = await request(app)
+    .post("/api/generate/document")
+    .attach("document", Buffer.from("%PDF-1.4 fake"), { filename: "report.pdf", contentType: "application/pdf" })
+    .field("prompt", "what does page one say");
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.pages, 1);
+  assert.match(res.body.text, /the page text/);
+  assert.equal(lastCall("readDocument").args[1], "what does page one say");
+  assert.match(res.body.documentPath, /^\/uploads\/documents\//);
+  uploaded.push(res.body.documentPath);
+});
+
+test("document rejects a type the ingestion path cannot read", async () => {
+  const res = await request(app)
+    .post("/api/generate/document")
+    .attach("document", Buffer.from("PK\u0003\u0004"), { filename: "a.zip", contentType: "application/zip" });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /Expected one of/);
+});
+
+test("document reports an unreadable file rather than a placeholder", async () => {
+  // An absent optional reader is a deployment fact the caller can act on, so
+  // the route surfaces the reason instead of plausible-looking filler text.
+  const res = await request(app)
+    .post("/api/generate/document")
+    .attach("document", Buffer.from("%PDF-1.4"), { filename: "x.pdf", contentType: "application/pdf" })
+    .field("prompt", "force-unreadable");
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /pypdf/);
 });
 
 test("understand accepts an image upload", async () => {

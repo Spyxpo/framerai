@@ -95,6 +95,19 @@ it. Training compute and licensed data remain a separate, external problem.
 - [ ] Add self-consistency and a verification pass as opt-in test-time compute strategies.
 - [ ] Report every quality claim through `model/eval/`, as a before-and-after table on the
       same checkpoint.
+- [x] Make the declared window reachable. Prompts are bounded against `max_seq_len`
+      rather than extrapolating RoPE, the API derives its limits from the window
+      the worker reports instead of fixed constants, and conversation history
+      reaches the model through the `messages` parameter that had no caller.
+- [x] Page and optionally quantise the KV cache. The cache was concatenated per
+      decoded token and stored densely in the activation dtype; on
+      `framer-1t-a32b` a million-token sequence is 256 GiB in bf16 and 130 GiB in
+      int8, and `--estimate` now reports whichever the config selects.
+- [ ] Long-context training curriculum: staged packing from
+      `rope_original_max_seq_len` up to `max_seq_len`, so the extension is trained
+      rather than only configured and measured.
+- [ ] Assemble repository-scale inputs by relevance, so a large project is packed
+      rather than truncated at an arbitrary cut.
 
 ### Image generation — latent diffusion transformer
 
@@ -108,6 +121,18 @@ it. Training compute and licensed data remain a separate, external problem.
 - [ ] Adversarial / perceptual reconstruction loss for the VAE (MSE alone blurs).
 - [ ] Caption enrichment pass over the training corpus; caption quality dominates prompt
       adherence.
+- [x] Few-step sampling (`FlowDistiller`): the student learns the guided field, so
+      a step is one denoiser forward instead of two and the count drops to single
+      digits. Four steps against fifty is twenty-five times fewer calls.
+- [ ] Train a distilled student and report it against the teacher on the same
+      checkpoint. The objective and the cost accounting are in; nothing has been
+      distilled yet.
+- [ ] Move `framer-3b`, `framer-8b` and `framer-30b-a3b` off the 1000-step pixel
+      U-Net. The README justifies `unet` for laptop presets, which does not
+      describe a 30B mixture-of-experts. Changing them shifts their reported
+      multimodal parameter counts, so it belongs with the preset tables.
+- [ ] Legible text inside generated images, measured by rendering and reading it
+      back through the dense text suite.
 
 ### Video generation — spacetime latent diffusion
 
@@ -118,7 +143,15 @@ it. Training compute and licensed data remain a separate, external problem.
       transformer's two attention passes are batched reshapes; the 3D U-Net remains
       available under `video_gen_arch="unet3d"` and still has the loop.
 - [ ] Train the video VAE and re-measure its `scale_factor`.
-- [ ] Streaming decode, which the causal VAE makes possible but nothing yet exercises.
+- [x] Streaming decode, which the causal VAE made possible and nothing exercised.
+      `sample_long` overlaps the denoising windows and holds each one's opening
+      latent frames to the closing frames of the one before, so duration is
+      bounded by memory over time rather than by one window.
+- [x] Write a real container at the requested frame rate. The writer hardcoded
+      100 ms a frame, so every clip came back at 10 fps whatever the decoder had
+      been conditioned on, quantised to a 256-colour palette.
+- [ ] Report FVD and temporal consistency at increasing durations, so the length
+      at which coherence breaks is measured rather than assumed.
 
 ### Audio — neural codec and vocoder
 
@@ -144,7 +177,25 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Contrastive pretraining entry point for the vision tower
       (`model/training/contrastive.py`).
 - [ ] Wire the contrastive trainer into `build.py` as a `--mode pretrain-vision` entry point.
-- [ ] Extend interleaved placement to the generation path, not just understanding.
+- [x] Extend interleaved placement to the generation path, not just understanding.
+      `<img>` and `<audio>` markers in a prompt say where a modality belongs, and
+      chunked prefill walks the embeddings alongside the chunks so the scatter
+      still gets exactly as many as the window holds placeholders.
+- [x] Use the tiler on the inference path. `encode_image_tiles` was reached only
+      from training, contrastive pretraining and eval; a served request ran the
+      plain encoder on an image squashed to a fixed square, so a page was seen at
+      one tile's resolution however many tiles were configured.
+- [x] Add document ingestion (`model/document.py`): PDF text layers in reading
+      order, page markers, scanned-page detection, and a pluggable optional
+      rasteriser. Wired to `model/data.py`, a `document` worker op, and the
+      upload routes.
+- [x] Deliver chat attachments to the model. The array was validated, stored and
+      dropped at `processMessage`, the website always sent an empty one, and the
+      only file input took audio.
+- [ ] Train dense text recognition. `model/eval/dense_text.py` reports the
+      character and word error rate per font size; nothing yet moves it.
+- [ ] Extract tables, figures and charts from document pages as structure rather
+      than as a flat reading of the text.
 - [ ] Example image and audio caption datasets with real media.
 
 ### Evaluation
@@ -155,6 +206,13 @@ it. Training compute and licensed data remain a separate, external problem.
       why rather than reporting nothing.
 - [x] Standard benchmark adapters so the numbers can be compared outside this repository.
 - [x] A `build.py --mode eval` entry point wired to the harness.
+- [x] Long-context retrieval suite (`model/eval/longcontext.py`): single-fact
+      retrieval swept by depth, multi-hop, and window-wide aggregation, each a
+      forced choice against a known chance rate, reported per length bucket.
+      Perplexity stays low on long text while retrieval fails, so it could never
+      have answered this.
+- [x] Dense text recognition suite (`model/eval/dense_text.py`), the image-side
+      counterpart to the character error rate the audio suites already had.
 
 ## Cognition layer
 
@@ -184,6 +242,8 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Add request validation and consistent error responses across all routes.
 - [x] Add rate limiting and payload size limits to generation endpoints.
 - [ ] Add structured logging and a request id for traceability.
+- [x] Derive input limits from the loaded model rather than from fixed constants,
+      and share the conversation store between the REST and WebSocket paths.
 - [x] Add OpenAPI or a documented schema for the REST API.
 - [x] Pool or reuse the inference worker under concurrent load.
 

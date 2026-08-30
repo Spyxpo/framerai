@@ -8,6 +8,8 @@
  */
 
 const { randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const bridge = require("./pythonBridge");
 const { logger } = require("./logger");
 const config = require("../config");
@@ -254,15 +256,73 @@ function normalizeModelOptions(requestIdOrOptions, operatorCtxParam) {
   };
 }
 
+const UPLOADS_ROOT = path.join(__dirname, "..", "..", "uploads");
+const UPLOAD_PREFIX = "/uploads/";
+// Which encoder an attachment reaches, keyed by the directory it was stored in.
+const ATTACHMENT_KINDS = {
+  images: "image",
+  audio: "audio",
+  documents: "document",
+  generated: "image",
+};
+
+/**
+ * Turn client-supplied attachment references into paths the worker may open.
+ *
+ * Only files this server stored are addressable. Each reference is resolved and
+ * then checked to still sit under the uploads root, so a "../" in a supplied
+ * name cannot walk out into the rest of the filesystem. Anything that fails a
+ * check is dropped with a log line rather than passed on, because a bad
+ * reference should cost the caller its attachment, not the whole request.
+ */
+function resolveAttachments(attachments, requestId = null) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+
+  const resolved = [];
+  for (const entry of attachments) {
+    const raw = typeof entry === "string" ? entry : entry && entry.path;
+    if (typeof raw !== "string" || !raw.startsWith(UPLOAD_PREFIX)) {
+      logger.warn("attachment ignored", { reason: "not an uploads path", requestId });
+      continue;
+    }
+
+    const full = path.resolve(UPLOADS_ROOT, raw.slice(UPLOAD_PREFIX.length));
+    if (!full.startsWith(UPLOADS_ROOT + path.sep)) {
+      logger.warn("attachment ignored", { reason: "outside the uploads root", requestId });
+      continue;
+    }
+
+    const bucket = path.relative(UPLOADS_ROOT, full).split(path.sep)[0];
+    const kind = ATTACHMENT_KINDS[bucket];
+    if (!kind) {
+      logger.warn("attachment ignored", { reason: `unknown bucket '${bucket}'`, requestId });
+      continue;
+    }
+    if (!fs.existsSync(full)) {
+      logger.warn("attachment ignored", { reason: "no such file", requestId });
+      continue;
+    }
+    resolved.push({ path: full, kind });
+  }
+  return resolved;
+}
+
 async function processMessage(messages, requestType = "text", settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
   const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
   const lastMessage = messages[messages.length - 1];
   const content = lastMessage.content;
   const intent = requestType !== "text" ? requestType : detectIntent(content);
+  // Attachments were validated and stored and then never read, so nothing a
+  // user attached had ever reached the model.
+  const attachments = resolveAttachments(lastMessage.attachments, opts.requestId);
+  // History reached the model as a single string, so every turn arrived with no
+  // prior context however large the window was. The worker has accepted a
+  // messages array all along; this is the first caller to send one.
+  const history = conversationHistory(messages);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings, opts.options);
+      return await modelChat(intent, content, settings, opts.options, null, attachments, history);
     } catch (err) {
       logger.warn("falling back to placeholder", { error: err.message, requestId: opts.requestId });
     }
@@ -271,7 +331,20 @@ async function processMessage(messages, requestType = "text", settings = {}, req
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null) {
+/**
+ * The turns worth sending, as the worker's chat template expects them.
+ *
+ * Returns null for a single-turn exchange, so a one-message conversation is
+ * sent exactly as it was before rather than as a one-element array.
+ */
+function conversationHistory(messages) {
+  if (!Array.isArray(messages) || messages.length < 2) return null;
+  return messages
+    .filter((m) => m && typeof m.content === "string" && m.content && m.role)
+    .map((m) => ({ role: m.role, content: m.content }));
+}
+
+async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null, attachments = [], history = null) {
   const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
 
   if (intent === "image" || intent === "video" || intent === "audio") {
@@ -284,8 +357,18 @@ async function modelChat(intent, content, settings = {}, requestIdOrOptions = nu
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const result = await bridge.request(op, { prompt: content, ...settings }, opts.options);
+  // The worker takes a prompt or a messages array, not both: it builds the
+  // prompt from the messages when one is given, so sending both would let the
+  // single turn win and drop the history again.
+  const params = history && history.length > 1
+    ? { messages: history, ...settings }
+    : { prompt: content, ...settings };
+  if (attachments.length) params.attachments = attachments;
+  const result = await bridge.request(op, params, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
+  // Report what actually reached the model, so a dropped attachment is visible
+  // rather than looking like the model ignored it.
+  if (attachments.length) metadata.attachments = attachments.map((a) => a.kind);
   // Tool steps travel with the reply so the UI can show what was searched and
   // read instead of presenting a sourced answer as if it came from the weights.
   if (result.tools) metadata.tools = result.tools;
@@ -415,16 +498,30 @@ async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOption
   };
 }
 
-async function generateVideo(prompt, numFrames = 16, requestIdOrOptions = null) {
+async function generateVideo(prompt, numFrames = 16, size = {}, requestIdOrOptions = null) {
+  // Older callers passed the request id where the size now sits.
+  if (typeof size === "string" || (size && size.requestId && requestIdOrOptions === null)) {
+    requestIdOrOptions = size;
+    size = {};
+  }
   const opts = normalizeModelOptions(requestIdOrOptions);
+
   if (bridge.available()) {
     try {
-      const result = await bridge.request("video", { prompt, num_frames: numFrames }, opts.options);
+      const params = { prompt, num_frames: numFrames };
+      for (const key of ["width", "height", "aspect", "tier", "fps", "seed"]) {
+        if (size[key] !== undefined && size[key] !== null) params[key] = size[key];
+      }
+      const result = await bridge.request("video", params, opts.options);
+      // The frame count came back as the number requested rather than the
+      // number produced, so a clip the decoder trimmed reported a length it
+      // did not have.
+      const frames = Number.isFinite(result.frames) ? result.frames : numFrames;
       return {
         id: randomUUID(),
         prompt,
-        video: { url: `${GENERATED_URL}/${result.file}`, frames: numFrames, placeholder: false },
-        metadata: { frames: numFrames, model: "framerai-video" },
+        video: { url: `${GENERATED_URL}/${result.file}`, frames, fps: result.fps, placeholder: false },
+        metadata: { frames, fps: result.fps, model: "framerai-video" },
       };
     } catch (err) {
       logger.warn("video fallback", { error: err.message, requestId: opts.requestId });
@@ -511,6 +608,45 @@ async function understandImage(imagePath, prompt = "Describe this image", reques
   };
 }
 
+async function readDocument(documentPath, prompt = "", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
+  const maxPages = requestIdOrOptions && requestIdOrOptions.maxPages;
+
+  if (bridge.available()) {
+    try {
+      const params = { document_path: documentPath, prompt };
+      if (maxPages) params.max_pages = maxPages;
+      const result = await bridge.request("document", params, opts.options);
+
+      // An absent optional reader is a deployment fact the caller can act on,
+      // so it is passed up as an error rather than dressed as placeholder text.
+      // The route turns it into a response; the service stays free of HTTP.
+      if (result.error) {
+        return { error: result.error, code: result.code || "DOCUMENT_UNREADABLE" };
+      }
+      return {
+        text: result.text,
+        pages: result.pages,
+        title: result.title || "",
+        scannedPages: result.scanned_pages || [],
+        content: result.content,
+        metadata: { model: "framerai-document" },
+      };
+    } catch (err) {
+      logger.warn("document fallback", { error: err.message, requestId: opts.requestId });
+    }
+  }
+  return {
+    text: "",
+    pages: 0,
+    title: "",
+    scannedPages: [],
+    content:
+      "[FramerAI Document Analysis]\nThis is a placeholder response. Train the model and set MODEL_ENABLED=true to read documents.",
+    metadata: { model: "framerai-document" },
+  };
+}
+
 module.exports = {
   processMessage,
   generateImage,
@@ -519,6 +655,9 @@ module.exports = {
   generateCode,
   transcribeAudio,
   understandImage,
+  readDocument,
+  resolveAttachments,
+  conversationHistory,
   validateTrace,
   traceAllowed,
 };

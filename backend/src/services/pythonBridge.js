@@ -62,6 +62,7 @@ class Worker {
     this.id = id;
     this.child = null;
     this.ready = false;
+    this.info = null;
     this.busy = false;
     this.currentRequest = null;
     this.buffer = "";
@@ -113,6 +114,10 @@ class Worker {
             if (msg.ready) {
               workerLog.info("ready");
               this.ready = true;
+              // The worker announces the window and shape it was built with, so
+              // the API can size its own limits to the model it is serving
+              // rather than to a constant that fits neither end of the range.
+              if (msg.info && typeof msg.info === "object") this.info = msg.info;
               resolve(true);
             } else {
               workerLog.warn("failed to load", { error: msg.error });
@@ -568,6 +573,16 @@ function available() {
   return isConfigured() && !disabled;
 }
 
+/**
+ * What the running model told us about itself, or null when none is running.
+ * Read from the first ready worker: the pool serves one model, so they agree.
+ */
+function modelInfo() {
+  if (!pool || disabled) return null;
+  const worker = pool.workers && pool.workers.find((w) => w.ready && w.info);
+  return worker ? worker.info : null;
+}
+
 async function start() {
   if (poolInitialized) return !disabled;
   try {
@@ -578,4 +593,4 @@ async function start() {
   }
 }
 
-module.exports = { request, available, start, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
+module.exports = { request, available, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };

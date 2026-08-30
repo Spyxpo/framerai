@@ -7,11 +7,17 @@ const { validator } = require("../middleware/validate");
 const { generationLimiter } = require("../middleware/limiters");
 const { readSettings } = require("../generationSettings");
 
-// In-memory conversation store
-const conversations = new Map();
+// The store is shared with the WebSocket service, so a streamed turn sees the
+// same history a posted one does.
+const conversations = require("../conversationStore");
 
 const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
-const MAX_MESSAGE_LENGTH = 8000;
+const modelLimits = require("../modelLimits");
+
+// The documented floor. The accepted length rises with the window of the model
+// actually loaded, so a preset with a million-token context is reachable
+// instead of being held to a constant that fits neither end of the range.
+const MAX_MESSAGE_LENGTH = modelLimits.BASE_MESSAGE_CHARS;
 
 function getConversation(id) {
   const conv = conversations.get(id);
@@ -29,7 +35,7 @@ function conversationId(req) {
 // Create new conversation
 router.post("/conversations", (req, res) => {
   const id = randomUUID();
-  conversations.set(id, {
+  conversations.create({
     id,
     title: "New Chat",
     messages: [],
@@ -40,7 +46,7 @@ router.post("/conversations", (req, res) => {
 
 // List conversations
 router.get("/conversations", (req, res) => {
-  const list = Array.from(conversations.values())
+  const list = conversations.list()
     .map(({ id, title, createdAt, messages }) => ({
       id,
       title,
@@ -58,7 +64,7 @@ router.get("/conversations/:id", (req, res) => {
 
 // Delete conversation
 router.delete("/conversations/:id", (req, res) => {
-  conversations.delete(conversationId(req));
+  conversations.remove(conversationId(req));
   res.json({ success: true });
 });
 
@@ -70,7 +76,7 @@ router.post(
     const conv = getConversation(conversationId(req));
 
     const v = validator(req.body);
-    const content = v.string("content", { required: true, max: MAX_MESSAGE_LENGTH });
+    const content = v.string("content", { required: true, max: modelLimits.messageChars() });
     const type = v.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
     const attachments = v.array("attachments", { max: 10 });
     const settings = readSettings(v);

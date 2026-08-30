@@ -11,6 +11,10 @@ soundfile>=0.14.0
 #   onnx / onnxruntime - ONNX export & runtime validation (build.py --mode export)
 #   flash-attn   - faster attention on supported CUDA GPUs (SDPA already uses
 #                  flash/mem-efficient kernels where available without it)
+#   pypdf        - PDF text-layer extraction for model/document (read_document
+#                  raises a DocumentError naming it when a PDF is opened without
+#                  it; page rasterisation stays a pluggable backend so no
+#                  copyleft renderer becomes a dependency)
 #   opencv-python - live camera and video-file input for model/cognition
 #   sounddevice   - live microphone input for model/cognition (both are imported
 #                   lazily; the cognition layer runs without either)

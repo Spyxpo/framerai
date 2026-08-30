@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal, FileText } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -29,9 +29,13 @@ export default function Chat({
   const [transcribeError, setTranscribeError] = useState(null);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [attachments, setAttachments] = useState([]);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const audioInputRef = useRef(null);
+  const attachInputRef = useRef(null);
   const suggestionsRef = useRef(null);
   const inputModesRef = useRef(null);
   const sendBtnRef = useRef(null);
@@ -146,6 +150,32 @@ export default function Chat({
     }
   }, []);
 
+  // Store a picked file and keep the path it came back with. Uploading here
+  // rather than at send time means the attachment is visible, and removable,
+  // before the message goes anywhere.
+  const handleAttach = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      for (const file of files) {
+        const stored = await api.uploadAttachment(file);
+        setAttachments((prev) => [...prev, { ...stored, name: stored.name || file.name }]);
+      }
+    } catch (err) {
+      setAttachError(`Could not attach the file: ${err.message}`);
+    } finally {
+      setAttaching(false);
+    }
+  };
+
+  const removeAttachment = (attachmentPath) => {
+    setAttachments((prev) => prev.filter((a) => a.path !== attachmentPath));
+  };
+
   // File-upload fallback handler
   const handleAudioUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -250,9 +280,11 @@ export default function Chat({
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!input.trim() || loading || streaming || loadingMessages) return;
-    onSend(input, messageType);
+    onSend(input, messageType, attachments.map((a) => a.path));
     setInput("");
     setMessageType("text");
+    setAttachments([]);
+    setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
@@ -493,6 +525,27 @@ export default function Chat({
 
       {/* Input */}
       <form className="input-container" onSubmit={handleSubmit} aria-label="Send a message">
+        {attachments.length > 0 && (
+          <ul className="attachment-list" aria-label="Attachments on this message">
+            {attachments.map((attachment) => (
+              <li key={attachment.path} className="attachment-chip">
+                <FileText size={14} aria-hidden="true" />
+                <span className="attachment-name">{attachment.name}</span>
+                <button
+                  type="button"
+                  className="attachment-remove"
+                  onClick={() => removeAttachment(attachment.path)}
+                  aria-label={`Remove ${attachment.name}`}
+                >
+                  <X size={12} aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {attachError && (
+          <p className="attachment-error" role="alert">{attachError}</p>
+        )}
         <div className={`input-wrapper ${isBusy ? "busy" : ""}`}>
           <div
             className="input-modes"
@@ -521,6 +574,24 @@ export default function Chat({
               onClick={() => setMessageType("audio")} aria-label="Audio generation mode" aria-pressed={messageType === "audio"}>
               <AudioLines size={16} aria-hidden="true" />
             </button>
+
+            {/* Attach an image or document to the message */}
+            <button
+              type="button"
+              className="mode-btn"
+              onClick={() => attachInputRef.current?.click()}
+              aria-label="Attach an image or document"
+              disabled={attaching}
+              title="Attach an image or document"
+            >
+              {attaching
+                ? <Loader2 size={16} className="spin" aria-hidden="true" />
+                : <FileText size={16} aria-hidden="true" />}
+            </button>
+
+            <input ref={attachInputRef} type="file" multiple
+              accept="image/*,application/pdf,text/plain,text/markdown"
+              onChange={handleAttach} style={{ display: "none" }} aria-hidden="true" tabIndex={-1} />
 
             {/* Upload audio file button */}
             <button

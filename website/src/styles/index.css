@@ -1304,6 +1304,60 @@ body {
   min-width: 34px;
 }
 
+/* Attachments staged on the message being composed. They are uploaded when
+   picked, so the chips are removable before the message is sent. */
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.attachment-remove:hover,
+.attachment-remove:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.attachment-error {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--error);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mic-btn.recording::before {
     animation: none;

@@ -102,6 +102,20 @@ function mockModel(overrides = {}) {
     })),
     transcribeAudio: record("transcribeAudio", { text: "transcribed", metadata: { model: "test-model" } }),
     understandImage: record("understandImage", { description: "a description" }),
+    // The routes bind their handlers when the app module loads, so a test
+    // cannot restub an export afterwards. The sentinel prompt is how a route
+    // test drives the unreadable-document branch.
+    readDocument: record("readDocument", (documentPath, prompt = "") =>
+      prompt === "force-unreadable"
+        ? { error: "Reading PDFs needs the 'pypdf' package.", code: "DOCUMENT_UNREADABLE" }
+        : {
+            text: "<doc><page>1\nthe page text\n<doc_end>",
+            pages: 1,
+            title: "A Title",
+            scannedPages: [],
+            metadata: { model: "test-model" },
+          }
+    ),
     // The route layer re-validates and re-gates the trace as defence in depth
     // (Issue #164), so the stub has to carry the real helpers through.
     validateTrace: require(MODEL_MODULE).validateTrace,

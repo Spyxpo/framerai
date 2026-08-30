@@ -190,6 +190,24 @@ def estimate_multimodal_params(config, strict: bool = False) -> dict:
     return counts
 
 
+def _kv_cache_bytes(config, n_layers: int, kv_dim: int) -> int:
+    """Bytes one sequence of cache occupies at the full declared context.
+
+    ``kv_dim`` is the key-value width of one layer, so a key and a value cost
+    twice it. An int8 cache stores one byte per element instead of two and adds
+    a scale per token and head, which is counted here: a quantised figure that
+    ignored its scales would under-report what is actually allocated.
+    """
+    tokens = config.max_seq_len
+    if config.kv_cache_dtype != "int8":
+        return 4 * n_layers * kv_dim * tokens
+
+    head_dim = config.d_model // config.n_heads
+    kv_heads = max(1, kv_dim // head_dim)
+    scales = 2 * 2 * kv_heads  # one bf16 scale per token, head, and tensor
+    return int((2 * kv_dim + scales) * n_layers * tokens)
+
+
 def estimate_params(config, strict: bool = False) -> dict:
     """Estimate a config's parameter budget without instantiating the model.
 
@@ -263,11 +281,14 @@ def estimate_params(config, strict: bool = False) -> dict:
         # rounded to 16 to leave room for gradients).
         "bf16_bytes": 2 * model_total,
         "adamw_bytes": 16 * model_total,
-        # KV cache for a single sequence at the full declared context, in bf16:
-        # a key and a value tensor per layer, two bytes each. It is per sequence
-        # rather than per batch, and at long context it is the number that
-        # decides whether the window is servable at all.
-        "kv_cache_bytes": 4 * n_layers * kv_dim * config.max_seq_len,
+        # KV cache for a single sequence at the full declared context: a key and
+        # a value tensor per layer. It is per sequence rather than per batch,
+        # and at long context it is the number that decides whether the window
+        # is servable at all. Reported for the cache dtype the config selects,
+        # with the int8 scales counted, so the figure matches what a run
+        # allocates rather than what a bf16 cache would have cost.
+        "kv_cache_bytes": _kv_cache_bytes(config, n_layers, kv_dim),
+        "kv_cache_dtype": config.kv_cache_dtype,
         "summary": (
             f"{config.preset or 'custom'}: {human_params(total)} text params, "
             f"{human_params(active)} active/token"
