@@ -124,13 +124,39 @@ def _sampling(params):
     return {k: params[k] for k in keys if params.get(k) is not None}
 
 
-def _load_image(path, size):
-    """Load an image file as a (3, size, size) tensor in the model's range."""
+def _load_image(path, config):
+    """Load an image file as a (3, H, W) tensor in the model's range.
+
+    With tiling on, aspect ratio is kept: the tiler picks its grid from the
+    shape, so squashing a tall page into a square here would tell it every page
+    is square and cost the extra rows of tiles that make the text legible. The
+    long side is capped so a very large scan does not turn into an unbounded
+    tensor, and the short side covers at least one tile. With tiling off the
+    old fixed square is what the encoder expects, so that is what it gets.
+    """
     import numpy as np
     import torch
     from PIL import Image
 
-    img = Image.open(path).convert("RGB").resize((size, size))
+    tile = config.image_size
+    img = Image.open(path).convert("RGB")
+
+    if getattr(config, "vision_tiling", False):
+        max_tiles = max(1, int(getattr(config, "vision_max_tiles", 12)))
+        width, height = img.size
+        longest = max(width, height)
+        cap = tile * max_tiles
+        if longest > cap:
+            scale = cap / longest
+            img = img.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+        width, height = img.size
+        shortest = min(width, height)
+        if shortest < tile:
+            scale = tile / shortest
+            img = img.resize((max(tile, round(width * scale)), max(tile, round(height * scale))))
+    else:
+        img = img.resize((tile, tile))
+
     return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
 
 
@@ -149,7 +175,7 @@ def _read_attachments(gen, attachments):
         if not path:
             continue
         if kind == "image" and image is None:
-            image = _load_image(path, gen.model.config.image_size)
+            image = _load_image(path, gen.model.config)
         elif kind == "document":
             from .document import DocumentError, read_document
 
@@ -379,7 +405,7 @@ def handle(gen, op, params, mind=None, tools=None):
         return {"content": gen.transcribe(wav)}
 
     if op == "understand":
-        tensor = _load_image(params["image_path"], gen.model.config.image_size)
+        tensor = _load_image(params["image_path"], gen.model.config)
         return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
 
     if op == "document":
@@ -420,7 +446,7 @@ def _handle_mind(gen, op, params, mind):
     config = gen.model.config
 
     if op == "see":
-        image = _load_image(params["image_path"], config.image_size)
+        image = _load_image(params["image_path"], config)
         trace = mind.perceive_image(
             image, caption=params.get("caption", ""), describe=params.get("describe", True)
         )

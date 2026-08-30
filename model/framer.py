@@ -321,10 +321,16 @@ class FramerModel(nn.Module):
             )
 
     def forward_vision(self, images: torch.Tensor) -> torch.Tensor:
-        """Encode images to embeddings."""
+        """Encode images to embeddings, through the tiler when one is built.
+
+        Training, contrastive pretraining and evaluation went through
+        :meth:`encode_image_tiles` while inference came here and ran the plain
+        encoder, so a page was seen at one tile's resolution however many tiles
+        were configured. Delegating means one path: with no tiler the two are
+        the same call, so nothing changes for the presets that have none.
+        """
         self._require_multimodal()
-        vis_features = self.vision_encoder(images)
-        return self.vision_projector(vis_features)
+        return self.encode_image_tiles(images)
 
     def forward_audio(self, audio: torch.Tensor) -> torch.Tensor:
         """Encode audio (waveform or log-mel) to language-space embeddings."""

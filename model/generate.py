@@ -62,7 +62,26 @@ class FramerGenerator:
         input_ids = torch.tensor([tokens], device=self.device)
         return self.model.forward_lm(input_ids)["hidden"]
 
-    def _prefill(self, input_ids, prefix_embeds=None, chunk_size=None):
+    def _chunk_modality_embeds(self, piece, modality_embeds, consumed):
+        """The slice of each modality's embeddings whose placeholders are here.
+
+        Chunked prefill hands the backbone a window of the prompt at a time,
+        and the scatter requires exactly as many embeddings as the window has
+        placeholder tokens. So the embeddings are walked alongside the chunks
+        rather than passed whole to every one of them.
+        """
+        chunk_embeds = {}
+        for placeholder_id, embeds in modality_embeds.items():
+            slots = int((piece == placeholder_id).sum().item())
+            if not slots:
+                continue
+            flat = embeds.reshape(-1, embeds.shape[-1])
+            taken = consumed[placeholder_id]
+            chunk_embeds[placeholder_id] = flat[taken:taken + slots].unsqueeze(0)
+            consumed[placeholder_id] = taken + slots
+        return chunk_embeds
+
+    def _prefill(self, input_ids, prefix_embeds=None, chunk_size=None, modality_embeds=None):
         """Seed the KV cache from a prompt, one chunk at a time.
 
         A single-shot prefill runs the whole prompt through the backbone in one
@@ -78,16 +97,69 @@ class FramerGenerator:
         chunk = chunk_size or DEFAULT_PREFILL_CHUNK
         starts = list(range(0, input_ids.shape[1], chunk)) or [0]
         past, logits = None, None
+        consumed = {placeholder: 0 for placeholder in (modality_embeds or {})}
         for start in starts:
+            piece = input_ids[:, start:start + chunk]
+            chunk_embeds = (
+                self._chunk_modality_embeds(piece, modality_embeds, consumed)
+                if modality_embeds
+                else None
+            )
             out = self.model.forward_lm(
-                input_ids[:, start:start + chunk],
+                piece,
                 prefix_embeds=prefix_embeds if start == 0 else None,
+                modality_embeds=chunk_embeds,
                 past_kvs=past,
                 use_cache=True,
             )
             past = out["past_kvs"]
             logits = out["logits"][:, -1, :]
         return past, logits
+
+    def _interleaving(self) -> bool:
+        """True when the model asks for modalities placed, not prepended."""
+        return getattr(self.model.config, "mm_token_placement", "prefix") == "interleaved"
+
+    def _interleaved_prompt(self, prompt: str, image_embeds=None, audio_embeds=None):
+        """Build a prompt with modality runs where the prompt mentions them.
+
+        Prefix concatenation puts every image ahead of the whole prompt, so
+        "compare the first with the second" loses which is which. Here the
+        ``<img>`` and ``<audio>`` markers in the prompt say where a modality
+        belongs, and its embeddings are scattered into the placeholder run left
+        at that position. A prompt with no marker keeps the old order, with the
+        modality first, so nothing has to change to keep working.
+        """
+        from .data import InterleavedSequenceBuilder
+
+        builder = InterleavedSequenceBuilder(self.tokenizer)
+        segments, remaining = [], prompt
+        for marker, embeds, kind in (
+            ("<img>", image_embeds, "image"),
+            ("<audio>", audio_embeds, "audio"),
+        ):
+            if embeds is None:
+                continue
+            count = embeds.shape[1]
+            if marker in remaining:
+                before, remaining = remaining.split(marker, 1)
+                if before:
+                    segments.append(("text", before))
+                segments.append((kind, count))
+            else:
+                segments.insert(0, (kind, count))
+        if remaining:
+            segments.append(("text", remaining))
+
+        built = builder.build(segments)
+        tokens = [self.tokenizer.sos_id] + built["input_ids"] + [self.tokenizer.eos_id]
+
+        modality_embeds = {}
+        if image_embeds is not None:
+            modality_embeds[builder.image_patch] = image_embeds
+        if audio_embeds is not None:
+            modality_embeds[builder.audio_frame] = audio_embeds
+        return tokens, modality_embeds
 
     @torch.no_grad()
     def generate_text(
@@ -109,18 +181,26 @@ class FramerGenerator:
         ``prefill_chunk_size`` tokens (default :data:`DEFAULT_PREFILL_CHUNK`),
         which is what makes a context of a million tokens reachable.
         """
-        tokens = self.tokenizer.encode(prompt, add_special=True)
+        image_embeds = audio_embeds = None
+        if image is not None:
+            image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
+        if audio is not None:
+            audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
+
+        prefix_embeds, modality_embeds = None, None
+        if self._interleaving() and (image_embeds is not None or audio_embeds is not None):
+            tokens, modality_embeds = self._interleaved_prompt(prompt, image_embeds, audio_embeds)
+        else:
+            tokens = self.tokenizer.encode(prompt, add_special=True)
+            parts = [e for e in (image_embeds, audio_embeds) if e is not None]
+            prefix_embeds = torch.cat(parts, dim=1) if parts else None
+
         input_ids = torch.tensor([tokens], device=self.device)
 
-        prefix_parts = []
-        if image is not None:
-            prefix_parts.append(self.model.forward_vision(image.unsqueeze(0).to(self.device)))
-        if audio is not None:
-            prefix_parts.append(self.model.forward_audio(audio.unsqueeze(0).to(self.device)))
-        prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
-
         # Prefill the prompt (+ modality prefix) and seed the cache.
-        past, logits = self._prefill(input_ids, prefix_embeds, prefill_chunk_size)
+        past, logits = self._prefill(
+            input_ids, prefix_embeds, prefill_chunk_size, modality_embeds=modality_embeds
+        )
 
         generated = list(tokens)
         for _ in range(max_new_tokens):
