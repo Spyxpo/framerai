@@ -47,6 +47,8 @@ class FramerTokenizer:
     RESERVED_TOKENS = {
         "<img_patch>": 0,
         "<audio_frame>": 1,
+        "<tool>": 2,
+        "<tool_call>": 3,
     }
 
     def __init__(

@@ -89,10 +89,36 @@ class ToolTrace:
         return "\n\n".join(lines)
 
 
-def render_prompt(registry: ToolRegistry, prompt: str) -> str:
+def render_prompt(registry: ToolRegistry, prompt: str | list[dict[str, Any]]) -> str:
     """The instruction block, the tool schemas, and the user's prompt."""
+    from model.tokenizer.chat_template import ChatTemplate
+
     instructions = INSTRUCTIONS.replace("{tools}", registry.describe())
-    return f"{instructions}\n\nUser: {prompt}\nAssistant:"
+    if isinstance(prompt, list):
+        has_system = False
+        messages = []
+        for msg in prompt:
+            if msg.get("role") == "system" and not has_system:
+                has_system = True
+                content = msg.get("content", "")
+                sys_content = f"{instructions}\n{content}".strip() if content else instructions
+                messages.append({"role": "system", "content": sys_content})
+            else:
+                messages.append(msg)
+        if not has_system:
+            messages.insert(0, {"role": "system", "content": instructions})
+        return ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
+
+    if prompt.startswith("<system>"):
+        return prompt.replace("<system>", f"<system>{instructions}\n", 1)
+    if prompt.startswith("<"):
+        return f"<system>{instructions}{prompt}"
+
+    messages = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": prompt},
+    ]
+    return ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
 
 
 def parse_tool_call(text: str) -> ToolCall | None:
@@ -142,7 +168,7 @@ def _format_result(name: str, result: ToolResult) -> str:
 def run_tool_loop(
     generate: Callable[[str], str],
     registry: ToolRegistry,
-    prompt: str,
+    prompt: str | list[dict[str, Any]],
     max_steps: int = 4,
 ) -> tuple[str, ToolTrace]:
     """Generate with tools available, returning ``(reply, trace)``.
@@ -153,7 +179,15 @@ def run_tool_loop(
     trace = ToolTrace()
     if not len(registry):
         trace.stopped = "no_tools"
-        return _continuation(generate(prompt), prompt).strip(), trace
+        if isinstance(prompt, list):
+            from model.tokenizer.chat_template import ChatTemplate
+
+            prompt_str = ChatTemplate(version="v1").format_messages(
+                prompt, add_generation_prompt=True
+            )
+        else:
+            prompt_str = prompt
+        return _continuation(generate(prompt_str), prompt_str).strip(), trace
 
     transcript = render_prompt(registry, prompt)
     reply = ""
