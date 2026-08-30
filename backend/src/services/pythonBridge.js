@@ -65,6 +65,7 @@ class Worker {
     this.info = null;
     this.busy = false;
     this.currentRequest = null;
+    this.currentRequestId = null; // Track which request ID is currently active
     this.buffer = "";
     this.pending = new Map();
     this.nextId = 1;
@@ -127,7 +128,9 @@ class Worker {
           }
           if (msg.type === "approval_request") {
             const currentReq = this.currentRequest;
-            if (currentReq && currentReq.options && typeof currentReq.options.onApprovalRequest === "function") {
+            // Only route approval if currentRequest exists and hasn't been replaced
+            // This prevents late approvals from timed-out requests reaching wrong callbacks
+            if (currentReq && currentReq.options && typeof currentReq.options.onApprovalRequest === "function" && currentReq.requestId === this.currentRequestId) {
               try {
                 currentReq.options.onApprovalRequest({
                   approvalId: msg.approval_id,
@@ -141,6 +144,7 @@ class Worker {
                 this.sendApprovalResponse(msg.approval_id, false);
               }
             } else {
+              // Fail closed: deny approval if no valid current request or request ID mismatch
               this.sendApprovalResponse(msg.approval_id, false);
             }
             continue;
@@ -152,6 +156,7 @@ class Worker {
             this.pending.delete(msg.id);
             this.busy = false;
             this.currentRequest = null;
+            this.currentRequestId = null;
             if (msg.ok) {
               if (this.onSuccess) this.onSuccess(this);
               res(msg.result);
@@ -161,6 +166,7 @@ class Worker {
             // Notify pool that worker is available
             if (this.onAvailable) this.onAvailable(this);
           }
+          // Ignore responses for requests that are no longer pending (e.g., timed out)
         }
       });
 
@@ -181,6 +187,7 @@ class Worker {
           clearTimeout(timer);
           reject(new Error("worker exited"));
           this.currentRequest = null;
+          this.currentRequestId = null;
         }
         // Reject all pending
         for (const { reject, timer } of this.pending.values()) {
@@ -264,17 +271,33 @@ class Worker {
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        // On timeout, we cannot safely reuse this worker because the Python
+        // process is still executing the timed-out request. Kill the worker
+        // and let the pool's exit handler spawn a replacement.
+        const workerLog = createLogger({ route: `worker-${this.id}` });
+        workerLog.warn("request timed out, terminating worker", { requestId: id });
+
         this.pending.delete(id);
         this.busy = false;
         this.currentRequest = null;
+        this.currentRequestId = null;
+
+        // Reject the client request
         reject(new Error("inference timed out"));
-        // Notify pool
-        if (this.onAvailable) this.onAvailable(this);
+
+        // Kill the worker process. The child.on('exit') handler will fire
+        // and trigger WorkerPool.handleWorkerExit() to spawn a replacement.
+        if (this.child) {
+          this.ready = false;
+          this.child.kill();
+        }
       }, timeoutMs);
 
-      const requestState = { resolve, reject, timer, options };
+      const requestState = { resolve, reject, timer, options, requestId: id };
       this.pending.set(id, requestState);
       this.currentRequest = requestState;
+      this.currentRequestId = id;
+      this.currentRequestId = id;
 
       try {
         this.child.stdin.write(JSON.stringify(payload) + "\n");
@@ -283,6 +306,7 @@ class Worker {
         this.pending.delete(id);
         this.busy = false;
         this.currentRequest = null;
+        this.currentRequestId = null;
         reject(err);
         if (this.onAvailable) this.onAvailable(this);
       }
@@ -307,6 +331,7 @@ class Worker {
     this.ready = false;
     this.busy = false;
     this.currentRequest = null;
+    this.currentRequestId = null;
   }
 }
 
