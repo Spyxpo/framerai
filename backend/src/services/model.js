@@ -315,10 +315,14 @@ async function processMessage(messages, requestType = "text", settings = {}, req
   // Attachments were validated and stored and then never read, so nothing a
   // user attached had ever reached the model.
   const attachments = resolveAttachments(lastMessage.attachments, opts.requestId);
+  // History reached the model as a single string, so every turn arrived with no
+  // prior context however large the window was. The worker has accepted a
+  // messages array all along; this is the first caller to send one.
+  const history = conversationHistory(messages);
 
   if (bridge.available()) {
     try {
-      return await modelChat(intent, content, settings, opts.options, null, attachments);
+      return await modelChat(intent, content, settings, opts.options, null, attachments, history);
     } catch (err) {
       logger.warn("falling back to placeholder", { error: err.message, requestId: opts.requestId });
     }
@@ -327,7 +331,20 @@ async function processMessage(messages, requestType = "text", settings = {}, req
   return mockChat(intent, content, messages);
 }
 
-async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null, attachments = []) {
+/**
+ * The turns worth sending, as the worker's chat template expects them.
+ *
+ * Returns null for a single-turn exchange, so a one-message conversation is
+ * sent exactly as it was before rather than as a one-element array.
+ */
+function conversationHistory(messages) {
+  if (!Array.isArray(messages) || messages.length < 2) return null;
+  return messages
+    .filter((m) => m && typeof m.content === "string" && m.content && m.role)
+    .map((m) => ({ role: m.role, content: m.content }));
+}
+
+async function modelChat(intent, content, settings = {}, requestIdOrOptions = null, operatorCtxParam = null, attachments = [], history = null) {
   const opts = normalizeModelOptions(requestIdOrOptions, operatorCtxParam);
 
   if (intent === "image" || intent === "video" || intent === "audio") {
@@ -340,7 +357,12 @@ async function modelChat(intent, content, settings = {}, requestIdOrOptions = nu
   }
 
   const op = intent === "code" ? "code" : "chat";
-  const params = { prompt: content, ...settings };
+  // The worker takes a prompt or a messages array, not both: it builds the
+  // prompt from the messages when one is given, so sending both would let the
+  // single turn win and drop the history again.
+  const params = history && history.length > 1
+    ? { messages: history, ...settings }
+    : { prompt: content, ...settings };
   if (attachments.length) params.attachments = attachments;
   const result = await bridge.request(op, params, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
@@ -621,6 +643,7 @@ module.exports = {
   understandImage,
   readDocument,
   resolveAttachments,
+  conversationHistory,
   validateTrace,
   traceAllowed,
 };

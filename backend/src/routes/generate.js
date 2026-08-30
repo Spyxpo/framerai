@@ -17,8 +17,10 @@ const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
 const config = require("../config");
 const { readSettings } = require("../generationSettings");
+const modelLimits = require("../modelLimits");
 
-const MAX_PROMPT_LENGTH = 4000;
+// The documented floor; the accepted length rises with the loaded model's window.
+const MAX_PROMPT_LENGTH = modelLimits.BASE_PROMPT_CHARS;
 // Square-only sizes, kept so existing clients keep working. Prefer
 // width/height or aspect + tier.
 const RESOLUTIONS = [64, 128, 256, 512];
@@ -123,7 +125,7 @@ router.post(
   "/image",
   asyncHandler(async (req, res) => {
     const v = validator(req.body);
-    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
     const numImages = v.integer("num_images", { min: 1, max: 4, fallback: 1 });
     // Size is optional at every level. Width and height must be given together;
     // otherwise an aspect ratio at a tier, otherwise whatever the prompt asks
@@ -153,7 +155,7 @@ router.post(
   "/video",
   asyncHandler(async (req, res) => {
     const v = validator(req.body);
-    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
     const numFrames = v.integer("num_frames", { min: 1, max: 64, fallback: 16 });
     v.done();
 
@@ -166,7 +168,7 @@ router.post(
   "/audio",
   asyncHandler(async (req, res) => {
     const v = validator(req.body);
-    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
     v.done();
 
     res.json(await generateAudio(prompt, {}, req.requestId));
@@ -178,7 +180,7 @@ router.post(
   "/code",
   asyncHandler(async (req, res) => {
     const v = validator(req.body);
-    const prompt = v.string("prompt", { required: true, max: MAX_PROMPT_LENGTH });
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
     const language = v.oneOf("language", LANGUAGES, { fallback: "python" });
     const settings = readSettings(v);
     v.done();
@@ -195,7 +197,7 @@ router.post(
     if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "image", message: "is required" }]);
 
     const v = validator(req.body);
-    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "Describe this image" });
+    const prompt = v.string("prompt", { max: modelLimits.promptChars(), fallback: "Describe this image" });
     v.done();
 
     const imagePath = `/uploads/images/${req.file.filename}`;
@@ -233,7 +235,7 @@ router.post(
     if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "document", message: "is required" }]);
 
     const v = validator(req.body);
-    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "" });
+    const prompt = v.string("prompt", { max: modelLimits.promptChars(), fallback: "" });
     const maxPages = v.integer("max_pages", { min: 1, max: MAX_DOCUMENT_PAGES });
     v.done();
 
@@ -253,7 +255,7 @@ router.post(
     if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "audio", message: "is required" }]);
 
     const v = validator(req.body);
-    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "Transcribe the audio:" });
+    const prompt = v.string("prompt", { max: modelLimits.promptChars(), fallback: "Transcribe the audio:" });
     v.done();
 
     const audioPath = `/uploads/audio/${req.file.filename}`;

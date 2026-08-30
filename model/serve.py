@@ -300,10 +300,6 @@ def handle(gen, op, params, mind=None, tools=None):
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
         image, documents = _read_attachments(gen, params.get("attachments"))
-        if documents:
-            # The document goes ahead of the question so the answer is grounded
-            # in what was attached rather than in the weights alone.
-            prompt = "\n\n".join([*documents, prompt]) if prompt else "\n\n".join(documents)
 
         if messages and not prompt:
             from .tokenizer.chat_template import ChatTemplate
@@ -317,6 +313,13 @@ def handle(gen, op, params, mind=None, tools=None):
             prompt = ChatTemplate(version="v1").format_messages(
                 [{"role": "user", "content": prompt}], add_generation_prompt=True
             )
+
+        if documents:
+            # Applied after the chat template has resolved the prompt, so an
+            # attachment reaches the model whether the turn arrived as a single
+            # prompt or as a conversation. The document goes ahead of the
+            # question, so the answer is grounded in what was attached.
+            prompt = "\n\n".join([*documents, prompt]) if prompt else "\n\n".join(documents)
 
         if mind is not None:
             reply, trace = mind.converse(
@@ -615,7 +618,21 @@ def main():
             mind_error = str(exc)
 
     # One ready line, always: the bridge waits for exactly one.
-    ready = {"ready": True, "mind": mind is not None, "tools": tools.names() if tools else []}
+    # The backend caps its own inputs from these, so a preset with a million
+    # token window is not held to the same fixed limits as a laptop one.
+    config = gen.model.config
+    ready = {
+        "ready": True,
+        "mind": mind is not None,
+        "tools": tools.names() if tools else [],
+        "info": {
+            "max_seq_len": int(config.max_seq_len),
+            "image_size": int(config.image_size),
+            "vocab_size": int(config.vocab_size),
+            "text_only": bool(config.text_only),
+            "mm_token_placement": getattr(config, "mm_token_placement", "prefix"),
+        },
+    }
     if tools and "shell" in tools:
         ready["cli_mode"] = args.cli_mode
     if mind_error:

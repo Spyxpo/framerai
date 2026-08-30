@@ -12,9 +12,10 @@ const { createLogger } = require("./logger");
 
 const { validator } = require("../middleware/validate");
 const { readSettings } = require("../generationSettings");
+const modelLimits = require("../modelLimits");
+const conversations = require("../conversationStore");
 
 const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
-const MAX_MESSAGE_LENGTH = 8000;
 
 // Audio chunk size: 0.5 seconds of 16-bit mono PCM
 // This provides smooth incremental playback without excessive message overhead
@@ -27,8 +28,9 @@ const AUDIO_CHUNK_DURATION_SEC = 0.5;
 function parseChatFrame(message) {
   const content = typeof message.content === "string" ? message.content.trim() : "";
   if (!content) throw new Error("content is required");
-  if (content.length > MAX_MESSAGE_LENGTH) {
-    throw new Error(`content must be at most ${MAX_MESSAGE_LENGTH} characters`);
+  const maxContent = modelLimits.messageChars();
+  if (content.length > maxContent) {
+    throw new Error(`content must be at most ${maxContent} characters`);
   }
 
   const messageType = message.messageType || "text";
@@ -265,7 +267,19 @@ function setupWebSocket(wss) {
           safeSend(ws, { type: "typing", conversationId });
 
           // Process and stream response
-          const messages = [{ role: "user", content, attachments }];
+          // The turn joins the conversation the REST route records, so the
+          // model sees the exchange rather than only its latest line. An
+          // unknown id keeps the old single-turn behaviour.
+          const userMessage = {
+            role: "user",
+            content,
+            type: messageType,
+            attachments,
+            timestamp: new Date().toISOString(),
+          };
+          conversations.append(conversationId, userMessage);
+          const recorded = conversations.messages(conversationId);
+          const messages = recorded.length ? recorded : [userMessage];
           const operatorCtx = { operator: req?.headers?.["x-operator"] === "true" };
           const onApprovalRequest = ({ approvalId, command, argv, root, respond }) => {
             if (denyEverything) {
@@ -294,6 +308,16 @@ function setupWebSocket(wss) {
             { onApprovalRequest, operatorCtx },
             operatorCtx
           );
+
+          // The reply joins the conversation too. Recording only the user's
+          // half would give the next turn a history of questions with no
+          // answers, which reads worse than no history at all.
+          conversations.append(conversationId, {
+            role: "assistant",
+            content: response.content,
+            type: response.type,
+            timestamp: new Date().toISOString(),
+          });
 
           // Privacy: validate and strip trace from response if not allowed (defense in depth)
           if (response.metadata?.trace) {
