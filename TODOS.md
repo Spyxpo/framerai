@@ -56,7 +56,7 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       FSDP through a 2D `(dp, ep)` device mesh, so expert weights are not sharded twice.
 - [ ] Exercise expert parallelism on real multi-rank hardware; the placement arithmetic and
       the single-rank path are tested, the collectives are not.
-- [ ] Replace the per-expert `index_add_` dispatch with grouped GEMM. At 384 experts across
+- [x] Replace the per-expert `index_add_` dispatch with grouped GEMM. At 384 experts across
       80 MoE layers that loop runs 30,720 Python-level expert calls per forward.
 - [ ] Train the tokenizer to the full vocabulary (`build.py` currently caps merges at 1000).
 - [x] Implement `yarn` RoPE scaling (per-dimension NTK-by-parts interpolation with the
