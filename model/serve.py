@@ -118,6 +118,23 @@ def _save_audio(waveform, sample_rate, out_dir):
     return name
 
 
+def _window_report(gen, requested_max_new_tokens):
+    """What the context window cost this request, when it cost anything.
+
+    Silence here is the old behaviour: a prompt was truncated or an answer cut
+    short and nothing said so. The keys appear only when something was given
+    up, so an ordinary reply is unchanged.
+    """
+    report = {}
+    dropped = getattr(gen, "last_prompt_tokens_dropped", 0)
+    granted = getattr(gen, "last_max_new_tokens", requested_max_new_tokens)
+    if dropped:
+        report["prompt_tokens_dropped"] = dropped
+    if granted and granted < requested_max_new_tokens:
+        report["max_new_tokens_granted"] = granted
+    return report
+
+
 def _sampling(params):
     """Sampling controls the caller set, leaving the rest to the generator."""
     keys = ("temperature", "top_k", "top_p")
@@ -313,14 +330,13 @@ def handle(gen, op, params, mind=None, tools=None):
             if tool_trace is not None:
                 result["tools"] = tool_trace.to_dict()
             return result
-        return {
-            "content": gen.generate_text(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                image=image,
-                **_sampling(params),
-            )
-        }
+        content = gen.generate_text(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            image=image,
+            **_sampling(params),
+        )
+        return {"content": content, **_window_report(gen, max_new_tokens)}
 
     if op == "search":
         tool = _require_tool(tools, "web_search", op)

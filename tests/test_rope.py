@@ -99,8 +99,9 @@ def test_positions_are_absolute_under_scaling():
 
 @pytest.mark.parametrize("scaling_type", ["linear", "ntk", "yarn"])
 def test_model_runs_beyond_the_trained_length(scaling_type):
+    # The window the config claims is the extension; 64 is what it trained at.
     config = tiny_config(
-        max_seq_len=64, rope_scaling_factor=4.0, rope_scaling_type=scaling_type,
+        max_seq_len=256, rope_scaling_factor=4.0, rope_scaling_type=scaling_type,
         rope_original_max_seq_len=64,
     ).validate()
     model = FramerModel(config).eval()

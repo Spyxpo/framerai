@@ -147,8 +147,24 @@ class FramerTokenizer:
 
             next_id += 1
 
-    def encode(self, text: str, add_special: bool = True) -> list:
-        """Encode text to token IDs."""
+    def encode(
+        self,
+        text: str,
+        add_special: bool = True,
+        max_length: int = None,
+        keep: str = "tail",
+    ) -> list:
+        """Encode text to token IDs, optionally bounded to ``max_length``.
+
+        Nothing used to bound a prompt, so an over-long one reached the model
+        and produced positions it was never trained for. ``max_length`` caps the
+        returned ids, and ``keep`` says which end survives: ``"tail"`` holds the
+        end of the text, which is where a question sits after a long document,
+        and ``"head"`` holds the beginning. The special tokens are added after
+        truncation, so the cap is what the model actually receives.
+        """
+        if keep not in ("head", "tail"):
+            raise ValueError(f"keep must be 'head' or 'tail', got '{keep}'")
         # Handle special token markers
         special_pattern = "|".join(re.escape(t) for t in self.marker_tokens)
         parts = re.split(f"({special_pattern})", text)
@@ -174,6 +190,16 @@ class FramerTokenizer:
                             i += 1
                     byte_tokens = new_tokens
                 tokens.extend(byte_tokens)
+
+        if max_length is not None:
+            budget = max_length - (2 if add_special else 0)
+            if budget < 0:
+                raise ValueError(
+                    f"max_length ({max_length}) leaves no room for the start "
+                    "and end tokens"
+                )
+            if len(tokens) > budget:
+                tokens = tokens[:budget] if keep == "head" else tokens[-budget:]
 
         if add_special:
             tokens = [self.sos_id] + tokens + [self.eos_id]

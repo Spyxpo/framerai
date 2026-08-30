@@ -38,6 +38,10 @@ class FramerGenerator:
         self.model = model.to(device).eval()
         self.tokenizer = tokenizer
         self.device = device
+        # What the last call had to give up to fit the context window. Reported
+        # rather than hidden, so a short or truncated answer is explicable.
+        self.last_prompt_tokens_dropped = 0
+        self.last_max_new_tokens = 0
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, tokenizer_path: str, device: str = "auto"):
@@ -116,6 +120,57 @@ class FramerGenerator:
             logits = out["logits"][:, -1, :]
         return past, logits
 
+    def _fit_to_window(self, prompt: str, max_new_tokens: int, modality_embeds: list):
+        """Fit a request inside the context window, and record what it cost.
+
+        The window has to hold the prompt, whatever the modalities occupy, and
+        everything about to be generated. Nothing used to reserve any of that,
+        so an over-long request reached the backbone and produced positions the
+        model was never trained for, returning degraded output with no
+        diagnostic. Here the room is divided up front: a share is held back for
+        the answer, the prompt is trimmed to the rest keeping its end, and the
+        generation length is clamped to what is actually left.
+
+        Both decisions land on ``last_prompt_tokens_dropped`` and
+        ``last_max_new_tokens`` so a caller can say why an answer came out short
+        rather than guessing.
+        """
+        self.last_prompt_tokens_dropped = 0
+        self.last_max_new_tokens = max_new_tokens
+
+        window = int(getattr(self.model.config, "max_seq_len", 0) or 0)
+        if not window:
+            return prompt, max_new_tokens
+
+        modality_tokens = sum(e.shape[1] for e in modality_embeds)
+        # Interleaved placement writes an opening and closing marker per
+        # modality into the sequence; prefix placement does not.
+        markers = 2 * len(modality_embeds) if self._interleaving() else 0
+        room = window - modality_tokens - markers - 2  # start and end tokens
+
+        if room < 2:
+            raise ValueError(
+                f"the attached modalities need {modality_tokens + markers} of the "
+                f"{window}-token context window, leaving no room for a prompt or "
+                f"an answer. Send fewer modalities, lower the tile count, or use "
+                f"a preset with a larger window."
+            )
+
+        # Hold back a share of the room for the answer, so a large
+        # max_new_tokens cannot squeeze the prompt down to nothing and a long
+        # prompt cannot leave the model with no room to reply.
+        reserved = min(max_new_tokens, max(1, room // 4))
+        prompt_budget = max(1, room - reserved)
+
+        ids = self.tokenizer.encode(prompt, add_special=False)
+        if len(ids) > prompt_budget:
+            prompt = self.tokenizer.decode(ids[-prompt_budget:])
+            self.last_prompt_tokens_dropped = len(ids) - prompt_budget
+
+        used = min(len(ids), prompt_budget)
+        self.last_max_new_tokens = max(1, min(max_new_tokens, room - used))
+        return prompt, self.last_max_new_tokens
+
     def _interleaving(self) -> bool:
         """True when the model asks for modalities placed, not prepended."""
         return getattr(self.model.config, "mm_token_placement", "prefix") == "interleaved"
@@ -186,6 +241,9 @@ class FramerGenerator:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
         if audio is not None:
             audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
+
+        present = [e for e in (image_embeds, audio_embeds) if e is not None]
+        prompt, max_new_tokens = self._fit_to_window(prompt, max_new_tokens, present)
 
         prefix_embeds, modality_embeds = None, None
         if self._interleaving() and (image_embeds is not None or audio_embeds is not None):

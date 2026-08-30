@@ -146,6 +146,18 @@ class RotaryPositionalEmbedding(nn.Module):
         return torch.where(wavelength < high_wavelength, inv_freq, blended)
 
     def forward(self, seq_len: int, offset: int = 0, device=None) -> tuple:
+        end = offset + seq_len
+        if end > self.max_seq_len:
+            # Positions are computed rather than looked up in a table, so going
+            # past the window silently produces angles the model never trained
+            # on and returns degraded output. A configured window is a claim
+            # about what was trained; exceeding it is a caller error, not a mode.
+            raise ValueError(
+                f"position {end} is past the configured context window "
+                f"({self.max_seq_len}). Shorten the prompt, lower "
+                f"max_new_tokens, or raise max_seq_len with a rope scaling "
+                f"factor that covers the extension."
+            )
         device = device or self.inv_freq.device
         positions = torch.arange(offset, offset + seq_len, device=device).float()
         if self.scaling_type == "linear" and self.scaling_factor > 1.0:
