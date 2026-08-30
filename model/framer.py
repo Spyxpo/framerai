@@ -56,6 +56,9 @@ class FramerModel(nn.Module):
                 rope_low_freq_factor=config.rope_low_freq_factor,
                 rope_high_freq_factor=config.rope_high_freq_factor,
                 rope_original_max_seq_len=config.rope_original_max_seq_len,
+                kv_cache_paged=config.kv_cache_paged,
+                kv_cache_block_size=config.kv_cache_block_size,
+                kv_cache_dtype=config.kv_cache_dtype,
                 ffn=build_ffn(config, i, config.dropout),
             )
             for i in range(config.n_layers)

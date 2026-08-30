@@ -4,6 +4,9 @@ from dataclasses import dataclass, fields
 # torch dependency, so both the config validator and the module can share one
 # list instead of drifting apart.
 ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
+# Kept here rather than imported from model.modules.kv_cache, so the config
+# package stays importable without pulling in torch.
+CACHE_DTYPES = ("auto", "int8")
 
 # Decoder families. Each modality keeps its original implementation as the
 # default so the small presets stay laptop-runnable, and opts in per preset.
@@ -28,6 +31,13 @@ class FramerConfig:
     # Transformer / Text config
     vocab_size: int = 50304
     max_seq_len: int = 2048
+    # KV cache storage. The cache, not the weights, is what decides whether a
+    # long window is servable: paging grows one buffer in blocks instead of
+    # reallocating the whole history per decoded token, and "int8" halves what
+    # that buffer costs at the price of some precision in what is remembered.
+    kv_cache_paged: bool = True
+    kv_cache_block_size: int = 256
+    kv_cache_dtype: str = "auto"
     d_model: int = 1024
     n_heads: int = 16
     n_kv_heads: int = None  # Grouped-query attention. None -> == n_heads (plain MHA).
@@ -242,6 +252,18 @@ class FramerConfig:
             )
         if self.n_layers < 1:
             problems.append(f"n_layers ({self.n_layers}) must be at least 1")
+
+        # Rejected up front, following the rope_scaling_type precedent: a
+        # value nothing recognises should fail rather than quietly do nothing.
+        if self.kv_cache_dtype not in CACHE_DTYPES:
+            problems.append(
+                f"kv_cache_dtype ('{self.kv_cache_dtype}') must be one of "
+                f"{', '.join(CACHE_DTYPES)}"
+            )
+        if self.kv_cache_block_size < 1:
+            problems.append(
+                f"kv_cache_block_size ({self.kv_cache_block_size}) must be positive"
+            )
 
         # An unrecognised scaling type used to fall through every branch and
         # silently apply no extension at all, which is worse than failing.
