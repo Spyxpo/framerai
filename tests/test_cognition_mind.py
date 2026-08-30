@@ -36,6 +36,7 @@ def _mind(**overrides) -> Mind:
 
 
 def _generator() -> FramerGenerator:
+    torch.manual_seed(42)
     tokenizer = FramerTokenizer(vocab_size=300)
     tokenizer.train(_CORPUS, target_vocab_size=300)
     config = tiny_config(vocab_size=tokenizer.vocab_size, max_seq_len=64)
