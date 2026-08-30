@@ -98,8 +98,8 @@ class EvalHarness:
 def default_harness(model, device: str = "cpu") -> EvalHarness:
     """A harness with one suite per modality, using the model's own extractors."""
     from . import audio as audio_metrics
+    from . import dense_text, longcontext
     from . import image as image_metrics
-    from . import longcontext
     from . import text as text_metrics
     from . import video as video_metrics
 
@@ -135,6 +135,15 @@ def default_harness(model, device: str = "cpu") -> EvalHarness:
         if not values:
             raise ValueError("audio eval needs waveforms or a transcript pair")
         return values
+
+    @harness.suite("dense_text")
+    def _dense_text(model, device, generator=None, samples=None, **_):
+        # Needs a generator rather than the model alone: reading a page is a
+        # generation, and the audio side's character error rate has no image
+        # counterpart without one.
+        if generator is None:
+            raise ValueError("dense text eval needs a `generator`")
+        return dense_text.dense_text_accuracy(generator, samples=samples)
 
     @harness.suite("long_context")
     def _long_context(model, device, tokenizer=None, lengths=None, seed=0, chunk=4096, **_):

@@ -5,6 +5,7 @@ encoders rather than Inception or I3D. They are therefore comparable *across
 FramerAI checkpoints* and not comparable to published FID or FVD numbers.
 """
 
+from .dense_text import build_samples, dense_text_accuracy, render_text_image
 from .harness import EvalHarness, EvalReport, default_harness
 from .longcontext import (
     aggregation_accuracy,
@@ -33,4 +34,7 @@ __all__ = [
     "multi_hop_accuracy",
     "aggregation_accuracy",
     "length_buckets",
+    "dense_text_accuracy",
+    "render_text_image",
+    "build_samples",
 ]

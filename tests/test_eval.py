@@ -21,6 +21,7 @@ from model.eval.audio import (
     speaker_similarity,
     word_error_rate,
 )
+from model.eval.dense_text import image_to_tensor, render_text_image
 from model.eval.image import alignment_score, fid
 from model.eval.metrics import (
     cosine_alignment,
@@ -31,6 +32,7 @@ from model.eval.metrics import (
 from model.eval.text import bits_per_byte, perplexity, token_accuracy
 from model.eval.video import fvd, temporal_consistency
 from model.framer import FramerModel
+from model.generate import FramerGenerator
 
 
 def eval_config(**overrides):
@@ -333,7 +335,7 @@ def test_the_report_serialises():
 def test_the_default_harness_covers_every_modality():
     model = FramerModel(eval_config()).eval()
     harness = default_harness(model)
-    assert harness.names == ["audio", "image", "long_context", "text", "video"]
+    assert harness.names == ["audio", "dense_text", "image", "long_context", "text", "video"]
 
 
 def test_the_default_harness_runs_end_to_end():
@@ -364,6 +366,16 @@ def test_the_default_harness_runs_end_to_end():
         # The long-context suite builds its own material; it needs the
         # tokenizer because that material is text rather than tensors.
         "long_context": {"tokenizer": tokenizer, "lengths": [32]},
+        # Reading a page is a generation, so this suite needs a generator and
+        # one rendered sample is enough to prove the wiring.
+        "dense_text": {
+            "generator": FramerGenerator(model, tokenizer, device="cpu"),
+            "samples": [{
+                "text": "page 47",
+                "font_size": 16,
+                "image": image_to_tensor(render_text_image("page 47"), config),
+            }],
+        },
     })
 
     assert report.skipped == {}, report.skipped
@@ -376,7 +388,7 @@ def test_the_default_harness_runs_end_to_end():
 def test_the_default_harness_reports_what_it_could_not_run():
     model = FramerModel(eval_config()).eval()
     report = default_harness(model).run()
-    assert set(report.skipped) == {"text", "image", "audio", "video", "long_context"}
+    assert set(report.skipped) == {"text", "image", "audio", "video", "long_context", "dense_text"}
     assert all("needs" in reason for reason in report.skipped.values())
 
 

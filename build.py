@@ -465,6 +465,14 @@ def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benc
         # Flatten metrics and add sample count
         return {**result.metrics, "samples": result.samples}
 
+    @harness.suite("dense-text")
+    def _dense_text(model, device, **_):
+        # Whether the words inside an image were read, which the image metrics
+        # do not answer and every document use depends on.
+        from model.eval import dense_text
+
+        return dense_text.dense_text_accuracy(generator)
+
     @harness.suite("long-context")
     def _long_context(model, device, **_):
         # A window is a number in a config until something retrieves from it.
