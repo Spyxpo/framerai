@@ -419,7 +419,7 @@ describe("Chat — send flow", () => {
     const textarea = screen.getByRole("textbox", { name: /message input/i });
     await user.type(textarea, "Say hello");
     await user.click(screen.getByRole("button", { name: /send/i }));
-    expect(onSend).toHaveBeenCalledWith("Say hello", "text");
+    expect(onSend).toHaveBeenCalledWith("Say hello", "text", []);
   });
 
   it("clears input after send", async () => {
@@ -500,7 +500,70 @@ describe("Chat — send flow", () => {
     const textarea = screen.getByRole("textbox", { name: /message input/i });
     await user.type(textarea, "a sunset");
     await user.click(screen.getByRole("button", { name: /send/i }));
-    expect(onSend).toHaveBeenCalledWith("a sunset", "image");
+    expect(onSend).toHaveBeenCalledWith("a sunset", "image", []);
+  });
+
+  it("attaches a picked file and sends the stored path with the message", async () => {
+    const { api } = await import("../services/api");
+    const upload = vi
+      .spyOn(api, "uploadAttachment")
+      .mockResolvedValue({ path: "/uploads/documents/stored.pdf", kind: "document", name: "report.pdf" });
+
+    const onSend = vi.fn();
+    const { container } = render(<Chat {...chatProps({ onSend })} />);
+
+    const fileInput = container.querySelector('input[type="file"][multiple]');
+    const file = new File(["%PDF-1.4"], "report.pdf", { type: "application/pdf" });
+    await user.upload(fileInput, file);
+
+    // The chip proves the upload happened before the message was sent, which is
+    // what lets a user see and remove an attachment first.
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("report.pdf")).toBeTruthy();
+
+    await user.type(screen.getByRole("textbox", { name: /message/i }), "what is in here");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(onSend).toHaveBeenCalledWith("what is in here", "text", ["/uploads/documents/stored.pdf"]);
+    upload.mockRestore();
+  });
+
+  it("removes an attachment before the message is sent", async () => {
+    const { api } = await import("../services/api");
+    const upload = vi
+      .spyOn(api, "uploadAttachment")
+      .mockResolvedValue({ path: "/uploads/images/stored.png", kind: "image", name: "diagram.png" });
+
+    const onSend = vi.fn();
+    const { container } = render(<Chat {...chatProps({ onSend })} />);
+
+    const fileInput = container.querySelector('input[type="file"][multiple]');
+    await user.upload(fileInput, new File(["x"], "diagram.png", { type: "image/png" }));
+    await screen.findByText("diagram.png");
+
+    await user.click(screen.getByRole("button", { name: /remove diagram.png/i }));
+    expect(screen.queryByText("diagram.png")).toBeNull();
+
+    await user.type(screen.getByRole("textbox", { name: /message/i }), "hello");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+    expect(onSend).toHaveBeenCalledWith("hello", "text", []);
+    upload.mockRestore();
+  });
+
+  it("reports an attachment that could not be stored", async () => {
+    const { api } = await import("../services/api");
+    const upload = vi
+      .spyOn(api, "uploadAttachment")
+      .mockRejectedValue(new Error("Uploaded file too large"));
+
+    const { container } = render(<Chat {...chatProps()} />);
+    const fileInput = container.querySelector('input[type="file"][multiple]');
+    await user.upload(fileInput, new File(["x"], "big.pdf", { type: "application/pdf" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/Uploaded file too large/);
+    expect(screen.queryByText("big.pdf")).toBeNull();
+    upload.mockRestore();
   });
 
   it("opens settings when settings button is clicked", async () => {

@@ -67,6 +67,13 @@ export const api = {
     }),
 
   // Audio understanding (upload -> transcription)
+  // Store a file and get back the path a chat message can attach. No model runs.
+  uploadAttachment: (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    return uploadRequest("/generate/upload", form);
+  },
+
   transcribe: (file, prompt = "Transcribe the audio:") => {
     const form = new FormData();
     form.append("audio", file);

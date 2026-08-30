@@ -45,7 +45,9 @@ function parseChatFrame(message) {
     throw new Error(`${first.field} ${first.message}`);
   }
 
-  return { content, messageType, settings, conversationId: message.conversationId };
+  const attachments = Array.isArray(message.attachments) ? message.attachments.slice(0, 10) : [];
+
+  return { content, messageType, settings, attachments, conversationId: message.conversationId };
 }
 
 /**
@@ -235,7 +237,7 @@ function setupWebSocket(wss) {
         }
 
         if (message.type === "chat") {
-          const { content, conversationId, messageType, settings } = parseChatFrame(message);
+          const { content, conversationId, messageType, settings, attachments } = parseChatFrame(message);
 
           // Shares buckets with the REST generation routes, so the limit
           // cannot be sidestepped by switching transport.
@@ -263,7 +265,7 @@ function setupWebSocket(wss) {
           safeSend(ws, { type: "typing", conversationId });
 
           // Process and stream response
-          const messages = [{ role: "user", content }];
+          const messages = [{ role: "user", content, attachments }];
           const operatorCtx = { operator: req?.headers?.["x-operator"] === "true" };
           const onApprovalRequest = ({ approvalId, command, argv, root, respond }) => {
             if (denyEverything) {

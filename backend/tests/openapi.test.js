@@ -46,6 +46,7 @@ test("OpenAPI spec contains all required REST API routes", () => {
     "/generate/code",
     "/generate/understand",
     "/generate/document",
+    "/generate/upload",
     "/generate/transcribe",
   ];
 

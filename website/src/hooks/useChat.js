@@ -291,7 +291,7 @@ export function useChat(settings) {
   const dismissError = useCallback(() => setError(null), []);
 
   const sendMessage = useCallback(
-    async (content, type = "text") => {
+    async (content, type = "text", attachments = []) => {
       if (!content.trim()) return;
       setError(null);
 
@@ -324,6 +324,7 @@ export function useChat(settings) {
         role: "user",
         content,
         type,
+        attachments,
         timestamp: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, userMsg]);
@@ -345,6 +346,7 @@ export function useChat(settings) {
           content,
           conversationId: convId,
           messageType: type,
+          attachments,
           settings: settingsRef.current,
         });
         return;
@@ -353,7 +355,7 @@ export function useChat(settings) {
       // Fallback to REST API
       setLoading(true);
       try {
-        const response = await api.sendMessage(convId, content, type, [], settingsRef.current);
+        const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current);
         setMessages((prev) => {
           const updated = [...prev];
           updated[updated.length - 1] = {

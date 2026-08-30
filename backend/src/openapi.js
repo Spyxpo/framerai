@@ -434,6 +434,56 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/generate/upload": {
+        post: {
+          summary: "Store a file for a later chat turn to reference",
+          description:
+            "Stores an image or document and returns the path a chat message may attach. " +
+            "Runs no model: attaching is not asking.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["file"],
+                  properties: {
+                    file: {
+                      type: "string",
+                      format: "binary",
+                      description: `Image or document to attach (image/*, ${generateRoutes.DOCUMENT_MIME_TYPES.join(", ")}, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Stored attachment",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["path", "kind"],
+                    properties: {
+                      path: { type: "string" },
+                      kind: { type: "string", enum: ["image", "document", "audio"] },
+                      name: { type: "string" },
+                      size: { type: "integer" },
+                      mimetype: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or unattachable file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
       "/generate/document": {
         post: {
           summary: "Read an uploaded document",

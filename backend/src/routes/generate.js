@@ -50,9 +50,17 @@ const LANGUAGES = [
 
 // Route uploads to a subfolder chosen by the form field name.
 const UPLOAD_SUBDIRS = { audio: "audio", document: "documents", image: "images" };
+
+// A generic upload field says nothing about the file, so fall back to its type.
+function bucketForMime(mimetype = "") {
+  if (mimetype.startsWith("audio/")) return "audio";
+  if (DOCUMENT_MIME_TYPES.includes(mimetype)) return "documents";
+  return "images";
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const sub = UPLOAD_SUBDIRS[file.fieldname] || "images";
+    const sub = UPLOAD_SUBDIRS[file.fieldname] || bucketForMime(file.mimetype);
     const dir = path.join(__dirname, "..", "..", "uploads", sub);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
@@ -95,6 +103,19 @@ const uploadDocument = multer({
   storage,
   limits: { fileSize: config.maxFileSize, files: 1 },
   fileFilter: mimeAllowlist(DOCUMENT_MIME_TYPES),
+});
+
+// Attachments are stored and then referenced by later chat turns, so this
+// uploader takes anything the chat path can carry and runs no model at all.
+const uploadAttachment = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/") || DOCUMENT_MIME_TYPES.includes(file.mimetype)) {
+      return cb(null, true);
+    }
+    cb(ApiError.badRequest(`Cannot attach ${file.mimetype}`));
+  },
 });
 
 // Generate image from text
@@ -181,6 +202,25 @@ router.post(
     const result = await understandImage(req.file.path, prompt, req.requestId);
 
     res.json({ description: result.description, imagePath });
+  })
+);
+
+// Store a file for a later chat turn to reference. Deliberately runs no model:
+// attaching is not asking, and paying for inference to learn a path is waste.
+router.post(
+  "/upload",
+  uploadAttachment.single("file"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "file", message: "is required" }]);
+
+    const bucket = path.basename(req.file.destination);
+    res.status(201).json({
+      path: `/uploads/${bucket}/${req.file.filename}`,
+      kind: bucket === "documents" ? "document" : bucket === "audio" ? "audio" : "image",
+      name: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+    });
   })
 );
 
