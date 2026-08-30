@@ -51,7 +51,14 @@ class LatentImageGenerator(nn.Module):
             dropout=config.dropout,
         )
         self.flow = RectifiedFlow()
-        self.sampler = ODESampler(config.sampler_steps, config.sampler_method)
+        # A distilled student runs in single-digit steps and needs no guidance
+        # pair, so both savings are selected together rather than separately.
+        self.flow_distilled = getattr(config, "flow_distilled", False)
+        self.sampler = ODESampler(
+            config.flow_distilled_steps if self.flow_distilled else config.sampler_steps,
+            config.sampler_method,
+            guidance_distilled=self.flow_distilled,
+        )
 
         # The learned unconditional embedding. Guidance extrapolates away from
         # this, so it has to be trained alongside the conditional path - which is

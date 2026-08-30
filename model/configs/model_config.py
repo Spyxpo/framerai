@@ -38,6 +38,12 @@ class FramerConfig:
     kv_cache_paged: bool = True
     kv_cache_block_size: int = 256
     kv_cache_dtype: str = "auto"
+    # Few-step sampling. A distilled student produces the guided field itself,
+    # so a step is one denoiser forward instead of two and the step count drops
+    # from 20-50 to single digits. The guidance scale is baked into the student
+    # at distillation time, which is what buys the saving.
+    flow_distilled: bool = False
+    flow_distilled_steps: int = 4
     d_model: int = 1024
     n_heads: int = 16
     n_kv_heads: int = None  # Grouped-query attention. None -> == n_heads (plain MHA).
@@ -259,6 +265,10 @@ class FramerConfig:
             problems.append(
                 f"kv_cache_dtype ('{self.kv_cache_dtype}') must be one of "
                 f"{', '.join(CACHE_DTYPES)}"
+            )
+        if self.flow_distilled_steps < 1:
+            problems.append(
+                f"flow_distilled_steps ({self.flow_distilled_steps}) must be positive"
             )
         if self.kv_cache_block_size < 1:
             problems.append(
