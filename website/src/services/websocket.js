@@ -5,9 +5,14 @@ export class WebSocketClient {
     this.listeners = new Map();
     this.reconnectDelay = 1000;
     this.maxReconnectDelay = 30000;
+    this.reconnectTimer = null;
+    this.intentionalDisconnect = false;
   }
 
   connect() {
+    // Clear intentional disconnect flag when explicitly connecting
+    this.intentionalDisconnect = false;
+
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.url);
 
@@ -27,11 +32,14 @@ export class WebSocketClient {
       };
 
       this.ws.onclose = () => {
-        setTimeout(() => this.connect(), this.reconnectDelay);
-        this.reconnectDelay = Math.min(
-          this.reconnectDelay * 2,
-          this.maxReconnectDelay
-        );
+        // Only reconnect if this was NOT an intentional disconnect
+        if (!this.intentionalDisconnect) {
+          this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
+          this.reconnectDelay = Math.min(
+            this.reconnectDelay * 2,
+            this.maxReconnectDelay
+          );
+        }
       };
 
       this.ws.onerror = (err) => reject(err);
@@ -66,6 +74,16 @@ export class WebSocketClient {
   }
 
   disconnect() {
+    // Set flag to prevent automatic reconnect
+    this.intentionalDisconnect = true;
+
+    // Cancel any pending reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Close the WebSocket connection
     if (this.ws) {
       this.ws.close();
       this.ws = null;
