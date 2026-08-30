@@ -511,6 +511,45 @@ async function understandImage(imagePath, prompt = "Describe this image", reques
   };
 }
 
+async function readDocument(documentPath, prompt = "", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
+  const maxPages = requestIdOrOptions && requestIdOrOptions.maxPages;
+
+  if (bridge.available()) {
+    try {
+      const params = { document_path: documentPath, prompt };
+      if (maxPages) params.max_pages = maxPages;
+      const result = await bridge.request("document", params, opts.options);
+
+      // An absent optional reader is a deployment fact the caller can act on,
+      // so it is passed up as an error rather than dressed as placeholder text.
+      // The route turns it into a response; the service stays free of HTTP.
+      if (result.error) {
+        return { error: result.error, code: result.code || "DOCUMENT_UNREADABLE" };
+      }
+      return {
+        text: result.text,
+        pages: result.pages,
+        title: result.title || "",
+        scannedPages: result.scanned_pages || [],
+        content: result.content,
+        metadata: { model: "framerai-document" },
+      };
+    } catch (err) {
+      logger.warn("document fallback", { error: err.message, requestId: opts.requestId });
+    }
+  }
+  return {
+    text: "",
+    pages: 0,
+    title: "",
+    scannedPages: [],
+    content:
+      "[FramerAI Document Analysis]\nThis is a placeholder response. Train the model and set MODEL_ENABLED=true to read documents.",
+    metadata: { model: "framerai-document" },
+  };
+}
+
 module.exports = {
   processMessage,
   generateImage,
@@ -519,6 +558,7 @@ module.exports = {
   generateCode,
   transcribeAudio,
   understandImage,
+  readDocument,
   validateTrace,
   traceAllowed,
 };

@@ -11,6 +11,7 @@ const {
   generateCode,
   transcribeAudio,
   understandImage,
+  readDocument,
 } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
@@ -25,6 +26,10 @@ const ASPECT_RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9"
 const SIZE_TIERS = [256, 512, 768, 1024];
 const MIN_DIMENSION = 64;
 const MAX_DIMENSION = 2048;
+// Document types the ingestion path understands. Kept as an explicit list
+// rather than a prefix, because "application/" covers far more than this.
+const DOCUMENT_MIME_TYPES = ["application/pdf", "text/plain", "text/markdown"];
+const MAX_DOCUMENT_PAGES = 2000;
 const LANGUAGES = [
   "python",
   "javascript",
@@ -43,10 +48,11 @@ const LANGUAGES = [
   "css",
 ];
 
-// Route uploads to a subfolder chosen by the form field name (image / audio).
+// Route uploads to a subfolder chosen by the form field name.
+const UPLOAD_SUBDIRS = { audio: "audio", document: "documents", image: "images" };
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const sub = file.fieldname === "audio" ? "audio" : "images";
+    const sub = UPLOAD_SUBDIRS[file.fieldname] || "images";
     const dir = path.join(__dirname, "..", "..", "uploads", sub);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
@@ -74,6 +80,21 @@ const uploadAudio = multer({
   storage,
   limits: { fileSize: config.maxFileSize, files: 1 },
   fileFilter: mimeFilter("audio/"),
+});
+
+// Documents are matched against an allowlist rather than a prefix: the useful
+// types share no prefix, and "application/" would admit anything at all.
+function mimeAllowlist(types) {
+  return (req, file, cb) => {
+    if (types.includes(file.mimetype)) return cb(null, true);
+    cb(ApiError.badRequest(`Expected one of ${types.join(", ")}, got ${file.mimetype}`));
+  };
+}
+
+const uploadDocument = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1 },
+  fileFilter: mimeAllowlist(DOCUMENT_MIME_TYPES),
 });
 
 // Generate image from text
@@ -163,6 +184,27 @@ router.post(
   })
 );
 
+// Upload a document for reading. Returns the extracted text in reading order,
+// and answers a prompt about it when one is given.
+router.post(
+  "/document",
+  uploadDocument.single("document"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "document", message: "is required" }]);
+
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { max: MAX_PROMPT_LENGTH, fallback: "" });
+    const maxPages = v.integer("max_pages", { min: 1, max: MAX_DOCUMENT_PAGES });
+    v.done();
+
+    const documentPath = `/uploads/documents/${req.file.filename}`;
+    const result = await readDocument(req.file.path, prompt, { maxPages, requestId: req.requestId });
+    if (result.error) throw ApiError.badRequest(result.error);
+
+    res.json({ ...result, documentPath });
+  })
+);
+
 // Upload audio for transcription / understanding
 router.post(
   "/transcribe",
@@ -188,5 +230,7 @@ router.SIZE_TIERS = SIZE_TIERS;
 router.MIN_DIMENSION = MIN_DIMENSION;
 router.MAX_DIMENSION = MAX_DIMENSION;
 router.LANGUAGES = LANGUAGES;
+router.DOCUMENT_MIME_TYPES = DOCUMENT_MIME_TYPES;
+router.MAX_DOCUMENT_PAGES = MAX_DOCUMENT_PAGES;
 
 module.exports = router;

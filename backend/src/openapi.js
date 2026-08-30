@@ -434,6 +434,70 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/generate/document": {
+        post: {
+          summary: "Read an uploaded document",
+          description:
+            "Uploads a document and returns its text in reading order, with page markers. " +
+            "Answers a prompt about the document when one is given. Pages that carry no " +
+            "text layer are reported in scannedPages rather than silently returned empty.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["document"],
+                  properties: {
+                    document: {
+                      type: "string",
+                      format: "binary",
+                      description: `Document to read (${generateRoutes.DOCUMENT_MIME_TYPES.join(", ")}, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                    prompt: {
+                      type: "string",
+                      maxLength: generateRoutes.MAX_PROMPT_LENGTH,
+                      description: "Optional question about the document.",
+                    },
+                    max_pages: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: generateRoutes.MAX_DOCUMENT_PAGES,
+                      description: "Read at most this many pages.",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Extracted document text",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["text", "pages", "documentPath"],
+                    properties: {
+                      text: { type: "string" },
+                      pages: { type: "integer" },
+                      title: { type: "string" },
+                      scannedPages: { type: "array", items: { type: "integer" } },
+                      content: { type: "string" },
+                      documentPath: { type: "string" },
+                      metadata: { type: "object", additionalProperties: true },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error, invalid file type, or unreadable document"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
       "/generate/understand": {
         post: {
           summary: "Vision understanding from uploaded image",
