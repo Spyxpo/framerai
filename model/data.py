@@ -448,12 +448,17 @@ class AudioCaptionDataset(Dataset):
         else:
             target_wav = torch.nn.functional.pad(waveform, (0, target_len - waveform.shape[-1]))
         mel = self.frontend(waveform.unsqueeze(0))[0]  # (n_mels, frames)
-        mel = _normalize_mel(mel)
-        mel = _fit_frames(mel, self.config.audio_gen_frames).unsqueeze(0)  # (1, n_mels, frames)
+        mel = _fit_frames(_normalize_mel(mel), self.config.audio_gen_frames).unsqueeze(0)  # (1, n_mels, frames)
+        caption_ids = _encode_caption(self.tokenizer, caption, self.caption_len)
+        target_token_len = int((caption_ids != -100).sum().item())
         return {
-            "input_ids": _encode_caption(self.tokenizer, caption, self.caption_len),
+            "input_ids": caption_ids,
             "target_audio": mel,
             "target_waveform": target_wav,
+            "audio": waveform,
+            "ctc_targets": caption_ids,
+            "ctc_input_lengths": torch.tensor(mel.shape[1], dtype=torch.long),
+            "ctc_target_lengths": torch.tensor(target_token_len, dtype=torch.long),
         }
 
 

@@ -113,6 +113,13 @@ class FramerModel(nn.Module):
         )
         self.audio_projector = MultimodalProjector(config.audio_d_model, config.d_model)
 
+        if getattr(config, "use_ctc_head", False) and not getattr(config, "text_only", False):
+            from .modules.audio_lm import CTCHead
+
+            self.ctc_head = CTCHead(d_model=config.audio_d_model, vocab_size=config.vocab_size)
+        else:
+            self.ctc_head = None
+
         # Audio generation: mel diffusion or RVQ acoustic tokens, selected by
         # config.audio_gen_arch. Both expose forward(target, context) -> loss.
         self.audio_gen = build_audio_generator(config)
@@ -368,6 +375,9 @@ class FramerModel(nn.Module):
         target_audio: torch.Tensor = None,
         target_waveform: torch.Tensor = None,
         labels: torch.Tensor = None,
+        ctc_targets: torch.Tensor = None,
+        ctc_input_lengths: torch.Tensor = None,
+        ctc_target_lengths: torch.Tensor = None,
     ) -> dict:
         """Unified forward pass. Returns per-modality losses for present inputs."""
         results = {}
@@ -385,11 +395,26 @@ class FramerModel(nn.Module):
             else:
                 prefix_parts.append(encoded)
         if audio is not None:
-            encoded = self.forward_audio(audio)
+            audio_encoder_out = self.audio_encoder(audio)
+            encoded = self.audio_projector(audio_encoder_out)
             if interleaved:
                 modality_embeds[self.AUDIO_PLACEHOLDER_ID] = encoded
             else:
                 prefix_parts.append(encoded)
+
+            if self.ctc_head is not None and ctc_targets is not None:
+                # audio_encoder_out shape is (B, T+1, audio_d_model); slice off CLS token
+                frame_hidden = audio_encoder_out[:, 1:]
+                B, T, _ = frame_hidden.shape
+
+                if ctc_input_lengths is None:
+                    ctc_input_lengths = torch.full((B,), T, dtype=torch.long, device=audio.device)
+                if ctc_target_lengths is None and ctc_targets.dim() == 2:
+                    ctc_target_lengths = (ctc_targets != -100).sum(dim=-1).to(dtype=torch.long)
+
+                results["ctc_loss"] = self.ctc_head.loss(
+                    frame_hidden, ctc_targets, ctc_input_lengths, ctc_target_lengths
+                )
 
         prefix_embeds = torch.cat(prefix_parts, dim=1) if prefix_parts else None
 
@@ -430,7 +455,12 @@ class FramerModel(nn.Module):
 
 
         # Total loss
-        total_loss = sum(v for k, v in results.items() if k.endswith("_loss"))
+        weight = getattr(self.config, "ctc_loss_weight", 0.1)
+        total_loss = sum(
+            weight * v if k == "ctc_loss" else v
+            for k, v in results.items()
+            if k.endswith("_loss")
+        )
         if total_loss is not None and not isinstance(total_loss, int):
             results["loss"] = total_loss
 

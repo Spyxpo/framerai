@@ -280,17 +280,26 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
                 input_ids = batch["input_ids"].to(device)
                 target = batch[key].to(device)
                 kwargs = {key: target}
-                if key == "target_audio" and "target_waveform" in batch:
-                    kwargs["target_waveform"] = batch["target_waveform"].to(device)
+                if key == "target_audio":
+                    if "target_waveform" in batch:
+                        kwargs["target_waveform"] = batch["target_waveform"].to(device)
+                    if config.use_ctc_head and "audio" in batch and "ctc_targets" in batch:
+                        kwargs["audio"] = batch["audio"].to(device)
+                        kwargs["ctc_targets"] = batch["ctc_targets"].to(device)
+                        if "ctc_input_lengths" in batch:
+                            kwargs["ctc_input_lengths"] = batch["ctc_input_lengths"].to(device)
+                        if "ctc_target_lengths" in batch:
+                            kwargs["ctc_target_lengths"] = batch["ctc_target_lengths"].to(device)
                 results = model(input_ids=input_ids, **kwargs)
-                loss = results[f"{label}_loss"]
+                loss = results["loss"] if "loss" in results else results[f"{label}_loss"]
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 steps += 1
                 if steps % 20 == 0:
-                    logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}")
+                    ctc_str = f" | ctc {results['ctc_loss'].item():.4f}" if "ctc_loss" in results else ""
+                    logger.info(f"  {label} step {steps}/{max_steps} | loss {loss.item():.4f}{ctc_str}")
 
 
     _run(ImageCaptionDataset(data_dir, tokenizer, resolution=config.image_train_resolution), "target_images", "image")
@@ -639,6 +648,10 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", default="data", help="Directory with local training data (.txt / .jsonl)")
     parser.add_argument("--train-modalities", action="store_true",
                         help="Also train the image and audio generators on local caption pairs")
+    parser.add_argument("--use-ctc-head", action="store_true",
+                        help="Enable CTC auxiliary objective over audio encoder output")
+    parser.add_argument("--ctc-loss-weight", type=float, default=None,
+                        help="Weight for CTC auxiliary loss term")
     parser.add_argument("--beta", type=float, default=0.1, help="DPO beta scale hyperparameter (default 0.1)")
 
     # Model config overrides
@@ -738,6 +751,10 @@ def _build_config_from_args(args: argparse.Namespace) -> FramerConfig:
         config.seed = args.seed
     if args.tokenizer_vocab_size is not None:
         config.vocab_size = args.tokenizer_vocab_size
+    if args.use_ctc_head:
+        config.use_ctc_head = True
+    if args.ctc_loss_weight is not None:
+        config.ctc_loss_weight = args.ctc_loss_weight
 
     config.validate()
     return config

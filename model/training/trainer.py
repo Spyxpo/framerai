@@ -116,7 +116,9 @@ def train_language_model(
             lr = scheduler.get_last_lr()[0]
             aux = results.get("aux_loss")
             aux_str = f" | aux {float(aux):.4f}" if aux is not None else ""
-            log(f"Step {step}/{config.max_steps} | loss {running / log_interval:.4f}{aux_str} "
+            ctc = results.get("ctc_loss")
+            ctc_str = f" | ctc {float(ctc):.4f}" if ctc is not None else ""
+            log(f"Step {step}/{config.max_steps} | loss {running / log_interval:.4f}{aux_str}{ctc_str} "
                 f"| lr {lr:.2e} | {step / max(elapsed, 1e-9):.1f} it/s")
             running = 0.0
 
