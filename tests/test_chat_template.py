@@ -102,3 +102,106 @@ def test_inference_integration_with_render_prompt():
     assert rendered.startswith("<system>")
     assert "<user>Hello world" in rendered
     assert rendered.endswith("<assistant>")
+
+
+def test_serve_path_chat_template_single_application(monkeypatch):
+    from conftest import tiny_config
+    from model.framer import FramerModel
+    from model.generate import FramerGenerator
+    from model.serve import handle
+    from model.tokenizer import FramerTokenizer
+    from model.tools import ToolRegistry
+    from model.tools.base import Tool, ToolResult
+
+    class FakeSearch(Tool):
+        name = "web_search"
+        description = "Stub search."
+        parameters = {"query": "string"}
+
+        def run(self, query: str = "", **_):
+            return ToolResult.success("result text")
+
+    tokenizer = FramerTokenizer(vocab_size=300)
+    tokenizer.train(["hello world rectified flow"], target_vocab_size=300)
+    config = tiny_config(vocab_size=tokenizer.vocab_size, max_seq_len=64)
+    generator = FramerGenerator(FramerModel(config), tokenizer, device="cpu")
+    registry = ToolRegistry([FakeSearch()])
+
+    captured_prompts = []
+
+    def mock_generate_text(prompt, **kwargs):
+        captured_prompts.append(prompt)
+        return prompt + "I answer directly."
+
+    monkeypatch.setattr(generator, "generate_text", mock_generate_text)
+
+    # 1. Normal chat request with prompt string
+    captured_prompts.clear()
+    res1 = handle(generator, "chat", {"prompt": "what is rectified flow", "max_new_tokens": 8})
+    assert len(captured_prompts) == 1
+    p1 = captured_prompts[0]
+    assert res1["content"] == p1 + "I answer directly."
+    assert "<user><user>" not in p1
+    assert "<system><system>" not in p1
+    assert "<assistant><assistant>" not in p1
+    assert p1.startswith("<user>what is rectified flow")
+    assert p1.endswith("<assistant>")
+
+    # 2. Normal chat request with messages list
+    captured_prompts.clear()
+    res2 = handle(
+        generator,
+        "chat",
+        {"messages": [{"role": "user", "content": "what is rectified flow"}], "max_new_tokens": 8},
+    )
+    assert len(captured_prompts) == 1
+    p2 = captured_prompts[0]
+    assert res2["content"] == p2 + "I answer directly."
+    assert "<user><user>" not in p2
+    assert "<system><system>" not in p2
+    assert "<assistant><assistant>" not in p2
+    assert p2.startswith("<user>what is rectified flow")
+    assert p2.endswith("<assistant>")
+
+    # 3. Tool-enabled chat request with prompt string
+    captured_prompts.clear()
+    res3 = handle(
+        generator,
+        "chat",
+        {"prompt": "what is rectified flow", "max_new_tokens": 8, "tools": True},
+        tools=registry,
+    )
+    assert res3["content"] == "I answer directly."
+    assert len(captured_prompts) == 1
+    p3 = captured_prompts[0]
+    assert "<user><user>" not in p3
+    assert "<system><system>" not in p3
+    assert "<assistant><assistant>" not in p3
+    assert p3.startswith("<system>")
+    assert "Tools:" in p3
+    assert "<user>what is rectified flow" in p3
+    assert p3.endswith("<assistant>")
+
+    # 4. Tool-enabled chat request with messages list
+    captured_prompts.clear()
+    res4 = handle(
+        generator,
+        "chat",
+        {
+            "messages": [{"role": "user", "content": "what is rectified flow"}],
+            "max_new_tokens": 8,
+            "tools": True,
+        },
+        tools=registry,
+    )
+    assert res4["content"] == "I answer directly."
+    assert len(captured_prompts) == 1
+    p4 = captured_prompts[0]
+    assert "<user><user>" not in p4
+    assert "<system><system>" not in p4
+    assert "<assistant><assistant>" not in p4
+    assert p4.startswith("<system>")
+    assert "Tools:" in p4
+    assert "<user>what is rectified flow" in p4
+    assert p4.endswith("<assistant>")
+
