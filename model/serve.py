@@ -130,7 +130,7 @@ def _save_video(frames, out_dir, fps=None):
     path = os.path.join(out_dir, name)
     frames[0].save(
         path, save_all=True, append_images=frames[1:],
-        duration=max(1, round(1000.0 / rate)), loop=0,
+        duration=max(1, round(1000.0 / rate)), loop=0, optimize=False,
     )
     return name
 

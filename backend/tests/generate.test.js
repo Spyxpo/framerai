@@ -142,7 +142,8 @@ test("video frames are bounded", async () => {
   const ok = await request(app).post("/api/generate/video").send({ prompt: "x", num_frames: 32 });
   assert.equal(ok.status, 200);
   const videoArgs = lastCall("generateVideo").args;
-  assert.deepEqual(videoArgs.slice(0, 2), ["x", 32]);
+  assert.equal(videoArgs[0], "x"); // prompt
+  assert.equal(videoArgs[1], 32); // numFrames (positional)
 
   const tooMany = await request(app)
     .post("/api/generate/video")
