@@ -173,6 +173,7 @@ class FramerConfig:
     speaker_embed_dim: int = 256
     use_speaker_conditioning: bool = False
     use_ctc_head: bool = False
+    ctc_loss_weight: float = 0.1
 
     # Code generation
     code_vocab_size: int = 50304  # shared vocab
