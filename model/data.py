@@ -386,10 +386,11 @@ def _iter_pairs(data_dir: str, path_key: str, text_keys: tuple):
                     yield media_path, caption
 
 
-def _encode_caption(tokenizer, caption: str, max_len: int) -> torch.Tensor:
+def _encode_caption(tokenizer, caption: str, max_len: int) -> tuple[torch.Tensor, int]:
     tokens = tokenizer.encode(caption, add_special=True)[:max_len]
-    tokens += [tokenizer.pad_id] * (max_len - len(tokens))
-    return torch.tensor(tokens, dtype=torch.long)
+    valid_len = len(tokens)
+    tokens += [tokenizer.pad_id] * (max_len - valid_len)
+    return torch.tensor(tokens, dtype=torch.long), valid_len
 
 
 class ImageCaptionDataset(Dataset):
@@ -411,8 +412,9 @@ class ImageCaptionDataset(Dataset):
         img = Image.open(path).convert("RGB").resize((self.resolution, self.resolution))
         tensor = torch.from_numpy(_image_to_array(img)).permute(2, 0, 1).float()
         tensor = tensor / 127.5 - 1.0
+        caption_ids, _ = _encode_caption(self.tokenizer, caption, self.caption_len)
         return {
-            "input_ids": _encode_caption(self.tokenizer, caption, self.caption_len),
+            "input_ids": caption_ids,
             "target_images": tensor,
         }
 
@@ -423,8 +425,33 @@ def _image_to_array(img):
     return np.asarray(img, dtype="float32")
 
 
+def collate_audio_caption_batch(batch: list[dict]) -> dict:
+    """Custom collate function for AudioCaptionDataset to handle variable-length audio."""
+    if not batch:
+        return {}
+    collated = {}
+    max_audio_len = max(item["audio"].shape[-1] for item in batch)
+    padded_audio = []
+    for item in batch:
+        audio = item["audio"]
+        pad_len = max_audio_len - audio.shape[-1]
+        if pad_len > 0:
+            audio = torch.nn.functional.pad(audio, (0, pad_len))
+        padded_audio.append(audio)
+    collated["audio"] = torch.stack(padded_audio)
+
+    first_item = batch[0]
+    for key in first_item:
+        if key == "audio":
+            continue
+        collated[key] = torch.stack([item[key] for item in batch])
+    return collated
+
+
 class AudioCaptionDataset(Dataset):
     """Audio-caption pairs for audio-generation training."""
+
+    collate_fn = staticmethod(collate_audio_caption_batch)
 
     def __init__(self, data_dir: str, tokenizer, config, caption_len: int = 64):
         self.pairs = list(_iter_pairs(data_dir, "audio", ("text", "caption")))
@@ -449,15 +476,15 @@ class AudioCaptionDataset(Dataset):
             target_wav = torch.nn.functional.pad(waveform, (0, target_len - waveform.shape[-1]))
         mel = self.frontend(waveform.unsqueeze(0))[0]  # (n_mels, frames)
         mel = _fit_frames(_normalize_mel(mel), self.config.audio_gen_frames).unsqueeze(0)  # (1, n_mels, frames)
-        caption_ids = _encode_caption(self.tokenizer, caption, self.caption_len)
-        target_token_len = int((caption_ids != -100).sum().item())
+        caption_ids, target_token_len = _encode_caption(self.tokenizer, caption, self.caption_len)
+        encoder_frames = min(waveform.shape[-1] // self.config.audio_hop_length + 1, self.config.audio_max_frames)
         return {
             "input_ids": caption_ids,
             "target_audio": mel,
             "target_waveform": target_wav,
             "audio": waveform,
             "ctc_targets": caption_ids,
-            "ctc_input_lengths": torch.tensor(mel.shape[1], dtype=torch.long),
+            "ctc_input_lengths": torch.tensor(encoder_frames, dtype=torch.long),
             "ctc_target_lengths": torch.tensor(target_token_len, dtype=torch.long),
         }
 

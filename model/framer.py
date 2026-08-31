@@ -396,11 +396,12 @@ class FramerModel(nn.Module):
                 prefix_parts.append(encoded)
         if audio is not None:
             audio_encoder_out = self.audio_encoder(audio)
-            encoded = self.audio_projector(audio_encoder_out)
-            if interleaved:
-                modality_embeds[self.AUDIO_PLACEHOLDER_ID] = encoded
-            else:
-                prefix_parts.append(encoded)
+            if target_audio is None:
+                encoded = self.audio_projector(audio_encoder_out)
+                if interleaved:
+                    modality_embeds[self.AUDIO_PLACEHOLDER_ID] = encoded
+                else:
+                    prefix_parts.append(encoded)
 
             if self.ctc_head is not None and ctc_targets is not None:
                 # audio_encoder_out shape is (B, T+1, audio_d_model); slice off CLS token
@@ -410,7 +411,8 @@ class FramerModel(nn.Module):
                 if ctc_input_lengths is None:
                     ctc_input_lengths = torch.full((B,), T, dtype=torch.long, device=audio.device)
                 if ctc_target_lengths is None and ctc_targets.dim() == 2:
-                    ctc_target_lengths = (ctc_targets != -100).sum(dim=-1).to(dtype=torch.long)
+                    mask = (ctc_targets != -100) & (ctc_targets != 0)
+                    ctc_target_lengths = mask.sum(dim=-1).to(dtype=torch.long)
 
                 results["ctc_loss"] = self.ctc_head.loss(
                     frame_hidden, ctc_targets, ctc_input_lengths, ctc_target_lengths
