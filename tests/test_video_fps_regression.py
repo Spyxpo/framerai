@@ -7,8 +7,10 @@ the video generation pipeline and affect the final output.
 
 import os
 import tempfile
-from PIL import Image
+
 import pytest
+from PIL import Image
+
 
 # Test the _save_video function directly
 def test_save_video_honours_fps():
@@ -63,7 +65,7 @@ def test_save_video_honours_fps():
 
 def test_save_video_default_fps():
     """Test that _save_video uses default 24 FPS when fps=None."""
-    from model.serve import _save_video, DEFAULT_VIDEO_FPS
+    from model.serve import DEFAULT_VIDEO_FPS, _save_video
 
     # Create frames with different colors
     frames = [Image.new('RGB', (32, 32), color=(255, 0, 0)), Image.new('RGB', (32, 32), color=(0, 255, 0))]
@@ -97,9 +99,10 @@ def test_video_generation_end_to_end_fps():
     """Test that FPS parameter flows through the complete video generation pipeline."""
     # This test requires working model dependencies, but we can test the serve layer directly
     try:
-        from model.serve import handle
-        import tempfile
         import os
+        import tempfile
+
+        from model.serve import handle
 
         # Create a mock generator that returns predictable results with different frames
         class MockGenerator:
