@@ -1,211 +1,146 @@
-const { describe, it } = require("node:test");
-const assert = require("node:assert");
-const request = require("supertest");
-const { mockModel, loadApp } = require("./helpers");
+/**
+ * Video route: the size, frame rate and seed the caller asked for.
+ *
+ * The worker accepted all of these all along and the route exposed none of
+ * them, so the tests assert both halves: that the route forwards each one to
+ * the service, and that the response reports back what was resolved.
+ *
+ * Rate limiting is covered by limits.test.js, so it is raised out of the way
+ * here. The limits are read from the environment when the app module loads, and
+ * `node --test` runs each file in its own process, so this does not leak.
+ */
 
 process.env.GENERATE_RATE_LIMIT_MAX = "500";
 process.env.RATE_LIMIT_MAX = "1000";
 
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const request = require("supertest");
+
+const { mockModel, loadApp } = require("./helpers");
+
 const calls = mockModel();
 const app = loadApp();
+// The bounds are the route's own, so they are read from it rather than
+// restated here, where they would drift the moment a limit moved.
+const { MAX_FRAMES, MIN_FPS, MAX_FPS, MIN_DIMENSION } = require("../src/routes/generate");
 
 function lastCall(name) {
   return [...calls].reverse().find((c) => c.name === name);
 }
 
-// Route calls: generateVideo(prompt, numFrames, { width, height, aspect, tier, fps, seed }, requestId)
-// args[0] = prompt, args[1] = numFrames, args[2] = size object
+// The route calls generateVideo(prompt, numFrames, size, requestId), so the
+// size arguments all arrive together in args[2].
+function lastVideoCall() {
+  const { args } = lastCall("generateVideo");
+  return { prompt: args[0], numFrames: args[1], size: args[2] };
+}
 
-describe("Video Generation Regression Tests - Issue #207", () => {
+test("a requested frame rate is forwarded and reported back", async () => {
+  const res = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "a spinning cube", fps: 30, num_frames: 16 });
 
-  it("should honour requested FPS in video generation", async () => {
-    const response = await request(app)
+  assert.equal(res.status, 200);
+  assert.equal(res.body.video.fps, 30);
+  assert.equal(res.body.metadata.fps, 30);
+
+  const { prompt, numFrames, size } = lastVideoCall();
+  assert.equal(prompt, "a spinning cube");
+  assert.equal(numFrames, 16);
+  assert.equal(size.fps, 30);
+});
+
+test("a requested size is forwarded and reported back", async () => {
+  const res = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "a dancing robot", width: 512, height: 256, num_frames: 8 });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.metadata.width, 512);
+  assert.equal(res.body.metadata.height, 256);
+
+  const { numFrames, size } = lastVideoCall();
+  assert.equal(numFrames, 8);
+  assert.equal(size.width, 512);
+  assert.equal(size.height, 256);
+});
+
+test("an aspect ratio and a size tier are forwarded", async () => {
+  const res = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "a landscape view", aspect: "16:9", tier: 512, num_frames: 24 });
+
+  assert.equal(res.status, 200);
+
+  const { size } = lastVideoCall();
+  assert.equal(size.aspect, "16:9");
+  assert.equal(size.tier, 512);
+});
+
+test("a seed is forwarded so a clip can be reproduced", async () => {
+  const res = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "a random pattern", seed: 42, num_frames: 16 });
+
+  assert.equal(res.status, 200);
+  assert.equal(lastVideoCall().size.seed, 42);
+});
+
+test("a clip longer than one denoising window is accepted", async () => {
+  const res = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "a long journey", num_frames: 128 });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.video.frames, 128);
+  assert.equal(res.body.metadata.frames, 128);
+  assert.equal(lastVideoCall().numFrames, 128);
+
+  const past = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "x", num_frames: MAX_FRAMES + 1 });
+  assert.equal(past.status, 400);
+  assert.equal(past.body.details[0].field, "num_frames");
+});
+
+test("a request that asks for nothing in particular still gets a rate", async () => {
+  const res = await request(app).post("/api/generate/video").send({ prompt: "a simple test" });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.video.frames, 16);
+  // The placeholder path used to omit fps entirely, though the response schema
+  // declares it, so a caller could not tell what rate it was going to get.
+  assert.equal(res.body.video.fps, 24);
+  assert.equal(res.body.metadata.fps, 24);
+});
+
+test("a frame rate outside the supported range is refused", async () => {
+  for (const fps of [MIN_FPS - 1, MAX_FPS + 1]) {
+    const res = await request(app).post("/api/generate/video").send({ prompt: "test", fps });
+    assert.equal(res.status, 400, `fps ${fps} should be rejected`);
+    assert.equal(res.body.details[0].field, "fps");
+  }
+
+  for (const fps of [MIN_FPS, MAX_FPS]) {
+    const res = await request(app).post("/api/generate/video").send({ prompt: "test", fps });
+    assert.equal(res.status, 200, `fps ${fps} should be accepted`);
+  }
+});
+
+test("a size that is out of range, or given by half, is refused", async () => {
+  for (const field of ["width", "height"]) {
+    const res = await request(app)
       .post("/api/generate/video")
-      .send({
-        prompt: "a spinning cube",
-        fps: 30,
-        num_frames: 16
-      });
+      .send({ prompt: "test", [field]: MIN_DIMENSION - 1 });
+    assert.equal(res.status, 400, `${field} below the minimum should be rejected`);
+  }
 
-    assert.equal(response.status, 200);
-    assert.equal(response.body.video.fps, 30);
-    assert.equal(response.body.metadata.fps, 30);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[0], "a spinning cube"); // prompt
-    assert.equal(videoArgs[1], 16);                // numFrames
-    assert.equal(videoArgs[2].fps, 30);            // size.fps
-  });
-
-  it("should honour requested width and height", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "a dancing robot",
-        width: 512,
-        height: 256,
-        num_frames: 8
-      });
-
-    assert.equal(response.status, 200);
-    assert.equal(response.body.metadata.width, 512);
-    assert.equal(response.body.metadata.height, 256);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[0], "a dancing robot"); // prompt
-    assert.equal(videoArgs[1], 8);                 // numFrames
-    assert.equal(videoArgs[2].width, 512);         // size.width
-    assert.equal(videoArgs[2].height, 256);        // size.height
-  });
-
-  it("should support extended video duration up to 128 frames", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "a long journey",
-        num_frames: 128
-      });
-
-    assert.equal(response.status, 200);
-    assert.equal(response.body.video.frames, 128);
-    assert.equal(response.body.metadata.frames, 128);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[1], 128); // numFrames
-  });
-
-  it("should support aspect ratio and tier parameters", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "a landscape view",
-        aspect: "16:9",
-        tier: 512,
-        num_frames: 24
-      });
-
-    assert.equal(response.status, 200);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[1], 24);              // numFrames
-    assert.equal(videoArgs[2].aspect, "16:9");   // size.aspect
-    assert.equal(videoArgs[2].tier, 512);        // size.tier
-  });
-
-  it("should support seed parameter for reproducible generation", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "a random pattern",
-        seed: 42,
-        num_frames: 16
-      });
-
-    assert.equal(response.status, 200);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[2].seed, 42); // size.seed
-  });
-
-  it("should use default values when optional parameters are not provided", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "a simple test"
-      });
-
-    assert.equal(response.status, 200);
-    assert.equal(response.body.video.frames, 16); // default num_frames
-    assert.equal(response.body.video.fps, 24);    // default fps
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[1], 16); // default numFrames
-  });
-
-  it("should validate FPS is within acceptable range", async () => {
-    // Test lower bound
-    const tooLow = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", fps: 0 });
-
-    assert.equal(tooLow.status, 400);
-    assert.equal(tooLow.body.details[0].field, "fps");
-
-    // Test upper bound
-    const tooHigh = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", fps: 100 });
-
-    assert.equal(tooHigh.status, 400);
-    assert.equal(tooHigh.body.details[0].field, "fps");
-
-    // Test valid bounds
-    const validLow = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", fps: 1 });
-    assert.equal(validLow.status, 200);
-
-    const validHigh = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", fps: 60 });
-    assert.equal(validHigh.status, 200);
-  });
-
-  it("should validate num_frames is within extended range", async () => {
-    // Test lower bound
-    const tooLow = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", num_frames: 0 });
-
-    assert.equal(tooLow.status, 400);
-    assert.equal(tooLow.body.details[0].field, "num_frames");
-
-    // Test upper bound (MAX_FRAMES is 512 on upstream/dev)
-    const tooHigh = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", num_frames: 1000 });
-
-    assert.equal(tooHigh.status, 400);
-    assert.equal(tooHigh.body.details[0].field, "num_frames");
-
-    // Test valid extended range
-    const valid = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", num_frames: 128 });
-    assert.equal(valid.status, 200);
-  });
-
-  it("should validate width and height dimensions", async () => {
-    const invalidWidth = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", width: -1 });
-    assert.equal(invalidWidth.status, 400);
-
-    const invalidHeight = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", height: -1 });
-    assert.equal(invalidHeight.status, 400);
-
-    // width without height (or vice versa) must also be rejected
-    const widthOnly = await request(app)
-      .post("/api/generate/video")
-      .send({ prompt: "test", width: 512 });
-    assert.equal(widthOnly.status, 400);
-  });
-
-  it("should maintain backwards compatibility with legacy function calls", async () => {
-    const response = await request(app)
-      .post("/api/generate/video")
-      .send({
-        prompt: "backwards compatibility test",
-        num_frames: 24
-      });
-
-    assert.equal(response.status, 200);
-    assert.equal(response.body.video.frames, 24);
-
-    const videoArgs = lastCall("generateVideo").args;
-    assert.equal(videoArgs[0], "backwards compatibility test");
-    assert.equal(videoArgs[1], 24); // numFrames as positional arg
-  });
+  // Width and height mean nothing apart, so one without the other is an error
+  // rather than a half-applied size.
+  const widthOnly = await request(app)
+    .post("/api/generate/video")
+    .send({ prompt: "test", width: 512 });
+  assert.equal(widthOnly.status, 400);
+  assert.equal(widthOnly.body.details[0].field, "height");
 });

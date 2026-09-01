@@ -81,24 +81,11 @@ function mockModel(overrides = {}) {
       images: [{ id: "img-1", url: "/uploads/generated/img.png", placeholder: false }],
       metadata: { resolution, numImages, model: "test-model" },
     })),
-    generateVideo: record("generateVideo", (prompt, numFramesOrOptions, size) => {
-      // Handle both call forms:
-      //   upstream route: generateVideo(prompt, numFrames, sizeObj, requestId)
-      //   legacy/options: generateVideo(prompt, optionsObj)
-      let numFrames = 16, fps = 24, width = 256, height = 256;
-      if (typeof numFramesOrOptions === "number") {
-        numFrames = numFramesOrOptions;
-        const s = size || {};
-        fps = s.fps ?? 24;
-        width = s.width ?? 256;
-        height = s.height ?? 256;
-      } else {
-        const opts = numFramesOrOptions || {};
-        numFrames = opts.numFrames ?? 16;
-        fps = opts.fps ?? 24;
-        width = opts.width ?? 256;
-        height = opts.height ?? 256;
-      }
+    // Mirrors the real signature: the route passes size as its own object, and
+    // the service echoes back the size the worker resolved, so the mock echoes
+    // the requested one and falls back the way the service does.
+    generateVideo: record("generateVideo", (prompt, numFrames = 16, size = {}) => {
+      const { fps = 24, width = 256, height = 256 } = size;
       return {
         id: "vid-1",
         prompt,
