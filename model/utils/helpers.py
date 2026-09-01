@@ -18,9 +18,24 @@ def get_device(preference: str = "auto") -> torch.device:
     return torch.device(preference)
 
 
-def count_parameters(model: nn.Module) -> int:
-    """Count trainable parameters."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+def count_parameters(model: nn.Module, trainable_only: bool = True) -> int:
+    """Count parameters of a module.
+
+    Args:
+        model: PyTorch module.
+        trainable_only: If True, count only trainable parameters (requires_grad=True).
+                       If False, count total parameters.
+    """
+    if trainable_only:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return sum(p.numel() for p in model.parameters())
+
+
+def get_parameter_counts(model: nn.Module) -> dict[str, int]:
+    """Return total and trainable parameter counts for a PyTorch module."""
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {"total": total, "trainable": trainable}
 
 
 def human_params(n: float) -> str:
