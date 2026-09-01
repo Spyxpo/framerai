@@ -517,21 +517,23 @@ async function generateVideo(prompt, numFrames = 16, size = {}, requestIdOrOptio
       // number produced, so a clip the decoder trimmed reported a length it
       // did not have.
       const frames = Number.isFinite(result.frames) ? result.frames : numFrames;
+      const fps = result.fps || size.fps || 24;
       return {
         id: randomUUID(),
         prompt,
-        video: { url: `${GENERATED_URL}/${result.file}`, frames, fps: result.fps, placeholder: false },
-        metadata: { frames, fps: result.fps, model: "framerai-video" },
+        video: { url: `${GENERATED_URL}/${result.file}`, frames, fps, placeholder: false },
+        metadata: { frames, fps, width: result.width, height: result.height, model: "framerai-video" },
       };
     } catch (err) {
       logger.warn("video fallback", { error: err.message, requestId: opts.requestId });
     }
   }
+  const fps = size.fps || 24;
   return {
     id: randomUUID(),
     prompt,
-    video: { url: null, frames: numFrames, placeholder: true, message: "Train the model to generate actual videos" },
-    metadata: { frames: numFrames, model: "framerai-video" },
+    video: { url: null, frames: numFrames, fps, placeholder: true, message: "Train the model to generate actual videos" },
+    metadata: { frames: numFrames, fps, model: "framerai-video" },
   };
 }
 
