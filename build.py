@@ -270,7 +270,13 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
         if len(dataset) == 0:
             logger.info(f"No {label} caption pairs found in '{data_dir}'; skipping {label} training.")
             return
-        loader = DataLoader(dataset, batch_size=max(1, config.batch_size // 2), shuffle=True)
+        collate_fn = getattr(dataset, "collate_fn", None)
+        loader = DataLoader(
+            dataset,
+            batch_size=max(1, config.batch_size // 2),
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         logger.info(f"Training {label} generator on {len(dataset)} pairs")
         steps = 0
