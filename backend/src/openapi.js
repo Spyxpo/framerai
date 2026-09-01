@@ -314,7 +314,7 @@ function generateOpenApiSpec() {
       "/generate/video": {
         post: {
           summary: "Generate video from text",
-          description: "Generates a video clip matching the prompt.",
+          description: "Generates a video clip matching the prompt with customizable frame count, dimensions, frame rate, and other parameters.",
           requestBody: {
             required: true,
             content: {
@@ -819,11 +819,22 @@ function generateOpenApiSpec() {
               properties: {
                 url: { type: ["string", "null"] },
                 frames: { type: "integer" },
+                fps: { type: "integer" },
                 placeholder: { type: "boolean" },
                 message: { type: "string" },
               },
             },
-            metadata: { type: "object", additionalProperties: true },
+            metadata: {
+              type: "object",
+              properties: {
+                frames: { type: "integer" },
+                fps: { type: "integer" },
+                width: { type: "integer" },
+                height: { type: "integer" },
+                model: { type: "string" },
+              },
+              additionalProperties: true
+            },
           },
         },
         AudioGenerationResponse: {

@@ -16,7 +16,7 @@ from PIL import Image
 
 from model.configs import FramerConfig
 from model.modules.latent_video import build_video_generator
-from model.serve import DEFAULT_VIDEO_FPS, _save_video
+from model.serve import DEFAULT_VIDEO_FPS, _save_video, handle
 
 
 def video_config(**overrides):
@@ -173,3 +173,61 @@ def test_no_overlap_is_allowed_even_though_it_is_a_worse_join():
             steps=2, window_frames=8, overlap_frames=0,
         )
     assert clip.shape[2] == 16
+
+
+# ── The worker ────────────────────────────────────────────────────────────
+
+class _StubRequest:
+    """Stands in for the resolved request the generator hands back."""
+
+    def __init__(self, width=64, height=64):
+        self.width, self.height = width, height
+
+    def to_dict(self):
+        return {"width": self.width, "height": self.height}
+
+
+class _StubGenerator:
+    """Enough of the generator for `handle` to reach the writer."""
+
+    class model:
+        config = video_config()
+
+    def generate_video(self, prompt, num_frames=None, fps=None, **kwargs):
+        return _frames(num_frames or 4), _StubRequest()
+
+
+def test_the_worker_reports_the_rate_it_wrote_at(tmp_path):
+    for fps in (12, 24, 30):
+        result = handle(
+            _StubGenerator(), "video",
+            {"prompt": "test", "fps": fps, "num_frames": 4, "out_dir": str(tmp_path)},
+        )
+        # The rate is reported because the caller cannot read it back out of an
+        # mp4 without a decoder, and the backend puts it in the response.
+        assert result["fps"] == fps
+        assert result["frames"] == 4
+        assert (tmp_path / result["file"]).exists()
+
+        if result["file"].endswith(".gif"):
+            with Image.open(tmp_path / result["file"]) as clip:
+                # Centiseconds again, so the same 10 ms of slack as above.
+                assert abs(clip.info["duration"] - round(1000 / fps)) <= 10
+
+
+def test_the_worker_falls_back_to_the_configured_rate(tmp_path):
+    result = handle(
+        _StubGenerator(), "video",
+        {"prompt": "test", "num_frames": 4, "out_dir": str(tmp_path)},
+    )
+    assert result["fps"] == video_config().video_fps
+
+
+def test_the_worker_reports_the_size_that_was_resolved(tmp_path):
+    result = handle(
+        _StubGenerator(), "video",
+        {"prompt": "test", "num_frames": 4, "out_dir": str(tmp_path)},
+    )
+    # Size comes from the request the generator resolved, not from what was
+    # asked for, so a snapped size is reported as what it became.
+    assert (result["width"], result["height"]) == (64, 64)
