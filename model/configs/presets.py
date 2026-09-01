@@ -47,11 +47,17 @@ _DENSE = {
     ),
     "framer-3b": dict(
         d_model=2560, n_layers=32, n_heads=20, n_kv_heads=4, d_ff=6912, max_seq_len=4096,
-        image_train_resolution=64,
+        image_gen_arch="latent_dit", image_train_resolution=256,
+        vae_latent_channels=8, vae_base_channels=96, vae_downsample=8,
+        dit_d_model=1024, dit_n_layers=16, dit_n_heads=8,
+        sampler_steps=50, cfg_scale=3.0,
     ),
     "framer-8b": dict(  # classic 8B dense shape
         d_model=4096, n_layers=32, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
-        image_train_resolution=64,
+        image_gen_arch="latent_dit", image_train_resolution=512,
+        vae_latent_channels=12, vae_base_channels=128, vae_downsample=8,
+        dit_d_model=1536, dit_n_layers=20, dit_n_heads=12,
+        sampler_steps=50, cfg_scale=3.0,
     ),
 }
 
@@ -69,7 +75,10 @@ _MOE = {
         d_model=2048, n_layers=28, n_heads=16, n_kv_heads=4, d_ff=8192, max_seq_len=4096,
         use_moe=True, n_experts=128, n_experts_per_tok=8, n_shared_experts=2,
         expert_d_ff=1536, moe_layer_freq=1, first_dense_layers=1,
-        image_train_resolution=64,
+        image_gen_arch="latent_dit", image_train_resolution=256,
+        vae_latent_channels=8, vae_base_channels=96, vae_downsample=8,
+        dit_d_model=1024, dit_n_layers=16, dit_n_heads=8,
+        sampler_steps=50, cfg_scale=3.0,
     ),
     "framer-160b-a16b": dict(  # ~156B total across all modalities / ~15B active
         d_model=4096, n_layers=48, n_heads=32, n_kv_heads=8, d_ff=14336, max_seq_len=8192,
