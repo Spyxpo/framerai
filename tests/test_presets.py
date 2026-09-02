@@ -40,9 +40,11 @@ def test_preset_image_train_resolutions():
     assert FramerConfig.from_preset("framer-small").image_train_resolution == 64
     assert FramerConfig.from_preset("framer-medium").image_train_resolution == 64
     assert FramerConfig.from_preset("framer-large").image_train_resolution == 64
-    assert FramerConfig.from_preset("framer-3b").image_train_resolution == 64
-    assert FramerConfig.from_preset("framer-8b").image_train_resolution == 64
-    assert FramerConfig.from_preset("framer-30b-a3b").image_train_resolution == 64
+    # Mid-size presets migrated to latent_dit for Issue #206
+    assert FramerConfig.from_preset("framer-3b").image_train_resolution == 256
+    assert FramerConfig.from_preset("framer-8b").image_train_resolution == 512
+    assert FramerConfig.from_preset("framer-30b-a3b").image_train_resolution == 256
+    # Large presets already on latent_dit
     assert FramerConfig.from_preset("framer-160b-a16b").image_train_resolution == 512
     assert FramerConfig.from_preset("framer-2t-a49b").image_train_resolution == 512
 
@@ -165,3 +167,53 @@ def test_validate_rejects_broken_shapes():
         FramerConfig(diffusion_channels=100).validate()
     with pytest.raises(ValueError, match="exceeds"):
         FramerConfig(use_moe=True, n_experts=4, n_experts_per_tok=8).validate()
+
+
+def test_mid_size_presets_use_latent_dit():
+    """Issue #206: framer-3b, framer-8b, framer-30b-a3b migrated from 1000-step pixel U-Net."""
+    for name in ["framer-3b", "framer-8b", "framer-30b-a3b"]:
+        cfg = FramerConfig.from_preset(name)
+        assert cfg.image_gen_arch == "latent_dit", \
+            f"{name} must use latent_dit, not {cfg.image_gen_arch}"
+        assert cfg.sampler_steps == 50, \
+            f"{name} must use 50 sampler steps, got {cfg.sampler_steps}"
+        assert cfg.cfg_scale == 3.0, \
+            f"{name} must use cfg_scale=3.0, got {cfg.cfg_scale}"
+        # Verify latent diffusion config is present
+        assert cfg.vae_latent_channels > 0
+        assert cfg.vae_base_channels > 0
+        assert cfg.vae_downsample > 0
+        assert cfg.dit_d_model > 0
+        assert cfg.dit_n_layers > 0
+        assert cfg.dit_n_heads > 0
+
+
+def test_mid_size_presets_build_latent_diffusion_modules():
+    """Verify the migrated presets would instantiate latent diffusion, not pixel U-Net."""
+    # Use framer-3b only for instantiation test (smallest of the three)
+    # Other two are verified via config in test_mid_size_presets_use_latent_dit
+    import torch
+    cfg = FramerConfig.from_preset("framer-3b")
+    # Verify config will build latent diffusion
+    assert cfg.image_gen_arch == "latent_dit"
+
+    # Build only the diffusion module to avoid full model overhead
+    from model.modules.latent_diffusion import LatentImageGenerator
+    diffusion = LatentImageGenerator(cfg)
+
+    # Must have VAE and denoiser, not pixel U-Net
+    assert hasattr(diffusion, "vae"), "framer-3b missing VAE"
+    assert hasattr(diffusion, "denoiser"), "framer-3b missing denoiser"
+    assert not hasattr(diffusion, "unet"), "framer-3b should not have pixel U-Net"
+
+    # Verify VAE encode/decode work
+    dummy_image = torch.randn(1, 3, cfg.image_train_resolution, cfg.image_train_resolution)
+    latent = diffusion.vae.encode_to_latent(dummy_image)
+    assert latent.shape[1] == cfg.vae_latent_channels
+    assert latent.shape[2] == cfg.image_train_resolution // cfg.vae_downsample
+
+    # Verify denoiser accepts latents
+    dummy_t = torch.zeros(1)
+    dummy_context = torch.randn(1, 1, cfg.d_model)
+    velocity = diffusion.denoiser(latent, dummy_t, dummy_context)
+    assert velocity.shape == latent.shape

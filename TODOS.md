@@ -127,7 +127,7 @@ it. Training compute and licensed data remain a separate, external problem.
 - [ ] Train a distilled student and report it against the teacher on the same
       checkpoint. The objective and the cost accounting are in; nothing has been
       distilled yet.
-- [ ] Move `framer-3b`, `framer-8b` and `framer-30b-a3b` off the 1000-step pixel
+- [x] Move `framer-3b`, `framer-8b` and `framer-30b-a3b` off the 1000-step pixel
       U-Net. The README justifies `unet` for laptop presets, which does not
       describe a 30B mixture-of-experts. Changing them shifts their reported
       multimodal parameter counts, so it belongs with the preset tables.
