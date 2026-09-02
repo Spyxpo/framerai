@@ -13,6 +13,7 @@ import time
 import torch
 import torch.nn as nn
 
+from ..utils import get_parameter_counts
 from .distributed import get_world_size, is_main_process
 from .optim import build_optimizer
 from .precision import autocast_context, resolve_precision
@@ -62,6 +63,9 @@ def train_language_model(
     Accepts optional pre-created optimizer and scheduler for resume scenarios.
     """
     log = (logger.info if logger else print) if is_main_process() else (lambda *a, **k: None)
+
+    counts = get_parameter_counts(model)
+    log(f"Model parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
 
     if optimizer is None:
         optimizer = build_optimizer(model, config)

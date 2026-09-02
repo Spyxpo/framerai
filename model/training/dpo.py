@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..utils import get_parameter_counts
 from .distributed import get_world_size, is_main_process
 from .optim import build_optimizer
 from .precision import autocast_context, resolve_precision
@@ -103,6 +104,8 @@ def train_dpo(
     autocast_dtype, use_scaler = resolve_precision(device, config.precision, config.mixed_precision)
     scaler = torch.amp.GradScaler(device.type) if use_scaler else None
 
+    counts = get_parameter_counts(policy_model)
+    log(f"Model parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
     log(f"Starting DPO Training: beta={beta}, autocast={autocast_dtype}, world_size={get_world_size()}")
 
     policy_model.train()
