@@ -165,8 +165,9 @@ multimodal is the encoders plus the diffusion decoders, and model total is the w
 | `framer-small` | 768 | 12 | 12 / 4 | ~142M | ~142M | ~94M | ~236M |
 | `framer-medium` | 1024 | 24 | 16 / 8 | ~429M | ~429M | ~512M | ~941M |
 | `framer-large` | 2048 | 24 | 16 / 8 | ~1.2B | ~1.2B | ~2.5B | ~3.7B |
-| `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~596M | ~7.8B |
-| `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~536M | ~34B |
+| `framer-3b` | 2560 | 32 | 20 / 4 | ~2.3B | ~2.3B | ~1.01B | ~3.34B |
+| `framer-8b` | 4096 | 32 | 32 / 8 | ~7.2B | ~7.2B | ~2.10B | ~9.28B |
+| `framer-30b-a3b` | 2048 | 28 | 16 / 4 | ~34B | ~3.0B | ~983M | ~34.56B |
 | `framer-160b-a16b` | 4096 | 48 | 32 / 8 | ~152B | ~15B | ~5.4B | ~157B |
 | `framer-200b-a20b` | 5120 | 48 | 40 / 8 | ~193B | ~20B | ~11.5B | ~205B |
 | `framer-1t-a32b` | 8192 | 64 | 64 / 8 | ~983B | ~32B | ~21.1B | ~1.00T |
