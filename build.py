@@ -49,6 +49,7 @@ from model.utils import (
     count_parameters,
     estimate_params,
     get_device,
+    get_parameter_counts,
     human_params,
     load_checkpoint,
 )
@@ -121,8 +122,8 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
 
     check_buildable(config, force=force)
     model = FramerModel(config)
-    num_params = count_parameters(model)
-    logger.info(f"Total trainable parameters: {num_params:,}")
+    counts = get_parameter_counts(model)
+    logger.info(f"Model parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
 
     # Build tokenizer
     logger.info("Building tokenizer...")
@@ -270,7 +271,12 @@ def train_modality_generators(model, tokenizer, config, data_dir, device, max_st
             logger.info(f"No {label} caption pairs found in '{data_dir}'; skipping {label} training.")
             return
         collate_fn = getattr(dataset, "collate_fn", None)
-        loader = DataLoader(dataset, batch_size=max(1, config.batch_size // 2), shuffle=True, collate_fn=collate_fn)
+        loader = DataLoader(
+            dataset,
+            batch_size=max(1, config.batch_size // 2),
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
         logger.info(f"Training {label} generator on {len(dataset)} pairs")
         steps = 0
@@ -400,7 +406,8 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
 
     logger.info(f"Model exported to {export_dir}")
     logger.info(f"  Model: {export_path}")
-    logger.info(f"  Parameters: {count_parameters(model):,}")
+    counts = get_parameter_counts(model)
+    logger.info(f"  Parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
 
 
 def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benchmarks",
