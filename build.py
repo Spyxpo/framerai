@@ -120,7 +120,7 @@ def save_model_info(model: nn.Module, config: FramerConfig, output_dir: str) -> 
     counts = get_parameter_counts(model)
     info = {
         "model_name": "FramerAI",
-        "parameters": counts["total"],
+        "parameters": counts["trainable"],
         "total_parameters": counts["total"],
         "trainable_parameters": counts["trainable"],
         "config": asdict(config),

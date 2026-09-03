@@ -133,6 +133,7 @@ def test_model_info_json_output(tmp_path):
     with open(info_file) as f:
         data_frozen = json.load(f)
 
+    assert data_frozen["parameters"] == 13
     assert data_frozen["total_parameters"] == 68
     assert data_frozen["trainable_parameters"] == 13
     assert data_frozen["total_parameters"] != data_frozen["trainable_parameters"]
