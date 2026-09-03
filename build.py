@@ -41,6 +41,7 @@ from model.training import (
     maybe_wrap_fsdp,
     train_language_model,
 )
+from model.training.distill import train_distill
 from model.training.optim import build_optimizer
 from model.training.schedule import build_scheduler
 from model.utils import (
@@ -669,10 +670,144 @@ def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data
     return policy_model
 
 
+def train_distill_model(
+    config: FramerConfig,
+    output_dir: str,
+    teacher_checkpoint: str,
+    data_dir: str = "data",
+    distill_steps: int = 4,
+    distill_substeps: int = 8,
+    resume: str = None,
+):
+    """Train a distilled few-step student from a trained teacher checkpoint.
+
+    The student learns to match the teacher's guided trajectory segments in
+    single steps, folding classifier-free guidance into the weights. The result
+    is a model that produces comparable images in far fewer denoiser forwards
+    without needing CFG at inference time.
+
+    Args:
+        config: Base FramerConfig (will be modified for student)
+        output_dir: Where to save student checkpoints
+        teacher_checkpoint: Path to trained teacher model checkpoint
+        data_dir: Directory containing image-caption pairs
+        distill_steps: Number of student sampling steps (default 4)
+        distill_substeps: Teacher substeps per student segment (default 8)
+        resume: Optional student checkpoint to resume from
+    """
+    from model.modules.flow import FlowDistiller
+
+    device = get_device(config.device)
+
+    # Distillation requires latent_dit architecture
+    if config.image_gen_arch != "latent_dit":
+        raise ValueError(
+            f"Distillation requires image_gen_arch='latent_dit', got '{config.image_gen_arch}'. "
+            f"Use a preset with latent_dit (e.g., framer-3b, framer-8b) or set --image-gen-arch latent_dit."
+        )
+
+    if is_main_process():
+        logger.info(f"Distillation Training on {device}")
+        logger.info(f"  Teacher checkpoint: {teacher_checkpoint}")
+        logger.info(f"  Student steps: {distill_steps}")
+        logger.info(f"  Teacher substeps per segment: {distill_substeps}")
+
+    # Load teacher model
+    if not os.path.exists(teacher_checkpoint):
+        raise FileNotFoundError(
+            f"Teacher checkpoint not found: {teacher_checkpoint}. "
+            f"Train a latent_dit model first with --mode train."
+        )
+
+    logger.info("Loading teacher model...")
+    teacher_model = FramerModel(config).to(device)
+    step, loss = load_checkpoint(teacher_checkpoint, model=teacher_model)
+    logger.info(f"  Loaded teacher from step {step} (loss: {loss:.4f})")
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+
+    # Create student configuration with flow_distilled=True
+    student_config = FramerConfig(
+        **{
+            **asdict(config),
+            "flow_distilled": True,
+            "flow_distilled_steps": distill_steps,
+        }
+    ).validate()
+
+    logger.info("Creating student model...")
+    student_model = FramerModel(student_config).to(device)
+
+    start_step = 0
+    if resume:
+        logger.info(f"Resuming student from {resume}")
+        start_step, prev_loss = load_checkpoint(resume, model=student_model)
+        logger.info(f"  Loaded student weights from step {start_step} (loss: {prev_loss:.4f})")
+    else:
+        # Initialize student from teacher weights
+        logger.info("Initializing student from teacher weights...")
+        student_model.load_state_dict(teacher_model.state_dict())
+
+    # Load tokenizer
+    tokenizer_path = os.path.join(output_dir, "tokenizer")
+    if not os.path.exists(tokenizer_path):
+        raise FileNotFoundError(
+            f"Tokenizer not found at {tokenizer_path}. Run --mode build first."
+        )
+    tokenizer = FramerTokenizer.load(tokenizer_path)
+
+    # Load image-caption dataset
+    dataset = ImageCaptionDataset(
+        data_dir, tokenizer, resolution=config.image_train_resolution
+    )
+    if len(dataset) == 0:
+        raise ValueError(
+            f"No image-caption pairs found in '{data_dir}'. "
+            f"Distillation requires real image data. Add image/caption pairs to '{data_dir}'."
+        )
+
+    logger.info(f"Loaded {len(dataset)} image-caption pairs from '{data_dir}'")
+    loader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    # Create FlowDistiller
+    distiller = FlowDistiller(
+        teacher_substeps=distill_substeps,
+        method=config.sampler_method,
+    )
+
+    # Don't pre-create optimizer/scheduler - train_distill handles them correctly.
+    # For resume, train_distill will load optimizer/scheduler state from checkpoint.
+    # The optimizer must contain only denoiser+null_context, which train_distill creates.
+    # Run distillation training
+    train_distill(
+        student_config,
+        teacher_model,
+        student_model,
+        loader,
+        device,
+        output_dir,
+        distiller,
+        start_step=start_step,
+        logger=logger,
+        optimizer=None,
+        scheduler=None,
+        resume_checkpoint=resume,
+    )
+
+    logger.info("Distillation training complete.")
+    return student_model
+
+
 def _make_parser() -> argparse.ArgumentParser:
     """Return the argument parser. Extracted so tests can invoke it directly."""
     parser = argparse.ArgumentParser(description="FramerAI Model Builder")
-    parser.add_argument("--mode", choices=["build", "train", "sft", "dpo", "export", "eval", "all"], default="build", help="Operation mode")
+    parser.add_argument("--mode", choices=["build", "train", "sft", "dpo", "distill", "export", "eval", "all"], default="build", help="Operation mode")
     parser.add_argument("--output-dir", default="checkpoints", help="Output directory")
     parser.add_argument("--export-dir", default=None, help="Export directory")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
@@ -686,6 +821,14 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ctc-loss-weight", type=float, default=None,
                         help="Weight for CTC auxiliary loss term")
     parser.add_argument("--beta", type=float, default=0.1, help="DPO beta scale hyperparameter (default 0.1)")
+
+    # Distillation-specific arguments
+    parser.add_argument("--teacher-checkpoint", default=None,
+                        help="Path to teacher checkpoint for distillation (required for --mode distill)")
+    parser.add_argument("--distill-steps", type=int, default=4,
+                        help="Number of student sampling steps (default 4, fewer is faster)")
+    parser.add_argument("--distill-substeps", type=int, default=8,
+                        help="Teacher substeps per student segment (default 8, more is more accurate)")
 
     # Model config overrides
     parser.add_argument("--d-model", type=int, default=None, help="Model dimension")
@@ -833,6 +976,20 @@ def main():
 
     if args.mode == "dpo":
         train_dpo_model(config, args.output_dir, args.data_dir, args.beta, args.resume)
+
+    if args.mode == "distill":
+        if not args.teacher_checkpoint:
+            logger.error("--teacher-checkpoint is required for --mode distill")
+            sys.exit(1)
+        train_distill_model(
+            config,
+            args.output_dir,
+            args.teacher_checkpoint,
+            args.data_dir,
+            args.distill_steps,
+            args.distill_substeps,
+            args.resume,
+        )
 
     if args.mode in ("export", "all"):
         export_model(config, args.output_dir, args.export_dir)
