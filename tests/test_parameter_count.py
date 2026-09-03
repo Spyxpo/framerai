@@ -1,7 +1,10 @@
 """Tests for model parameter count reporting functionality."""
 
+import json
+
 import torch.nn as nn
 
+from build import build_model, export_model, save_model_info
 from conftest import tiny_config
 from model.framer import FramerModel
 from model.utils import count_parameters, get_parameter_counts
@@ -102,3 +105,61 @@ def test_parameter_counts_on_framer_model():
     updated_counts = get_parameter_counts(model)
     assert updated_counts["total"] == manual_total
     assert updated_counts["trainable"] == manual_trainable - num_frozen
+
+
+def test_model_info_json_output(tmp_path):
+    config = tiny_config()
+    model = SimpleDeterministicModel(freeze_fc1=False)
+
+    # Test save_model_info with all trainable parameters
+    save_model_info(model, config, str(tmp_path))
+    info_file = tmp_path / "model_info.json"
+    assert info_file.exists()
+
+    with open(info_file) as f:
+        data = json.load(f)
+
+    assert data["model_name"] == "FramerAI"
+    assert data["total_parameters"] == 68
+    assert data["trainable_parameters"] == 68
+    assert data["parameters"] == 68
+    assert "config" in data
+    assert "modalities" in data
+
+    # Test save_model_info with frozen parameters
+    model_frozen = SimpleDeterministicModel(freeze_fc1=True)
+    save_model_info(model_frozen, config, str(tmp_path))
+
+    with open(info_file) as f:
+        data_frozen = json.load(f)
+
+    assert data_frozen["total_parameters"] == 68
+    assert data_frozen["trainable_parameters"] == 13
+    assert data_frozen["total_parameters"] != data_frozen["trainable_parameters"]
+
+
+def test_build_and_export_model_info(tmp_path):
+    config = tiny_config()
+    build_dir = str(tmp_path / "build_output")
+    export_dir = str(tmp_path / "export_output")
+
+    model, _ = build_model(config, output_dir=build_dir)
+    build_info_path = tmp_path / "build_output" / "model_info.json"
+    assert build_info_path.exists()
+
+    with open(build_info_path) as f:
+        build_data = json.load(f)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    assert build_data["total_parameters"] == total_params
+    assert build_data["trainable_parameters"] == total_params
+
+    export_model(config, output_dir=build_dir, export_dir=export_dir)
+    export_info_path = tmp_path / "export_output" / "model_info.json"
+    assert export_info_path.exists()
+
+    with open(export_info_path) as f:
+        export_data = json.load(f)
+
+    assert export_data["total_parameters"] == total_params
+    assert export_data["trainable_parameters"] == total_params
