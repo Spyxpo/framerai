@@ -16,6 +16,7 @@ import torch
 from model.configs import FramerConfig
 from model.framer import FramerModel
 from model.modules.flow import FlowDistiller
+from model.training import distill as distill_module
 from model.training.distill import train_distill
 
 
@@ -361,3 +362,78 @@ def test_distilled_inference_does_not_apply_cfg_twice():
     expected_calls = batch_size * student_config.flow_distilled_steps
     assert call_count[0] == expected_calls, \
         f"Expected {expected_calls} velocity_fn calls (no CFG doubling), got {call_count[0]}"
+
+
+def test_resume_restores_optimizer_and_scheduler_state():
+    """Resuming from a distillation checkpoint must restore optimizer/scheduler state.
+
+    Exercises train_distill's resume branch directly rather than mocking it, so a
+    broken import or a checkpoint written without optimizer state fails here.
+    """
+    config = tiny_distill_config()
+
+    teacher_model = FramerModel(config)
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+
+    student_config = FramerConfig(**{**config.__dict__, "flow_distilled": True, "max_steps": 2}).validate()
+    student_model = FramerModel(student_config)
+    student_model.load_state_dict(teacher_model.state_dict())
+
+    images = torch.randn(2, 3, 32, 32)
+    captions = torch.randint(0, config.vocab_size, (2, 16))
+
+    class SyntheticDataset:
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, idx):
+            return {"target_images": images[idx], "input_ids": captions[idx]}
+
+    from torch.utils.data import DataLoader
+    loader = DataLoader(SyntheticDataset(), batch_size=2)
+    distiller = FlowDistiller(teacher_substeps=2, method="euler")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # First leg: train two steps and save a checkpoint.
+        train_distill(
+            student_config, teacher_model, student_model, loader,
+            torch.device("cpu"), tmpdir, distiller, start_step=0,
+            log_interval=1, save_interval=2,
+        )
+        ckpt_path = f"{tmpdir}/checkpoint_distill_2.pt"
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        assert "optimizer_state_dict" in ckpt
+        assert "scheduler_state_dict" in ckpt
+
+        # Second leg: resume and run two more steps.
+        resumed_config = FramerConfig(
+            **{**config.__dict__, "flow_distilled": True, "max_steps": 4}
+        ).validate()
+        resumed_model = FramerModel(resumed_config)
+        resumed_model.load_state_dict(ckpt["model_state_dict"])
+
+        scheduler_holder = {}
+        real_build_scheduler = distill_module.build_scheduler
+
+        def capture_scheduler(optimizer, cfg):
+            scheduler = real_build_scheduler(optimizer, cfg)
+            scheduler_holder["scheduler"] = scheduler
+            return scheduler
+
+        distill_module.build_scheduler = capture_scheduler
+        try:
+            final_step = train_distill(
+                resumed_config, teacher_model, resumed_model, loader,
+                torch.device("cpu"), tmpdir, distiller, start_step=2,
+                log_interval=1, save_interval=100,
+                resume_checkpoint=ckpt_path,
+            )
+        finally:
+            distill_module.build_scheduler = real_build_scheduler
+
+        assert final_step == 4
+        # Scheduler picked up the saved state rather than starting from zero.
+        scheduler = scheduler_holder["scheduler"]
+        assert scheduler.last_epoch == ckpt["scheduler_state_dict"]["last_epoch"] + 2

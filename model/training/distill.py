@@ -100,7 +100,7 @@ def train_distill(
 
     # Load optimizer/scheduler state from checkpoint when resuming
     if resume_checkpoint and start_step > 0:
-        from .checkpoint import load_checkpoint as load_ckpt
+        from model.utils import load_checkpoint as load_ckpt
         load_ckpt(resume_checkpoint, model=None, optimizer=optimizer, scheduler=scheduler)
         log(f"Restored optimizer and scheduler state from {resume_checkpoint} at step {start_step}")
 
