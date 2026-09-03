@@ -223,6 +223,7 @@ def test_train_distill_model_creates_student_with_flow_distilled():
         os.makedirs(data_dir)
         # Use a simple RGB array saved as PNG
         import json
+
         import numpy as np
         from PIL import Image
         arr = np.random.randint(0, 255, (32, 32, 3), dtype=np.uint8)
@@ -284,6 +285,7 @@ def test_train_distill_model_initializes_student_from_teacher():
         data_dir = os.path.join(tmpdir, "images")
         os.makedirs(data_dir)
         import json
+
         import numpy as np
         from PIL import Image
         arr = np.random.randint(0, 255, (32, 32, 3), dtype=np.uint8)
@@ -345,6 +347,7 @@ def test_train_distill_model_supports_resume():
         data_dir = os.path.join(tmpdir, "images")
         os.makedirs(data_dir)
         import json
+
         import numpy as np
         from PIL import Image
         arr = np.random.randint(0, 255, (32, 32, 3), dtype=np.uint8)
