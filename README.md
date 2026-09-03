@@ -108,8 +108,9 @@ FramerAI combines several neural architectures into one unified model:
 - **Image decoder** - a KL-VAE compressing 8x into a latent grid plus a **diffusion
   transformer** with adaLN-zero timestep and text conditioning, trained on a **rectified-flow**
   objective and sampled with a 20-50 step ODE solver and **classifier-free guidance** against a
-  learned null-context embedding. Selected by `image_gen_arch`; `unet` keeps the original
-  pixel-space U-Net for the laptop-scale presets.
+  learned null-context embedding. Few-step distilled students (~4 steps) can be trained against
+  a teacher (~50 steps) using `build.py --mode distill`. Selected by `image_gen_arch`;
+  `unet` keeps the original pixel-space U-Net for the laptop-scale presets.
 - **Video decoder** - a **causal 3D VAE** compressing 4x in time and 8x in space, plus a
   **spacetime diffusion transformer** with factorised spatial and temporal attention and
   frame-rate conditioning. Causal convolutions mean frame *t* never sees frame *t+1*, which is
