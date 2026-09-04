@@ -13,10 +13,11 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
 - [x] Add unit tests for the backend routes and WebSocket service (node:test with supertest).
 - [x] Add component tests for the website (Vitest, Testing Library, jsdom) and an ESLint flat
       config, both blocking in CI. The website previously had no lint and no test leg at all.
-- [ ] Extend website component tests past the settings panel to the full chat flow.
+- [x] Extend website component tests past the settings panel to the full chat flow
+      (`website/src/test/Chat.test.jsx`).
 - [ ] Add end-to-end smoke tests that boot the backend and exercise the core endpoints.
 - [x] Add code coverage reporting to CI (`pytest --cov`, uploaded as an artifact).
-- [ ] Publish a coverage badge.
+- [x] Publish a coverage badge (Codecov, in the README header).
 - [ ] Introduce pre-commit hooks running ruff and lightweight JS checks.
 
 ## Model and training
@@ -71,6 +72,33 @@ Legend: `[ ]` open, `[x]` done, `[~]` in progress.
       a command from the website instead of the worker refusing for want of one.
 - [x] Add ONNX export and a safetensors round-trip validation test.
 
+### Correctness defects
+
+Each of these is a path that runs to completion and produces a wrong result rather than
+an error, which is why they are listed apart from the capability work above.
+
+- [ ] Dispatch off-rank tokens in the MoE forward. `shard_experts` sets `ep_plan`, nothing
+      reads it, and `all_to_all_dispatch`/`all_to_all_combine` have no call sites, so a
+      sharded run silently drops every expert contribution it does not own (#230).
+- [ ] Drop the `is_main_process()` guard around the checkpoint gather. `gather_full_state_dict`
+      is a collective and only rank 0 enters it, so a distributed run deadlocks at the first
+      save interval (#231).
+- [ ] Validate `precision` in `FramerConfig.validate()` and raise in `resolve_precision`.
+      An unrecognised value falls through to fp32 with no warning (#232).
+- [ ] Restore scheduler state on a sharded resume. Distributed checkpointing loads in place
+      and the load path seeds an empty dict, so the schedule silently restarts (#233).
+- [ ] Keep the assistant turn when an SFT sample exceeds `max_len`. Head truncation leaves
+      every label masked, and the mean cross-entropy over an empty target set is NaN (#234).
+- [ ] Add `allowed_special` to `FramerTokenizer.encode`. Control markers appearing in user
+      text are mapped to real special tokens, which forges a role boundary (#235).
+- [ ] Close the CLI sandbox gaps: `--cli-mode off` still permits `read_file` and `list_dir`,
+      the default allowlist carries interpreters, paths inside flags escape the root check,
+      and the caller's timeout replaces the policy's instead of being clamped (#236).
+- [ ] Revalidate every redirect hop in `web_fetch`. `check_url` runs once and `urlopen`
+      follows redirects, so the SSRF guard covers only the first URL (#237).
+- [ ] Fill the sampler gaps: repetition penalty, stop sequences, a per-request seed, a greedy
+      path for `temperature=0`, and token streaming (#243).
+
 ## Architecture roadmap — reaching frontier-class output
 
 Parameter count is the ceiling, not the quality. The current decoders cannot reach
@@ -89,7 +117,8 @@ it. Training compute and licensed data remain a separate, external problem.
       scaling, validated against the scaling factor, with chunked prefill so the window is
       reachable and a KV-cache figure in `--estimate` so its cost is visible.
 - [ ] Add a reasoning segment to the chat template, with its own special tokens, so a
-      thinking span is part of the trained format rather than prose the model happens to emit.
+      thinking span is part of the trained format rather than prose the model happens to
+      emit, and is maskable independently of the answer (#244).
 - [ ] Add a reasoning budget and a reasoning-effort control (off / low / medium / high)
       through `build.py`, `model/serve.py`, the backend routes and the website settings panel.
 - [ ] Add self-consistency and a verification pass as opt-in test-time compute strategies.
@@ -167,7 +196,8 @@ it. Training compute and licensed data remain a separate, external problem.
 - [ ] Wire the CTC head into the training loop; the module exists but nothing calls it yet.
 - [ ] Adversarial and multi-scale spectral losses for the codec (MSE alone under-trains it).
 - [ ] Prosody conditioning beyond speaker identity.
-- [ ] Streaming audio generation and playback over the WebSocket.
+- [x] Streaming audio generation and playback over the WebSocket
+      (`backend/src/services/websocket.js`, `StreamingAudioPlayer.jsx`).
 - [ ] Mel-spectrogram cache to speed up audio training.
 
 ### Understanding
@@ -228,8 +258,9 @@ it. Training compute and licensed data remain a separate, external problem.
       per sense, and ask for the reply in the language the input was in.
 - [x] Expose it from the inference worker behind `--mind PATH`, leaving the default path
       byte-identical.
-- [ ] Wire the trace (recalled memories, affect, sampling) into the backend and the website,
-      so a user can see why an answer came out the way it did.
+- [x] Wire the trace (recalled memories, affect, sampling) into the backend and the website,
+      so a user can see why an answer came out the way it did. Forwarding is gated on the
+      operator context, since a trace carries recalled user content.
 - [ ] Implement a real `train_step` for sleep: LoRA or a small-LR update over replayed
       episodes, with a guard against catastrophic forgetting, and measure it.
 - [ ] Replace the fixed random projection in the experience encoder with a learned one
@@ -243,19 +274,32 @@ it. Training compute and licensed data remain a separate, external problem.
 
 - [x] Add request validation and consistent error responses across all routes.
 - [x] Add rate limiting and payload size limits to generation endpoints.
-- [ ] Add structured logging and a request id for traceability.
+- [x] Add structured logging and a request id for traceability
+      (`backend/src/services/logger.js`, `backend/src/middleware/requestId.js`).
 - [x] Derive input limits from the loaded model rather than from fixed constants,
       and share the conversation store between the REST and WebSocket paths.
 - [x] Add OpenAPI or a documented schema for the REST API.
 - [x] Pool or reuse the inference worker under concurrent load.
+- [ ] Escalate to `SIGKILL` and run the exit handler when a request times out. A worker
+      wedged inside a torch call never reaps `SIGTERM`, so it holds its pool slot for the
+      life of the process while `available()` still reports the model as up (#238).
+- [ ] Key the WebSocket rate limiter the way Express keys `req.ip`. The leftmost
+      `X-Forwarded-For` entry is client-supplied, so the shared generation limit can be
+      sidestepped by switching transport (#239).
 
 ## Frontend
 
 - [x] Add loading, empty, and error states to the chat and generation views.
 - [x] Add accessibility passes for keyboard navigation and screen readers.
 - [x] Add a settings panel for model size, temperature, and sampling controls.
-- [ ] Add persistence of conversations to local storage.
+- [x] Add persistence of conversations to local storage (`website/src/utils/storage.js`).
 - [ ] Add a production build and static hosting guide.
+- [ ] Escape message content instead of rendering it through `dangerouslySetInnerHTML`.
+      `react-markdown` is already a dependency and is not used on that path (#240).
+- [ ] Apply a stream frame only to the conversation it names, and replace messages
+      immutably. Switching conversations mid-stream writes into the wrong one (#241).
+- [ ] Send the selected image size as `tier`. The panel emits `sizeTier`, which the backend
+      validator does not recognise and drops (#242).
 
 ## Documentation
 
@@ -267,9 +311,11 @@ it. Training compute and licensed data remain a separate, external problem.
 ## DevOps and CI/CD
 
 - [x] Build the model, backend, and website images in CI on every change.
-- [ ] Add a release workflow that tags versions and drafts release notes.
-- [ ] Add container image publishing to a registry on release.
-- [ ] Add caching for Python dependencies to speed up CI.
+- [x] Add a release workflow that tags versions and drafts release notes
+      (`.github/workflows/release.yml`).
+- [x] Add container image publishing to a registry on release (GHCR, from the release
+      workflow).
+- [x] Add caching for Python dependencies to speed up CI (`cache: pip` on every leg).
 - [ ] Add a workflow that validates documentation links.
 
 ## Community and governance
