@@ -47,7 +47,6 @@ from model.training.schedule import build_scheduler
 from model.utils import (
     MULTIMODAL_TOWERS,
     apply_seed,
-    count_parameters,
     estimate_params,
     get_device,
     get_parameter_counts,
@@ -116,6 +115,24 @@ def check_buildable(config: FramerConfig, force: bool = False):
     )
 
 
+def save_model_info(model: nn.Module, config: FramerConfig, output_dir: str) -> dict:
+    """Generate and save model_info.json containing parameter counts and configuration."""
+    counts = get_parameter_counts(model)
+    info = {
+        "model_name": "FramerAI",
+        "parameters": counts["trainable"],
+        "total_parameters": counts["total"],
+        "trainable_parameters": counts["trainable"],
+        "config": asdict(config),
+        "modalities": ["text", "code", "image", "video", "audio"],
+    }
+    os.makedirs(output_dir, exist_ok=True)
+    info_path = os.path.join(output_dir, "model_info.json")
+    with open(info_path, "w") as f:
+        json.dump(info, f, indent=2)
+    return info
+
+
 def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", force: bool = False):
     """Initialize model architecture and save initial checkpoint."""
     logger.info("Building FramerAI model...")
@@ -162,9 +179,10 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
 
     tokenizer.save(os.path.join(output_dir, "tokenizer"))
 
-    # Save config
+    # Save config and model info
     with open(os.path.join(output_dir, "config.json"), "w") as f:
         json.dump(asdict(config), f, indent=2)
+    save_model_info(model, config, output_dir)
 
     logger.info(f"Model saved to {checkpoint_path}")
     logger.info(f"Tokenizer saved to {os.path.join(output_dir, 'tokenizer')}")
@@ -396,19 +414,11 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
         shutil.copytree(tokenizer_src, tokenizer_dst)
 
     # Save model info
-    info = {
-        "model_name": "FramerAI",
-        "parameters": count_parameters(model),
-        "config": asdict(config),
-        "modalities": ["text", "code", "image", "video", "audio"],
-    }
-    with open(os.path.join(export_dir, "model_info.json"), "w") as f:
-        json.dump(info, f, indent=2)
+    info = save_model_info(model, config, export_dir)
 
     logger.info(f"Model exported to {export_dir}")
     logger.info(f"  Model: {export_path}")
-    counts = get_parameter_counts(model)
-    logger.info(f"  Parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
+    logger.info(f"  Parameters: total={info['total_parameters']:,} | trainable={info['trainable_parameters']:,}")
 
 
 def eval_model(config: FramerConfig, output_dir: str, benchmark_dir: str = "benchmarks",
