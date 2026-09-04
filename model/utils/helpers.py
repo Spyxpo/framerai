@@ -39,24 +39,70 @@ def get_parameter_counts(model: nn.Module) -> dict[str, int]:
 
 
 def get_component_parameter_counts(model: nn.Module) -> dict[str, dict[str, int]]:
-    """Return total and trainable parameter counts for top-level submodules of a PyTorch module."""
+    """Return total and trainable parameter counts for top-level submodules of a PyTorch module.
+
+    Parameters are globally deduplicated by id(param) so that tied weights (e.g., lm_head.weight
+    tied to token_embed.weight) are counted only under the first component that owns them.
+    The sum of component counts will match the model's total and trainable parameter counts.
+    """
+    seen = set()
     components = {}
+
     for name, module in model.named_children():
-        components[name] = get_parameter_counts(module)
+        tot = 0
+        trn = 0
+        for p in module.parameters():
+            pid = id(p)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            n = p.numel()
+            tot += n
+            if p.requires_grad:
+                trn += n
+        components[name] = {"total": tot, "trainable": trn}
+
+    # Catch any parameters attached directly to root model (outside named_children)
+    other_tot = 0
+    other_trn = 0
+    for p in model.parameters():
+        pid = id(p)
+        if pid not in seen:
+            seen.add(pid)
+            n = p.numel()
+            other_tot += n
+            if p.requires_grad:
+                other_trn += n
+
+    if other_tot > 0:
+        components["other"] = {"total": other_tot, "trainable": other_trn}
+
     return components
 
 
-def format_model_summary(model: nn.Module, model_name: str = "FramerAI") -> str:
+def format_model_summary(
+    model: nn.Module,
+    model_name: str = "FramerAI",
+    preset: str | None = None,
+) -> str:
     """Format a human-readable model summary block with component breakdown and totals."""
     counts = get_parameter_counts(model)
     components = get_component_parameter_counts(model)
 
+    if preset is None:
+        config = getattr(model, "config", None)
+        preset = getattr(config, "preset", None)
+
+    title = f"Model Summary: {model_name}"
+    if preset:
+        title += f" (preset: {preset})"
+
     comp_width = max([28] + [len(name) for name in components])
-    total_width = max(60, comp_width + 34)
+    total_width = max(60, comp_width + 34, len(title))
 
     lines = [
         "=" * total_width,
-        f"Model Summary: {model_name}",
+        title,
         "=" * total_width,
     ]
 

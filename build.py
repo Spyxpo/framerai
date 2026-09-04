@@ -141,7 +141,7 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
 
     check_buildable(config, force=force)
     model = FramerModel(config)
-    summary = format_model_summary(model, model_name="FramerAI")
+    summary = format_model_summary(model, model_name="FramerAI", preset=config.preset)
     for line in summary.splitlines():
         logger.info(line)
 

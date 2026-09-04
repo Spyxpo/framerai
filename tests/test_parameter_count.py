@@ -200,8 +200,17 @@ def test_component_parameter_counts_framer_model():
     assert "norm" in components
     assert "lm_head" in components
 
-    total_sum_components = sum(c["total"] for c in components.values())
-    assert total_sum_components >= count_parameters(model, trainable_only=False)
+    model_counts = get_parameter_counts(model)
+    total_sum = sum(c["total"] for c in components.values())
+    trainable_sum = sum(c["trainable"] for c in components.values())
+
+    # Exact equality with model totals (no double counting of tied parameters)
+    assert total_sum == model_counts["total"]
+    assert trainable_sum == model_counts["trainable"]
+
+    # Weight-tying attribution: token_embed is visited first, so lm_head adds 0 new parameters
+    assert components["token_embed"]["total"] > 0
+    assert components["lm_head"]["total"] == 0
 
 
 def test_format_model_summary():
@@ -216,6 +225,9 @@ def test_format_model_summary():
     assert "Total Parameters:     68" in summary
     assert "Trainable Parameters: 13" in summary
 
+    summary_preset = format_model_summary(model, model_name="TestModel", preset="framer-small")
+    assert "Model Summary: TestModel (preset: framer-small)" in summary_preset
+
     summary_again = format_model_summary(model, model_name="TestModel")
     assert summary == summary_again
 
@@ -224,13 +236,13 @@ def test_build_model_logs_summary(caplog, tmp_path):
     import logging
 
     caplog.set_level(logging.INFO)
-    config = tiny_config()
+    config = tiny_config(preset="framer-small")
     build_dir = str(tmp_path / "build_output")
 
     build_model(config, output_dir=build_dir)
 
     log_text = caplog.text
-    assert "Model Summary: FramerAI" in log_text
+    assert "Model Summary: FramerAI (preset: framer-small)" in log_text
     assert "Component Breakdown:" in log_text
     assert "Total Parameters:" in log_text
     assert "Trainable Parameters:" in log_text
