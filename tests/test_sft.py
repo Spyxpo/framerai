@@ -99,3 +99,40 @@ def test_sft_training_pass(tmp_path):
 
     assert final_step == 2
     assert os.path.exists(tmp_path / "output" / "model_final.pt")
+
+
+def test_sft_dataset_all_masked_labels_rejected(tmp_path):
+    """Regression test for Issue #234: Sample with no assistant target tokens (all labels == -100) is rejected."""
+    import pytest
+
+    tokenizer = FramerTokenizer(vocab_size=400)
+    sft_path = tmp_path / "no_assistant.jsonl"
+    # A conversation record that has user messages but no assistant response turn
+    sft_path.write_text('{"messages": [{"role": "user", "content": "Just user prompt"}]}\n')
+
+    with pytest.raises(ValueError, match="contains no target tokens"):
+        SFTDataset(str(sft_path), tokenizer, max_len=64)
+
+
+def test_nan_loss_safeguard_for_all_ignored_labels():
+    """Regression test for Issue #234: Batch with all-ignored labels (-100) must not produce NaN loss or NaN gradients."""
+    config = FramerConfig.from_preset("framer-tiny")
+    model = FramerModel(config)
+    model.train()
+
+    input_ids = torch.randint(0, config.vocab_size, (2, 16))
+    labels = torch.full((2, 16), -100, dtype=torch.long)
+
+    results = model(input_ids=input_ids, labels=labels)
+
+    assert "text_loss" in results
+    loss = results["text_loss"]
+
+    assert not torch.isnan(loss), "Loss must not be NaN when all labels are -100"
+    assert loss.item() == 0.0
+
+    # Ensure backward pass runs without producing NaN gradients
+    loss.backward()
+    for param in model.parameters():
+        if param.grad is not None:
+            assert not torch.isnan(param.grad).any(), "Gradients must not contain NaN"
