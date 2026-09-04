@@ -278,10 +278,10 @@ across the switch.
 
 | Field | Default | Alternative | Set by |
 |---|---|---|---|
-| `image_gen_arch` | `unet` | `latent_dit` | the four large MoE presets |
-| `video_gen_arch` | `unet3d` | `spacetime_dit` | the four large MoE presets |
-| `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | the four large MoE presets |
-| `vocoder_arch` | `griffin_lim` | `istft` | the four large MoE presets |
+| `image_gen_arch` | `unet` | `latent_dit` | `framer-3b`, `framer-8b`, `framer-30b-a3b`, and trillion-scale presets |
+| `video_gen_arch` | `unet3d` | `spacetime_dit` | trillion-scale presets (`framer-160b-a16b` and above) |
+| `audio_gen_arch` | `mel_diffusion` | `rvq_lm` | trillion-scale presets (`framer-160b-a16b` and above) |
+| `vocoder_arch` | `griffin_lim` | `istft` | trillion-scale presets (`framer-160b-a16b` and above) |
 | `mm_token_placement` | `prefix` | `interleaved` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
 | `vision_tiling` | `False` | `True` | `framer-1t-a32b`, `framer-2t-a49b`, `framer-3t-a64b` |
 
@@ -302,6 +302,14 @@ The latent path brings three things the U-Net did not have:
   learned `null_context` embedding during training; at inference the conditional and
   unconditional fields are evaluated in one batch-doubled forward and extrapolated apart by
   `cfg_scale`. The README advertised this from the beginning and no such code existed until now.
+
+##### Few-step distillation
+
+A teacher model uses the standard multi-step sampling path (typically 50 steps with classifier-free guidance, requiring two denoiser forwards per step). A distilled student can be trained to cover the same trajectory segment in one step by learning the teacher's guided flow field directly. The student sets `flow_distilled=True` and `flow_distilled_steps` (typically 2-4 steps), which configures the sampler to skip the guidance pair and evaluate only the conditional field. This reduces the theoretical sampling cost by avoiding the unconditional forward at every step.
+
+Distillation training is available through `build.py --mode distill`, which trains a student model against a frozen teacher checkpoint using the `FlowDistiller` objective (`model/modules/flow.py`). The training infrastructure is wired into `model/training/distill.py` and tested through `tests/test_distill_training.py` and `tests/test_build_distill.py`.
+
+The `benchmarks/distillation_image_gen.py` script benchmarks a teacher-student pair on wall-clock inference time, theoretical sampling cost, text-image alignment, and optionally FID against real images. See `benchmarks/README.md` for usage.
 
 Positions in the transformer come from an on-the-fly 2D sin-cos grid rather than a learned
 table, so one set of weights denoises any resolution and aspect ratio the VAE can produce.

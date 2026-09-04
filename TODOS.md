@@ -124,9 +124,11 @@ it. Training compute and licensed data remain a separate, external problem.
 - [x] Few-step sampling (`FlowDistiller`): the student learns the guided field, so
       a step is one denoiser forward instead of two and the count drops to single
       digits. Four steps against fifty is twenty-five times fewer calls.
-- [ ] Train a distilled student and report it against the teacher on the same
-      checkpoint. The objective and the cost accounting are in; nothing has been
-      distilled yet.
+- [x] Distillation training infrastructure (`build.py --mode distill`,
+      `model/training/distill.py`) and benchmarking script
+      (`benchmarks/distillation_image_gen.py`) are complete and tested. Training
+      a production distilled checkpoint on real data and reporting measured
+      benchmark results remains external work.
 - [x] Move `framer-3b`, `framer-8b` and `framer-30b-a3b` off the 1000-step pixel
       U-Net. The README justifies `unet` for laptop presets, which does not
       describe a 30B mixture-of-experts. Changing them shifts their reported
