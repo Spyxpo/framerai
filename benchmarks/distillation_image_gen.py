@@ -37,9 +37,13 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# Allow running as a plain script (python benchmarks/distillation_image_gen.py) too.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from PIL import Image
