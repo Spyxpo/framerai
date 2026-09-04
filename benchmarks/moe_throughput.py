@@ -10,7 +10,12 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import time
+
+# Allow running as a plain script (python benchmarks/moe_throughput.py) too.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
