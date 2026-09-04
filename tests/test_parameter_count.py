@@ -7,7 +7,12 @@ import torch.nn as nn
 from build import build_model, export_model, save_model_info
 from conftest import tiny_config
 from model.framer import FramerModel
-from model.utils import count_parameters, get_parameter_counts
+from model.utils import (
+    count_parameters,
+    format_model_summary,
+    get_component_parameter_counts,
+    get_parameter_counts,
+)
 
 
 class SimpleDeterministicModel(nn.Module):
@@ -164,3 +169,68 @@ def test_build_and_export_model_info(tmp_path):
 
     assert export_data["total_parameters"] == total_params
     assert export_data["trainable_parameters"] == total_params
+
+
+def test_component_parameter_counts():
+    model = SimpleDeterministicModel(freeze_fc1=False)
+    components = get_component_parameter_counts(model)
+
+    assert "fc1" in components
+    assert "fc2" in components
+    assert "fc3" in components
+    assert components["fc1"] == {"total": 55, "trainable": 55}
+    assert components["fc2"] == {"total": 10, "trainable": 10}
+    assert components["fc3"] == {"total": 3, "trainable": 3}
+
+    model_frozen = SimpleDeterministicModel(freeze_fc1=True)
+    components_frozen = get_component_parameter_counts(model_frozen)
+
+    assert components_frozen["fc1"] == {"total": 55, "trainable": 0}
+    assert components_frozen["fc2"] == {"total": 10, "trainable": 10}
+    assert components_frozen["fc3"] == {"total": 3, "trainable": 3}
+
+
+def test_component_parameter_counts_framer_model():
+    config = tiny_config()
+    model = FramerModel(config)
+    components = get_component_parameter_counts(model)
+
+    assert "token_embed" in components
+    assert "layers" in components
+    assert "norm" in components
+    assert "lm_head" in components
+
+    total_sum_components = sum(c["total"] for c in components.values())
+    assert total_sum_components >= count_parameters(model, trainable_only=False)
+
+
+def test_format_model_summary():
+    model = SimpleDeterministicModel(freeze_fc1=True)
+    summary = format_model_summary(model, model_name="TestModel")
+
+    assert "Model Summary: TestModel" in summary
+    assert "Component Breakdown:" in summary
+    assert "fc1" in summary
+    assert "fc2" in summary
+    assert "fc3" in summary
+    assert "Total Parameters:     68" in summary
+    assert "Trainable Parameters: 13" in summary
+
+    summary_again = format_model_summary(model, model_name="TestModel")
+    assert summary == summary_again
+
+
+def test_build_model_logs_summary(caplog, tmp_path):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    config = tiny_config()
+    build_dir = str(tmp_path / "build_output")
+
+    build_model(config, output_dir=build_dir)
+
+    log_text = caplog.text
+    assert "Model Summary: FramerAI" in log_text
+    assert "Component Breakdown:" in log_text
+    assert "Total Parameters:" in log_text
+    assert "Trainable Parameters:" in log_text

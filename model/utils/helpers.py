@@ -38,6 +38,50 @@ def get_parameter_counts(model: nn.Module) -> dict[str, int]:
     return {"total": total, "trainable": trainable}
 
 
+def get_component_parameter_counts(model: nn.Module) -> dict[str, dict[str, int]]:
+    """Return total and trainable parameter counts for top-level submodules of a PyTorch module."""
+    components = {}
+    for name, module in model.named_children():
+        components[name] = get_parameter_counts(module)
+    return components
+
+
+def format_model_summary(model: nn.Module, model_name: str = "FramerAI") -> str:
+    """Format a human-readable model summary block with component breakdown and totals."""
+    counts = get_parameter_counts(model)
+    components = get_component_parameter_counts(model)
+
+    comp_width = max([28] + [len(name) for name in components])
+    total_width = max(60, comp_width + 34)
+
+    lines = [
+        "=" * total_width,
+        f"Model Summary: {model_name}",
+        "=" * total_width,
+    ]
+
+    if components:
+        lines.extend([
+            "Component Breakdown:",
+            "-" * total_width,
+            f"  {'Component':<{comp_width}s} {'Total Params':>14s} {'Trainable Params':>16s}",
+            "-" * total_width,
+        ])
+        for name, comp_counts in components.items():
+            tot = comp_counts["total"]
+            trn = comp_counts["trainable"]
+            lines.append(f"  {name:<{comp_width}s} {tot:>14,} {trn:>16,}")
+        lines.append("-" * total_width)
+
+    lines.extend([
+        f"Total Parameters:     {counts['total']:,}",
+        f"Trainable Parameters: {counts['trainable']:,}",
+        "=" * total_width,
+    ])
+
+    return "\n".join(lines)
+
+
 def human_params(n: float) -> str:
     for unit, div in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if abs(n) >= div:

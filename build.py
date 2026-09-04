@@ -48,6 +48,7 @@ from model.utils import (
     MULTIMODAL_TOWERS,
     apply_seed,
     estimate_params,
+    format_model_summary,
     get_device,
     get_parameter_counts,
     human_params,
@@ -140,8 +141,9 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
 
     check_buildable(config, force=force)
     model = FramerModel(config)
-    counts = get_parameter_counts(model)
-    logger.info(f"Model parameters: total={counts['total']:,} | trainable={counts['trainable']:,}")
+    summary = format_model_summary(model, model_name="FramerAI")
+    for line in summary.splitlines():
+        logger.info(line)
 
     # Build tokenizer
     logger.info("Building tokenizer...")
