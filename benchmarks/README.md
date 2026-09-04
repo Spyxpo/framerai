@@ -107,3 +107,83 @@ If benchmark files are not found, the evaluation harness will:
 3. Exit with an error if all suites were skipped
 
 This ensures missing data never produces fake results.
+
+## Distillation Benchmarking
+
+The `distillation_image_gen.py` script benchmarks distilled image generation models, comparing a multi-step teacher against a few-step distilled student.
+
+### Metrics Measured
+
+- **Wall-clock timing**: Latency (ms/image) and throughput (images/sec)
+- **Theoretical cost**: Denoiser forward passes using `sampling_cost()`
+- **Text-image alignment**: Contrastive similarity between captions and generated images
+- **FID** (optional): Frechet distance against real images when `--real-images-dir` is provided
+
+### Usage
+
+```bash
+# Basic benchmark with built-in captions
+python benchmarks/distillation_image_gen.py \
+    --teacher checkpoints/teacher.pt \
+    --student checkpoints/student.pt \
+    --tokenizer tokenizer/ \
+    --device cuda:0
+
+# With FID calculation against real validation images
+python benchmarks/distillation_image_gen.py \
+    --teacher checkpoints/teacher.pt \
+    --student checkpoints/student.pt \
+    --tokenizer tokenizer/ \
+    --real-images-dir data/validation_images/ \
+    --output results.json
+
+# CPU testing with custom captions
+python benchmarks/distillation_image_gen.py \
+    --teacher checkpoints/teacher.pt \
+    --student checkpoints/student.pt \
+    --tokenizer tokenizer/ \
+    --device cpu \
+    --resolution 64 \
+    --num-images 16 \
+    --captions captions.txt
+```
+
+### Requirements
+
+- Teacher checkpoint must have `flow_distilled=False` and `image_gen_arch="latent_dit"`
+- Student checkpoint must have `flow_distilled=True` and `image_gen_arch="latent_dit"`
+- Both checkpoints must be explicit CLI arguments (no inference)
+
+### Reproducibility
+
+- Default seed: 42 (override with `--seed`)
+- Built-in deterministic captions when `--captions` is not provided
+- Caption cycling: If fewer captions than `--num-images`, cycles deterministically
+
+### FID Calculation
+
+FID is **only** computed when `--real-images-dir` is provided:
+- Real images from that directory serve as the reference distribution
+- Without `--real-images-dir`, FID is reported as `null`
+- Teacher-generated images are **never** used as fake "real" images
+
+### Output
+
+- Human-readable table to stdout
+- Optional JSON output via `--output results.json` containing:
+  - Checkpoint paths and configurations
+  - Timing metrics for teacher and student
+  - Theoretical and measured speedup
+  - Alignment scores
+  - FID scores (or null if unavailable)
+  - Timestamp
+
+### Performance Benchmarking Pattern
+
+The script follows the established pattern from `moe_throughput.py`:
+- Warmup iterations (default 3, configurable via `--n-warmup`)
+- `torch.cuda.synchronize()` before/after CUDA timing
+- CPU compatibility (no CUDA calls when `device="cpu"`)
+- Report both latency and throughput
+
+**Do not hard-code or assert expected speedup values** - they are hardware and model dependent.
