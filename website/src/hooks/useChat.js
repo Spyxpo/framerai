@@ -21,6 +21,12 @@ export function useChat(settings) {
   const [denyEverything, setDenyEverything] = useState(false);
   const wsRef = useRef(null);
 
+  // Track active conversation in a ref so WebSocket handlers see current value
+  const activeConversationRef = useRef(activeConversation);
+  useEffect(() => {
+    activeConversationRef.current = activeConversation;
+  }, [activeConversation]);
+
   // Read through a ref so sendMessage always sees the current settings without
   // being rebuilt every time a slider moves.
   const settingsRef = useRef(settings);
@@ -73,6 +79,14 @@ export function useChat(settings) {
     });
 
     ws.on("stream", (data) => {
+      // ISSUE #241 FIX: Only apply stream frames to the conversation they belong to.
+      // Ignore frames for conversations that aren't currently active to prevent
+      // streamed tokens from appearing in whichever conversation is displayed.
+      if (data.conversationId && data.conversationId !== activeConversationRef.current) {
+        // Stream is for a different conversation - ignore it
+        return;
+      }
+
       if (data.type === "error") {
         // Server sent an error event mid-stream
         setStreaming(false);
