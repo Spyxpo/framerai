@@ -1,5 +1,7 @@
 """Unit tests for ChatTemplate, versioned chat formatting, next-token alignment, and real tool parser integration."""
 
+import torch
+
 from model.tokenizer import ChatTemplate, FramerTokenizer
 from model.tools.base import ToolRegistry
 from model.tools.loop import parse_tool_call, render_prompt
@@ -204,3 +206,60 @@ def test_serve_path_chat_template_single_application(monkeypatch):
     assert "Tools:" in p4
     assert "<user>what is rectified flow" in p4
     assert p4.endswith("<assistant>")
+
+
+def test_left_truncation_preserves_assistant_turn():
+    """Regression test for Issue #234: Over-long conversation must be left-truncated to keep newest assistant tokens."""
+    tokenizer = FramerTokenizer(vocab_size=300)
+    template = ChatTemplate("v1")
+
+    # Long user prompt + short assistant answer
+    long_user_text = "lorem ipsum " * 50
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": long_user_text},
+        {"role": "assistant", "content": "Final assistant response."},
+    ]
+
+    max_len = 32
+    encoded = template.encode_conversation(messages, tokenizer, max_len=max_len, pad_to_max=True)
+
+    input_ids = encoded["input_ids"]
+    labels = encoded["labels"]
+    attention_mask = encoded["attention_mask"]
+
+    assert len(input_ids) == max_len
+    assert len(labels) == max_len
+    assert len(attention_mask) == max_len
+
+    # Assistant target tokens MUST survive in labels
+    non_masked = (labels != -100).nonzero(as_tuple=True)[0]
+    assert len(non_masked) > 0, "Left truncation must preserve the assistant response tokens at the end"
+
+    # Verify rightmost tokens match the end of the full conversation (left truncation)
+    full_encoded = template.encode_conversation(messages, tokenizer, max_len=10000, pad_to_max=False)
+    expected_input_ids = full_encoded["input_ids"][-max_len:]
+    assert torch.equal(input_ids, expected_input_ids)
+
+
+def test_attention_mask_returned_and_correct():
+    """Verify attention_mask is returned and accurately marks real tokens vs padding."""
+    tokenizer = FramerTokenizer(vocab_size=300)
+    template = ChatTemplate("v1")
+
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+
+    encoded_short = template.encode_conversation(messages, tokenizer, max_len=64, pad_to_max=True)
+    assert "attention_mask" in encoded_short
+
+    mask = encoded_short["attention_mask"]
+    input_ids = encoded_short["input_ids"]
+    assert mask.shape == (64,)
+
+    # Real tokens should have mask == 1, pad tokens should have mask == 0
+    num_real = sum(1 for tok in input_ids.tolist() if tok != tokenizer.pad_id)
+    assert (mask[:num_real] == 1).all()
+    assert (mask[num_real:] == 0).all()

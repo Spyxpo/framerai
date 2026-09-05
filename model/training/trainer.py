@@ -91,9 +91,14 @@ def train_language_model(
             batch = next(batches)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
+            attention_mask = (
+                batch["attention_mask"].to(device, non_blocking=True)
+                if "attention_mask" in batch
+                else None
+            )
 
             with autocast_context(device, autocast_dtype):
-                results = model(input_ids=input_ids, labels=labels)
+                results = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = results["loss"] / accum
 
             if scaler is not None:
