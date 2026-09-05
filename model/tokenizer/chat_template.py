@@ -156,14 +156,20 @@ class ChatTemplate:
         labels = [tok if target else -100 for tok, target in zip(raw_labels, target_mask, strict=False)]
 
         if len(input_ids) > max_len:
-            input_ids = input_ids[:max_len]
-            labels = labels[:max_len]
+            input_ids = input_ids[-max_len:]
+            labels = labels[-max_len:]
+            attention_mask = [1] * max_len
         elif pad_to_max and len(input_ids) < max_len:
-            pad_len = max_len - len(input_ids)
+            seq_len = len(input_ids)
+            pad_len = max_len - seq_len
             input_ids.extend([tokenizer.pad_id] * pad_len)
             labels.extend([-100] * pad_len)
+            attention_mask = [1] * seq_len + [0] * pad_len
+        else:
+            attention_mask = [1] * len(input_ids)
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
         }

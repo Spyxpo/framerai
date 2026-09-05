@@ -169,7 +169,7 @@ class SFTDataset(Dataset):
 
         for path in paths:
             with open(path, encoding="utf-8", errors="replace") as f:
-                for line in f:
+                for line_idx, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
@@ -181,6 +181,10 @@ class SFTDataset(Dataset):
                     messages = self._parse_record(record)
                     if messages:
                         item = self.template.encode_conversation(messages, tokenizer, max_len=max_len)
+                        if not (item["labels"] != -100).any():
+                            raise ValueError(
+                                f"SFT sample at line {line_idx} in '{path}' (record: {record}) contains no target tokens (all labels are -100)."
+                            )
                         self.samples.append(item)
 
     def _parse_record(self, record: dict) -> list[dict]:
@@ -230,7 +234,7 @@ class DPODataset(Dataset):
 
         for path in paths:
             with open(path, encoding="utf-8", errors="replace") as f:
-                for line in f:
+                for line_idx, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
@@ -243,11 +247,21 @@ class DPODataset(Dataset):
                     if pair:
                         chosen_item = self.template.encode_conversation(pair["chosen"], tokenizer, max_len=max_len)
                         rejected_item = self.template.encode_conversation(pair["rejected"], tokenizer, max_len=max_len)
+                        if not (chosen_item["labels"] != -100).any():
+                            raise ValueError(
+                                f"DPO chosen sample at line {line_idx} in '{path}' (record: {record}) contains no target tokens (all labels are -100)."
+                            )
+                        if not (rejected_item["labels"] != -100).any():
+                            raise ValueError(
+                                f"DPO rejected sample at line {line_idx} in '{path}' (record: {record}) contains no target tokens (all labels are -100)."
+                            )
                         self.samples.append({
                             "chosen_input_ids": chosen_item["input_ids"],
                             "chosen_labels": chosen_item["labels"],
+                            "chosen_attention_mask": chosen_item["attention_mask"],
                             "rejected_input_ids": rejected_item["input_ids"],
                             "rejected_labels": rejected_item["labels"],
+                            "rejected_attention_mask": rejected_item["attention_mask"],
                         })
 
     def _parse_record(self, record: dict) -> dict | None:
