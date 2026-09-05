@@ -14,6 +14,11 @@ def resolve_precision(device: torch.device, precision: str, mixed_precision: boo
     - fp16 falls back on older CUDA and needs a GradScaler.
     - bf16 autocast is used on MPS/CPU where supported; otherwise fp32.
     """
+    # Validate precision up front to avoid silent fallback to fp32
+    from ..configs.model_config import PRECISION_TYPES
+    if precision not in PRECISION_TYPES:
+        raise ValueError(f"Invalid precision '{precision}'. Must be one of {', '.join(PRECISION_TYPES)}")
+
     if not mixed_precision or precision == "fp32":
         return None, False
 

@@ -8,6 +8,10 @@ ROPE_SCALING_TYPES = ("none", "linear", "ntk", "yarn")
 # package stays importable without pulling in torch.
 CACHE_DTYPES = ("auto", "int8")
 
+# Precision dtypes supported by the training infrastructure. Kept here so both
+# the config validator and training modules can share the list.
+PRECISION_TYPES = ("bf16", "fp16", "fp32")
+
 # Decoder families. Each modality keeps its original implementation as the
 # default so the small presets stay laptop-runnable, and opts in per preset.
 IMAGE_GEN_ARCHS = ("unet", "latent_dit")
@@ -266,6 +270,11 @@ class FramerConfig:
             problems.append(
                 f"kv_cache_dtype ('{self.kv_cache_dtype}') must be one of "
                 f"{', '.join(CACHE_DTYPES)}"
+            )
+        if self.precision not in PRECISION_TYPES:
+            problems.append(
+                f"precision ('{self.precision}') must be one of "
+                f"{', '.join(PRECISION_TYPES)}"
             )
         if self.flow_distilled_steps < 1:
             problems.append(
