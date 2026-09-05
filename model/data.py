@@ -258,8 +258,10 @@ class DPODataset(Dataset):
                         self.samples.append({
                             "chosen_input_ids": chosen_item["input_ids"],
                             "chosen_labels": chosen_item["labels"],
+                            "chosen_attention_mask": chosen_item["attention_mask"],
                             "rejected_input_ids": rejected_item["input_ids"],
                             "rejected_labels": rejected_item["labels"],
+                            "rejected_attention_mask": rejected_item["attention_mask"],
                         })
 
     def _parse_record(self, record: dict) -> dict | None:

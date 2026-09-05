@@ -123,21 +123,31 @@ def train_dpo(
 
             chosen_ids = batch["chosen_input_ids"].to(device, non_blocking=True)
             chosen_labels = batch["chosen_labels"].to(device, non_blocking=True)
+            chosen_mask = (
+                batch["chosen_attention_mask"].to(device, non_blocking=True)
+                if "chosen_attention_mask" in batch
+                else None
+            )
             rejected_ids = batch["rejected_input_ids"].to(device, non_blocking=True)
             rejected_labels = batch["rejected_labels"].to(device, non_blocking=True)
+            rejected_mask = (
+                batch["rejected_attention_mask"].to(device, non_blocking=True)
+                if "rejected_attention_mask" in batch
+                else None
+            )
 
             with autocast_context(device, autocast_dtype):
                 # Policy forward passes
-                pi_chosen_logits = policy_model(input_ids=chosen_ids)["logits"]
-                pi_rejected_logits = policy_model(input_ids=rejected_ids)["logits"]
+                pi_chosen_logits = policy_model(input_ids=chosen_ids, attention_mask=chosen_mask)["logits"]
+                pi_rejected_logits = policy_model(input_ids=rejected_ids, attention_mask=rejected_mask)["logits"]
 
                 pi_chosen_logps = get_batch_logps(pi_chosen_logits, chosen_labels)
                 pi_rejected_logps = get_batch_logps(pi_rejected_logits, rejected_labels)
 
                 # Reference forward passes
                 with torch.no_grad():
-                    ref_chosen_logits = ref_model(input_ids=chosen_ids)["logits"]
-                    ref_rejected_logits = ref_model(input_ids=rejected_ids)["logits"]
+                    ref_chosen_logits = ref_model(input_ids=chosen_ids, attention_mask=chosen_mask)["logits"]
+                    ref_rejected_logits = ref_model(input_ids=rejected_ids, attention_mask=rejected_mask)["logits"]
 
                     ref_chosen_logps = get_batch_logps(ref_chosen_logits, chosen_labels)
                     ref_rejected_logps = get_batch_logps(ref_rejected_logits, rejected_labels)

@@ -120,5 +120,13 @@ def test_dpo_dataset_loading(tmp_path):
     assert len(ds) == 1
     sample = ds[0]
     assert "chosen_input_ids" in sample and "rejected_input_ids" in sample
+    assert "chosen_attention_mask" in sample and "rejected_attention_mask" in sample
     assert sample["chosen_input_ids"].shape == (64,)
     assert sample["rejected_input_ids"].shape == (64,)
+    assert sample["chosen_attention_mask"].shape == (64,)
+    assert sample["rejected_attention_mask"].shape == (64,)
+
+    # Verify 1 for valid tokens and 0 for padding positions
+    chosen_non_pad_count = (sample["chosen_input_ids"] != tok.pad_id).sum().item()
+    assert (sample["chosen_attention_mask"][:chosen_non_pad_count] == 1).all()
+    assert (sample["chosen_attention_mask"][chosen_non_pad_count:] == 0).all()
