@@ -214,7 +214,7 @@ describe("SettingsPanel", () => {
         });
 
         const tierSelect = container.querySelector("#setting-size-tier");
-        expect(tierSelect.value).toBe("512");
+        expect(tierSelect.value).toBe(String(DEFAULT_SETTINGS.tier));
 
         // Select aspect ratio 16:9
         const aspectSelect = container.querySelector("#setting-aspect");
