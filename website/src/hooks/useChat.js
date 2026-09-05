@@ -86,10 +86,9 @@ export function useChat(settings) {
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
-        setStreaming(false);
-
         // Update the correct conversation's messages
         if (isActiveConv) {
+          setStreaming(false);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -128,9 +127,8 @@ export function useChat(settings) {
       // Handle audio streaming chunks
       if (data.responseType === "audio") {
         if (data.done) {
-          setStreaming(false);
-
           if (isActiveConv) {
+            setStreaming(false);
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -227,9 +225,8 @@ export function useChat(settings) {
       }
 
       if (data.done) {
-        setStreaming(false);
-
         if (isActiveConv) {
+          setStreaming(false);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -298,11 +295,11 @@ export function useChat(settings) {
     // Server-side error frame, for example a rate limit rejection. Without
     // this the placeholder bubble would sit there empty with no explanation.
     ws.on("error", (data) => {
-      setStreaming(false);
       const targetConvId = data?.conversationId;
       const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
       if (isActiveConv) {
+        setStreaming(false);
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
