@@ -4,14 +4,14 @@
  * VERIFIED BUG: Before the fix, switching conversations mid-stream would cause tokens to appear
  * in whichever conversation was currently displayed, not the one that initiated the request.
  *
- * FIX: Added activeConversationRef to track the currently active conversation, and the stream
- * handler now ignores frames whose conversationId doesn't match the active conversation.
+ * FIX: Stream frames are now routed to the correct conversation in the conversations array,
+ * regardless of which conversation is currently active. All mutations are immutable.
  */
 
 import { describe, it, expect, vi } from "vitest";
 
 describe("Conversation Isolation (Issue #241)", () => {
-  it("REGRESSION: stream frames must not bleed into non-originating conversations", async () => {
+  it("REGRESSION: stream frames must route to originating conversation, not active one", async () => {
     // Set up isolated mock for this test only
     let mockStreamHandler = null;
 
@@ -95,14 +95,14 @@ describe("Conversation Isolation (Issue #241)", () => {
       mockStreamHandler({
         type: "stream",
         conversationId: convAId,
-        content: "Response from A",
+        content: "First chunk from A",
         done: false,
         responseType: "text",
       });
     });
 
     // Verify tokens appear in conversation A
-    expect(result.current.messages[1].content).toBe("Response from A");
+    expect(result.current.messages[1].content).toBe("First chunk from A");
 
     // Create and switch to conversation B
     await act(async () => {
@@ -120,15 +120,28 @@ describe("Conversation Isolation (Issue #241)", () => {
       mockStreamHandler({
         type: "stream",
         conversationId: convAId,
-        content: "More text from A that should NOT appear in B",
+        content: "Second chunk from A - should update A, not B",
+        done: false,
+        responseType: "text",
+      });
+    });
+
+    // Conversation B should still be empty (not polluted with A's frames)
+    expect(result.current.activeConversation).toBe(convBId);
+    expect(result.current.messages).toHaveLength(0);
+
+    // Final frame for A
+    await act(async () => {
+      mockStreamHandler({
+        type: "stream",
+        conversationId: convAId,
+        content: "Final chunk from A",
         done: true,
         responseType: "text",
       });
     });
 
-    // WITHOUT THE FIX: This would have updated messages in conversation B
-    // WITH THE FIX: conversation B messages should still be empty
-    expect(result.current.activeConversation).toBe(convBId);
+    // Conversation B should STILL be empty
     expect(result.current.messages).toHaveLength(0);
 
     // Switch back to conversation A
@@ -136,33 +149,16 @@ describe("Conversation Isolation (Issue #241)", () => {
       await result.current.selectConversation(convAId);
     });
 
-    // The full message from A should be preserved there
-    // Note: The messages in conversation A are stored in the conversations array,
-    // but the stream handler only updates the active messages array.
-    // This test verifies the handler doesn't write to the wrong conversation's view.
+    // CRITICAL VERIFICATION: Conversation A must have the FULL response content
+    // The fix routes frames to the conversations array, then selectConversation
+    // loads from there, so A's full content should be preserved
     expect(result.current.activeConversation).toBe(convAId);
-  });
-
-  it("documents the fix and expected behavior", () => {
-    const fixDescription = `
-      Issue #241: Streamed tokens written into whichever conversation is displayed
-      
-      ROOT CAUSE:
-      - Backend sends conversationId in each stream frame
-      - Frontend stream handler did not check conversationId
-      - Handler updated messages array regardless of which conversation was active
-      - Switching conversations mid-stream caused tokens to appear in wrong conversation
-      
-      FIX:
-      - Added activeConversationRef to track current conversation
-      - Stream handler checks data.conversationId !== activeConversationRef.current
-      - Frames for non-active conversations are ignored
-      - Messages remain isolated to their originating conversation
-      
-      FILES CHANGED:
-      - website/src/hooks/useChat.js
-    `;
     
-    expect(fixDescription).toBeTruthy();
+    // Find conversation A in the conversations array
+    const convA = result.current.conversations.find(c => c.id === convAId);
+    expect(convA).toBeDefined();
+    expect(convA.messages).toHaveLength(2);
+    expect(convA.messages[1].content).toBe("Final chunk from A");
+    expect(convA.messages[1].role).toBe("assistant");
   });
 });

@@ -79,26 +79,49 @@ export function useChat(settings) {
     });
 
     ws.on("stream", (data) => {
-      // ISSUE #241 FIX: Only apply stream frames to the conversation they belong to.
-      // Ignore frames for conversations that aren't currently active to prevent
-      // streamed tokens from appearing in whichever conversation is displayed.
-      if (data.conversationId && data.conversationId !== activeConversationRef.current) {
-        // Stream is for a different conversation - ignore it
-        return;
-      }
+      // ISSUE #241 FIX: Route stream frames to the correct conversation.
+      // Update the target conversation's state even if it's not currently active.
+      const targetConvId = data.conversationId;
+      const isActiveConv = targetConvId === activeConversationRef.current;
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
         setStreaming(false);
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last?.role === "assistant") {
-            last.content = data.message || "An error occurred while generating the response.";
-            last.type = "error";
-          }
-          return [...updated];
-        });
+
+        // Update the correct conversation's messages
+        if (isActiveConv) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              const newLast = {
+                ...last,
+                content: data.message || "An error occurred while generating the response.",
+                type: "error",
+              };
+              updated[updated.length - 1] = newLast;
+            }
+            return updated;
+          });
+        } else if (targetConvId) {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== targetConvId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant") {
+                const newLast = {
+                  ...last,
+                  content: data.message || "An error occurred while generating the response.",
+                  type: "error",
+                };
+                updated[updated.length - 1] = newLast;
+              }
+              return { ...c, messages: updated };
+            })
+          );
+        }
         return;
       }
 
@@ -106,66 +129,167 @@ export function useChat(settings) {
       if (data.responseType === "audio") {
         if (data.done) {
           setStreaming(false);
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              last.type = "audio";
-              last.content = data.content || last.content;
-              // Push final chunk data if present (create new array for reactivity)
-              if (data.metadata?.chunkData) {
-                const existingChunks = last.audioChunks || [];
-                last.audioChunks = [...existingChunks, data.metadata.chunkData];
+
+          if (isActiveConv) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant") {
+                const newLast = {
+                  ...last,
+                  type: "audio",
+                  content: data.content || last.content,
+                  audioChunks: data.metadata?.chunkData
+                    ? [...(last.audioChunks || []), data.metadata.chunkData]
+                    : last.audioChunks,
+                  metadata: data.metadata,
+                  audioComplete: true,
+                };
+                updated[updated.length - 1] = newLast;
               }
-              last.metadata = data.metadata;
-              last.audioComplete = true;
-            }
-            return [...updated];
-          });
+              return updated;
+            });
+          } else if (targetConvId) {
+            setConversations((prev) =>
+              prev.map((c) => {
+                if (c.id !== targetConvId) return c;
+                const msgs = c.messages || [];
+                const updated = [...msgs];
+                const last = updated[updated.length - 1];
+                if (last?.role === "assistant") {
+                  const newLast = {
+                    ...last,
+                    type: "audio",
+                    content: data.content || last.content,
+                    audioChunks: data.metadata?.chunkData
+                      ? [...(last.audioChunks || []), data.metadata.chunkData]
+                      : last.audioChunks,
+                    metadata: data.metadata,
+                    audioComplete: true,
+                  };
+                  updated[updated.length - 1] = newLast;
+                }
+                return { ...c, messages: updated };
+              })
+            );
+          }
         } else {
-          // Accumulate audio chunks (create new array for reactivity)
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              last.type = "audio";
-              last.content = data.content || last.content;
-              const existingChunks = last.audioChunks || [];
-              last.audioChunks = [...existingChunks, data.metadata.chunkData];
-              last.audioMetadata = {
-                sampleRate: data.metadata.sampleRate,
-                channels: data.metadata.channels,
-                bitsPerSample: data.metadata.bitsPerSample,
-                totalChunks: data.metadata.totalChunks,
-              };
-            }
-            return [...updated];
-          });
+          // Accumulate audio chunks
+          if (isActiveConv) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant") {
+                const newLast = {
+                  ...last,
+                  type: "audio",
+                  content: data.content || last.content,
+                  audioChunks: [...(last.audioChunks || []), data.metadata.chunkData],
+                  audioMetadata: {
+                    sampleRate: data.metadata.sampleRate,
+                    channels: data.metadata.channels,
+                    bitsPerSample: data.metadata.bitsPerSample,
+                    totalChunks: data.metadata.totalChunks,
+                  },
+                };
+                updated[updated.length - 1] = newLast;
+              }
+              return updated;
+            });
+          } else if (targetConvId) {
+            setConversations((prev) =>
+              prev.map((c) => {
+                if (c.id !== targetConvId) return c;
+                const msgs = c.messages || [];
+                const updated = [...msgs];
+                const last = updated[updated.length - 1];
+                if (last?.role === "assistant") {
+                  const newLast = {
+                    ...last,
+                    type: "audio",
+                    content: data.content || last.content,
+                    audioChunks: [...(last.audioChunks || []), data.metadata.chunkData],
+                    audioMetadata: {
+                      sampleRate: data.metadata.sampleRate,
+                      channels: data.metadata.channels,
+                      bitsPerSample: data.metadata.bitsPerSample,
+                      totalChunks: data.metadata.totalChunks,
+                    },
+                  };
+                  updated[updated.length - 1] = newLast;
+                }
+                return { ...c, messages: updated };
+              })
+            );
+          }
         }
         return;
       }
 
       if (data.done) {
         setStreaming(false);
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last?.role === "assistant") {
-            last.content = data.content;
-            last.type = data.responseType || "text";
-            last.metadata = data.metadata;
-          }
-          return [...updated];
-        });
+
+        if (isActiveConv) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              const newLast = {
+                ...last,
+                content: data.content,
+                type: data.responseType || "text",
+                metadata: data.metadata,
+              };
+              updated[updated.length - 1] = newLast;
+            }
+            return updated;
+          });
+        } else if (targetConvId) {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== targetConvId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant") {
+                const newLast = {
+                  ...last,
+                  content: data.content,
+                  type: data.responseType || "text",
+                  metadata: data.metadata,
+                };
+                updated[updated.length - 1] = newLast;
+              }
+              return { ...c, messages: updated, updatedAt: new Date().toISOString() };
+            })
+          );
+        }
       } else {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last?.role === "assistant") {
-            last.content = data.content;
-          }
-          return [...updated];
-        });
+        if (isActiveConv) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant") {
+              const newLast = { ...last, content: data.content };
+              updated[updated.length - 1] = newLast;
+            }
+            return updated;
+          });
+        } else if (targetConvId) {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== targetConvId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant") {
+                const newLast = { ...last, content: data.content };
+                updated[updated.length - 1] = newLast;
+              }
+              return { ...c, messages: updated };
+            })
+          );
+        }
       }
     });
 
@@ -175,15 +299,42 @@ export function useChat(settings) {
     // this the placeholder bubble would sit there empty with no explanation.
     ws.on("error", (data) => {
       setStreaming(false);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last?.role === "assistant" && !last.content) {
-          last.content = data?.message || "Something went wrong. Please try again.";
-          last.type = "error";
-        }
-        return [...updated];
-      });
+      const targetConvId = data?.conversationId;
+      const isActiveConv = targetConvId === activeConversationRef.current;
+
+      if (isActiveConv || !targetConvId) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.role === "assistant" && !last.content) {
+            const newLast = {
+              ...last,
+              content: data?.message || "Something went wrong. Please try again.",
+              type: "error",
+            };
+            updated[updated.length - 1] = newLast;
+          }
+          return updated;
+        });
+      } else {
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id !== targetConvId) return c;
+            const msgs = c.messages || [];
+            const updated = [...msgs];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant" && !last.content) {
+              const newLast = {
+                ...last,
+                content: data?.message || "Something went wrong. Please try again.",
+                type: "error",
+              };
+              updated[updated.length - 1] = newLast;
+            }
+            return { ...c, messages: updated };
+          })
+        );
+      }
     });
 
     return () => ws.disconnect();
