@@ -81,13 +81,17 @@ export const DEFAULT_SETTINGS = {
   top_k: 50,
   max_new_tokens: 512,
   aspect: "1:1",
-  sizeTier: 512,
+  tier: 512,
   num_frames: 16,
 };
 
 function load() {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    if (stored.sizeTier !== undefined && stored.tier === undefined) {
+      stored.tier = stored.sizeTier;
+    }
+    delete stored.sizeTier;
     // Merge over the defaults so a partial or outdated payload still works.
     return { ...DEFAULT_SETTINGS, ...stored };
   } catch {
