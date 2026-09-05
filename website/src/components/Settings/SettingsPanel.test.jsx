@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import SettingsPanel from "./SettingsPanel";
 import {
@@ -25,6 +25,10 @@ function renderPanel(overrides = {}) {
   };
   return { ...render(<SettingsPanel {...props} />), props };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("SettingsPanel", () => {
   it("renders nothing when closed", () => {
@@ -122,7 +126,7 @@ describe("SettingsPanel", () => {
       localStorage.clear();
 
       let serializedPayload = null;
-      const fetchSpy = vi.spyOn(global, "fetch").mockImplementation((url, options) => {
+      vi.spyOn(global, "fetch").mockImplementation((url, options) => {
         if (options?.body && typeof options.body === "string") {
           try {
             const parsed = JSON.parse(options.body);
@@ -166,16 +170,14 @@ describe("SettingsPanel", () => {
       expect(serializedPayload.settings.sizeTier).toBeUndefined();
       expect(serializedPayload.settings).not.toHaveProperty("sizeTier");
       expect(serializedPayload.settings.aspect).toBe("16:9");
-      expect(serializedPayload.settings.temperature).toBe(0.7);
-
-      fetchSpy.mockRestore();
+      expect(serializedPayload.settings.temperature).toBe(DEFAULT_SETTINGS.temperature);
     });
 
     it("serializes settings.tier and not sizeTier over WebSocket when user selects a non-default tier", async () => {
       localStorage.clear();
 
       let wsInstance = null;
-      let sentFrame = null;
+      let serializedPayload = null;
 
       const MockWS = class {
         constructor(url) {
@@ -189,7 +191,7 @@ describe("SettingsPanel", () => {
         send(data) {
           try {
             const parsed = JSON.parse(data);
-            if (parsed.settings) sentFrame = parsed;
+            if (parsed.settings) serializedPayload = parsed;
           } catch {
             // ignore
           }
@@ -228,14 +230,15 @@ describe("SettingsPanel", () => {
         await userEvent.click(screen.getByRole("button", { name: /send message/i }));
 
         await waitFor(() => {
-          expect(sentFrame).not.toBeNull();
+          expect(serializedPayload).not.toBeNull();
         });
 
         // Regression assertions:
-        expect(sentFrame.settings.tier).toBe(1024);
-        expect(sentFrame.settings.sizeTier).toBeUndefined();
-        expect(sentFrame.settings).not.toHaveProperty("sizeTier");
-        expect(sentFrame.settings.aspect).toBe("16:9");
+        expect(serializedPayload.settings.tier).toBe(1024);
+        expect(serializedPayload.settings.sizeTier).toBeUndefined();
+        expect(serializedPayload.settings).not.toHaveProperty("sizeTier");
+        expect(serializedPayload.settings.aspect).toBe("16:9");
+        expect(serializedPayload.settings.temperature).toBe(DEFAULT_SETTINGS.temperature);
       } finally {
         global.WebSocket = origWS;
       }
