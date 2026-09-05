@@ -82,7 +82,7 @@ export function useChat(settings) {
       // ISSUE #241 FIX: Route stream frames to the correct conversation.
       // Update the target conversation's state even if it's not currently active.
       const targetConvId = data.conversationId;
-      const isActiveConv = targetConvId === activeConversationRef.current;
+      const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
@@ -300,9 +300,9 @@ export function useChat(settings) {
     ws.on("error", (data) => {
       setStreaming(false);
       const targetConvId = data?.conversationId;
-      const isActiveConv = targetConvId === activeConversationRef.current;
+      const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
-      if (isActiveConv || !targetConvId) {
+      if (isActiveConv) {
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
