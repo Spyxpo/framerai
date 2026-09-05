@@ -443,11 +443,15 @@ class FramerModel(nn.Module):
             if lm["aux"] is not None:
                 results["aux_loss"] = lm["aux"]
             if labels is not None:
-                loss = F.cross_entropy(
-                    lm["logits"].reshape(-1, lm["logits"].size(-1)),
-                    labels.reshape(-1),
-                    ignore_index=-100,
-                )
+                valid_targets = (labels != -100).sum()
+                if valid_targets > 0:
+                    loss = F.cross_entropy(
+                        lm["logits"].reshape(-1, lm["logits"].size(-1)),
+                        labels.reshape(-1),
+                        ignore_index=-100,
+                    )
+                else:
+                    loss = (lm["logits"] * 0.0).sum()
                 results["text_loss"] = loss
 
         # Image generation
