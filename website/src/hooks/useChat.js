@@ -14,6 +14,7 @@ export function useChat(settings) {
   const [messages, setMessages] = useState(initialStorage.messages);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const streamingConversationIdRef = useRef(null);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
@@ -86,10 +87,9 @@ export function useChat(settings) {
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
-        setStreaming(false);
-
         // Update the correct conversation's messages
         if (isActiveConv) {
+          setStreaming(false);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -121,6 +121,12 @@ export function useChat(settings) {
               return { ...c, messages: updated };
             })
           );
+
+          // Clear streaming state if this error was from the conversation that initiated streaming
+          if (targetConvId === streamingConversationIdRef.current) {
+            setStreaming(false);
+            streamingConversationIdRef.current = null;
+          }
         }
         return;
       }
@@ -128,9 +134,9 @@ export function useChat(settings) {
       // Handle audio streaming chunks
       if (data.responseType === "audio") {
         if (data.done) {
-          setStreaming(false);
-
           if (isActiveConv) {
+            setStreaming(false);
+            streamingConversationIdRef.current = null;
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -172,6 +178,12 @@ export function useChat(settings) {
                 return { ...c, messages: updated };
               })
             );
+
+            // Clear streaming state if this completion was from the conversation that initiated streaming
+            if (targetConvId === streamingConversationIdRef.current) {
+              setStreaming(false);
+              streamingConversationIdRef.current = null;
+            }
           }
         } else {
           // Accumulate audio chunks
@@ -227,9 +239,9 @@ export function useChat(settings) {
       }
 
       if (data.done) {
-        setStreaming(false);
-
         if (isActiveConv) {
+          setStreaming(false);
+          streamingConversationIdRef.current = null;
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -263,6 +275,14 @@ export function useChat(settings) {
               return { ...c, messages: updated, updatedAt: new Date().toISOString() };
             })
           );
+
+          // Check if the currently active conversation is idle (no streaming activity)
+          // If so, clear streaming state so its composer becomes enabled
+          // This handles the idle-B case where A finishes and B's composer should be re-enabled
+          if (targetConvId === streamingConversationIdRef.current) {
+            setStreaming(false);
+            streamingConversationIdRef.current = null;
+          }
         }
       } else {
         if (isActiveConv) {
@@ -293,16 +313,25 @@ export function useChat(settings) {
       }
     });
 
-    ws.on("typing", () => setStreaming(true));
-
-    // Server-side error frame, for example a rate limit rejection. Without
-    // this the placeholder bubble would sit there empty with no explanation.
-    ws.on("error", (data) => {
-      setStreaming(false);
+    ws.on("typing", (data) => {
       const targetConvId = data?.conversationId;
       const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
       if (isActiveConv) {
+        setStreaming(true);
+        streamingConversationIdRef.current = targetConvId || activeConversationRef.current;
+      }
+    });
+
+    // Server-side error frame, for example a rate limit rejection. Without
+    // this the placeholder bubble would sit there empty with no explanation.
+    ws.on("error", (data) => {
+      const targetConvId = data?.conversationId;
+      const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
+
+      if (isActiveConv) {
+        setStreaming(false);
+        streamingConversationIdRef.current = null;
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
@@ -334,6 +363,12 @@ export function useChat(settings) {
             return { ...c, messages: updated };
           })
         );
+
+        // Clear streaming state if this error was from the conversation that initiated streaming
+        if (targetConvId === streamingConversationIdRef.current) {
+          setStreaming(false);
+          streamingConversationIdRef.current = null;
+        }
       }
     });
 
@@ -506,6 +541,7 @@ export function useChat(settings) {
       // Try WebSocket streaming first
       if (wsRef.current?.ws?.readyState === WebSocket.OPEN) {
         setStreaming(true);
+        streamingConversationIdRef.current = convId;
         wsRef.current.send({
           type: "chat",
           content,
