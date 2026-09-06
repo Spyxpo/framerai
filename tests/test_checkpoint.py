@@ -520,7 +520,7 @@ def test_sharded_scheduler_state_survives_checkpoint(tmp_path, gloo_distributed)
     assert abs(lr_before - lr_after) < 1e-9, (
         f"Scheduler LR mismatch on sharded resume: {lr_before} vs {lr_after}"
     )
-    assert restored_scheduler.state_dict()["_step_count"] == 8
+    assert restored_scheduler.last_epoch == scheduler.last_epoch
 
 
 def test_sharded_load_backward_compatible_with_old_save(tmp_path, gloo_distributed):
@@ -565,7 +565,7 @@ def test_sharded_load_backward_compatible_with_old_save(tmp_path, gloo_distribut
     assert step == 7
     lr_after = restored_scheduler.get_last_lr()[0]
     assert abs(lr_before - lr_after) < 1e-9
-    assert restored_scheduler.state_dict()["_step_count"] == 8
+    assert restored_scheduler.last_epoch == scheduler.last_epoch
 
 
 def test_sharded_load_raises_when_scheduler_missing(tmp_path, gloo_distributed):
