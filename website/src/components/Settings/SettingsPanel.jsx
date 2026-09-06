@@ -19,7 +19,7 @@ export default function SettingsPanel({ open, settings, model, onChange, onReset
 
   if (!open) return null;
 
-  const resolved = resolveSize(settings.aspect, settings.sizeTier);
+  const resolved = resolveSize(settings.aspect, settings.tier ?? settings.sizeTier);
 
   return (
     <div className="settings-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -94,8 +94,8 @@ export default function SettingsPanel({ open, settings, model, onChange, onReset
             <label htmlFor="setting-size-tier">Image size</label>
             <select
               id="setting-size-tier"
-              value={settings.sizeTier}
-              onChange={(e) => onChange("sizeTier", Number(e.target.value))}
+              value={settings.tier ?? settings.sizeTier}
+              onChange={(e) => onChange("tier", Number(e.target.value))}
               aria-describedby="setting-size-tier-help"
             >
               {SIZE_TIERS.map((tier) => (
