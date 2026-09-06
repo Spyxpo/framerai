@@ -12,9 +12,19 @@
  * conversation A finishes, the streaming state should be cleared to enable B's composer.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 describe("Streaming State Isolation (Issue #250)", () => {
+  // Ensure complete test isolation
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
   it("REGRESSION: background conversation finishing must NOT turn off active conversation's streaming state", async () => {
     // Set up isolated mock for this test only
     let mockStreamHandler = null;
