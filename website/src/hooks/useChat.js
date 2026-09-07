@@ -367,6 +367,16 @@ export function useChat(settings) {
       }
     });
 
+    // WebSocket closed unexpectedly (network drop, server restart, etc.).
+    // Any conversation whose stream was in flight will never receive a done/error
+    // frame, so we must drain those IDs from the Set now — otherwise the
+    // composer stays disabled until the page is reloaded.
+    ws.on("close", () => {
+      for (const convId of streamingConversationIdsRef.current) {
+        markStreamingEnd(convId);
+      }
+    });
+
     return () => ws.disconnect();
   }, []);
 
@@ -457,6 +467,9 @@ export function useChat(settings) {
       } catch {
         // Continue anyway — remove from local list regardless
       }
+      // If this conversation was actively streaming, remove it from the Set so
+      // the composer for the remaining conversations is re-enabled correctly.
+      markStreamingEnd(id);
       setConversations((prev) => {
         const remaining = prev.filter((c) => c.id !== id);
         if (activeConversation === id) {

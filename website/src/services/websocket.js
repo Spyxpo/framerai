@@ -32,6 +32,10 @@ export class WebSocketClient {
       };
 
       this.ws.onclose = () => {
+        // Notify listeners so the application can clean up in-flight state
+        const closeHandlers = this.listeners.get("close") || [];
+        closeHandlers.forEach((handler) => handler());
+
         // Only reconnect if this was NOT an intentional disconnect
         if (!this.intentionalDisconnect) {
           this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
