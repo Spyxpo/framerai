@@ -14,13 +14,29 @@ export function useChat(settings) {
   const [messages, setMessages] = useState(initialStorage.messages);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
-  const streamingConversationIdRef = useRef(null);
+  // Track ALL currently-streaming conversation IDs. setStreaming(false) only fires
+  // when the Set becomes empty — fixes concurrent-streaming bug (#253).
+  const streamingConversationIdsRef = useRef(new Set());
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
   const [pendingApproval, setPendingApproval] = useState(null);
   const [denyEverything, setDenyEverything] = useState(false);
   const wsRef = useRef(null);
+
+  // Add a conversation to the active-streaming set; flip global streaming on when first one starts.
+  const markStreamingStart = (convId) => {
+    streamingConversationIdsRef.current.add(convId);
+    setStreaming(true);
+  };
+
+  // Remove a conversation from the active-streaming set; flip global streaming off only when empty.
+  const markStreamingEnd = (convId) => {
+    streamingConversationIdsRef.current.delete(convId);
+    if (streamingConversationIdsRef.current.size === 0) {
+      setStreaming(false);
+    }
+  };
 
   // Track active conversation in a ref so WebSocket handlers see current value
   const activeConversationRef = useRef(activeConversation);
@@ -89,7 +105,7 @@ export function useChat(settings) {
         // Server sent an error event mid-stream
         // Update the correct conversation's messages
         if (isActiveConv) {
-          setStreaming(false);
+          markStreamingEnd(targetConvId || activeConversationRef.current);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -122,11 +138,8 @@ export function useChat(settings) {
             })
           );
 
-          // Clear streaming state if this error was from the conversation that initiated streaming
-          if (targetConvId === streamingConversationIdRef.current) {
-            setStreaming(false);
-            streamingConversationIdRef.current = null;
-          }
+          // Stop streaming for this specific conversation
+          if (targetConvId) markStreamingEnd(targetConvId);
         }
         return;
       }
@@ -135,8 +148,7 @@ export function useChat(settings) {
       if (data.responseType === "audio") {
         if (data.done) {
           if (isActiveConv) {
-            setStreaming(false);
-            streamingConversationIdRef.current = null;
+            markStreamingEnd(activeConversationRef.current);
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -179,11 +191,7 @@ export function useChat(settings) {
               })
             );
 
-            // Clear streaming state if this completion was from the conversation that initiated streaming
-            if (targetConvId === streamingConversationIdRef.current) {
-              setStreaming(false);
-              streamingConversationIdRef.current = null;
-            }
+            if (targetConvId) markStreamingEnd(targetConvId);
           }
         } else {
           // Accumulate audio chunks
@@ -240,8 +248,7 @@ export function useChat(settings) {
 
       if (data.done) {
         if (isActiveConv) {
-          setStreaming(false);
-          streamingConversationIdRef.current = null;
+          markStreamingEnd(activeConversationRef.current);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -276,13 +283,7 @@ export function useChat(settings) {
             })
           );
 
-          // Check if the currently active conversation is idle (no streaming activity)
-          // If so, clear streaming state so its composer becomes enabled
-          // This handles the idle-B case where A finishes and B's composer should be re-enabled
-          if (targetConvId === streamingConversationIdRef.current) {
-            setStreaming(false);
-            streamingConversationIdRef.current = null;
-          }
+          if (targetConvId) markStreamingEnd(targetConvId);
         }
       } else {
         if (isActiveConv) {
@@ -318,8 +319,7 @@ export function useChat(settings) {
       const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
       if (isActiveConv) {
-        setStreaming(true);
-        streamingConversationIdRef.current = targetConvId || activeConversationRef.current;
+        markStreamingStart(targetConvId || activeConversationRef.current);
       }
     });
 
@@ -330,8 +330,7 @@ export function useChat(settings) {
       const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
       if (isActiveConv) {
-        setStreaming(false);
-        streamingConversationIdRef.current = null;
+        markStreamingEnd(targetConvId || activeConversationRef.current);
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
@@ -364,11 +363,7 @@ export function useChat(settings) {
           })
         );
 
-        // Clear streaming state if this error was from the conversation that initiated streaming
-        if (targetConvId === streamingConversationIdRef.current) {
-          setStreaming(false);
-          streamingConversationIdRef.current = null;
-        }
+        if (targetConvId) markStreamingEnd(targetConvId);
       }
     });
 
@@ -540,8 +535,7 @@ export function useChat(settings) {
 
       // Try WebSocket streaming first
       if (wsRef.current?.ws?.readyState === WebSocket.OPEN) {
-        setStreaming(true);
-        streamingConversationIdRef.current = convId;
+        markStreamingStart(convId);
         wsRef.current.send({
           type: "chat",
           content,
