@@ -456,3 +456,156 @@ def test_loading_a_missing_checkpoint_says_why(tmp_path):
     empty.mkdir()
     with pytest.raises(FileNotFoundError, match="sharded"):
         load_sharded(FramerModel(tiny_config()), None, str(empty))
+
+
+# --------------------------------------------------------------------------
+# Sharded Distributed Checkpointing (Issue #233)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gloo_distributed(tmp_path):
+    """Set up a single-process Gloo distributed environment with DCP enabled."""
+    import torch.distributed as dist
+
+    import model.training.checkpoint as ckpt_mod
+
+    init_file = str(tmp_path / "dist_init")
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_file}",
+        rank=0,
+        world_size=1,
+    )
+    orig_is_dist = ckpt_mod._is_distributed
+    ckpt_mod._is_distributed = lambda: True
+    try:
+        yield
+    finally:
+        ckpt_mod._is_distributed = orig_is_dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def test_sharded_scheduler_state_survives_checkpoint(tmp_path, gloo_distributed):
+    """Regression test for Issue #233: scheduler state must survive sharded DCP save/load."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+
+    for _ in range(7):
+        optimizer.step()
+        scheduler.step()
+
+    lr_before = scheduler.get_last_lr()[0]
+    ckpt_dir = str(tmp_path / "sharded_ckpt")
+
+    save_sharded(
+        model, optimizer, ckpt_dir, step=7, config=config, scheduler=scheduler
+    )
+
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+
+    step = load_sharded(
+        restored_model, restored_optimizer, ckpt_dir, scheduler=restored_scheduler
+    )
+
+    assert step == 7
+    lr_after = restored_scheduler.get_last_lr()[0]
+    assert abs(lr_before - lr_after) < 1e-9, (
+        f"Scheduler LR mismatch on sharded resume: {lr_before} vs {lr_after}"
+    )
+    assert restored_scheduler.last_epoch == scheduler.last_epoch
+
+
+def test_sharded_load_backward_compatible_with_old_save(tmp_path, gloo_distributed):
+    """Loading old sharded checkpoints saved with raw dict scheduler state must work."""
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint.state_dict import get_state_dict
+
+    from model.training.checkpoint import _write_sidecars
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+
+    for _ in range(7):
+        optimizer.step()
+        scheduler.step()
+
+    lr_before = scheduler.get_last_lr()[0]
+    old_ckpt_dir = str(tmp_path / "old_sharded_ckpt")
+    os.makedirs(old_ckpt_dir, exist_ok=True)
+
+    # Simulate old save: scheduler.state_dict() stored as a raw dict
+    model_state, optim_state = get_state_dict(model, [optimizer])
+    old_state = {
+        "model": model_state,
+        "optim": optim_state,
+        "scheduler": scheduler.state_dict(),
+    }
+    dcp.save(old_state, checkpoint_id=old_ckpt_dir)
+    _write_sidecars(old_ckpt_dir, config, 7)
+
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+
+    step = load_sharded(
+        restored_model, restored_optimizer, old_ckpt_dir, scheduler=restored_scheduler
+    )
+
+    assert step == 7
+    lr_after = restored_scheduler.get_last_lr()[0]
+    assert abs(lr_before - lr_after) < 1e-9
+    assert restored_scheduler.last_epoch == scheduler.last_epoch
+
+
+def test_sharded_load_raises_when_scheduler_missing(tmp_path, gloo_distributed):
+    """Fails loudly (KeyError) when scheduler is supplied but missing from sharded checkpoint."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    ckpt_dir = str(tmp_path / "no_scheduler_ckpt")
+
+    save_sharded(model, optimizer, ckpt_dir, step=3, config=config, scheduler=None)
+
+    restored_model = FramerModel(config)
+    restored_optimizer = build_optimizer(restored_model, config)
+    restored_scheduler = build_scheduler(restored_optimizer, config)
+
+    with pytest.raises(KeyError, match="contains no scheduler state"):
+        load_sharded(
+            restored_model, restored_optimizer, ckpt_dir, scheduler=restored_scheduler
+        )
+
+
+def test_sharded_load_without_scheduler_succeeds(tmp_path, gloo_distributed):
+    """Resume with scheduler=None succeeds on both scheduler and non-scheduler checkpoints."""
+    from model.training.schedule import build_scheduler
+
+    config = tiny_config(warmup_steps=5, max_steps=20)
+    model = FramerModel(config)
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+
+    # 1. Checkpoint with scheduler loaded with scheduler=None
+    ckpt_with_sch = str(tmp_path / "with_sch")
+    save_sharded(model, optimizer, ckpt_with_sch, step=4, config=config, scheduler=scheduler)
+    step = load_sharded(FramerModel(config), None, ckpt_with_sch, scheduler=None)
+    assert step == 4
+
+    # 2. Checkpoint without scheduler loaded with scheduler=None
+    ckpt_no_sch = str(tmp_path / "no_sch")
+    save_sharded(model, optimizer, ckpt_no_sch, step=5, config=config, scheduler=None)
+    step = load_sharded(FramerModel(config), None, ckpt_no_sch, scheduler=None)
+    assert step == 5

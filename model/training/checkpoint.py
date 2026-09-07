@@ -22,9 +22,27 @@ from dataclasses import asdict
 
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint.stateful import Stateful
 
 CONFIG_FILENAME = "config.json"
 METADATA_FILENAME = "checkpoint_meta.json"
+
+
+class _SchedulerStateful(Stateful):
+    """Adapter wrapping an LR scheduler for torch.distributed.checkpoint.
+
+    DCP requires stateful components to implement the Stateful protocol so that
+    state can be loaded in place into the existing scheduler instance.
+    """
+
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+    def state_dict(self) -> dict:
+        return self.scheduler.state_dict()
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.scheduler.load_state_dict(state_dict)
 
 
 def _is_distributed() -> bool:
@@ -72,7 +90,9 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None, schedu
         torch.save(payload, temp_file)
         os.replace(temp_file, single_file)
 
-        _write_sidecars(path, config, step, {"sharded": False})
+        _write_sidecars(
+            path, config, step, {"sharded": False, "has_scheduler": scheduler is not None}
+        )
         return path
 
     import torch.distributed.checkpoint as dcp
@@ -85,11 +105,11 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None, schedu
     if optimizer is not None:
         state["optim"] = optim_state
     if scheduler is not None:
-        state["scheduler"] = scheduler.state_dict()
+        state["scheduler"] = _SchedulerStateful(scheduler)
 
     dcp.save(state, checkpoint_id=path)
     if dist.get_rank() == 0:
-        _write_sidecars(path, config, step)
+        _write_sidecars(path, config, step, extra={"has_scheduler": scheduler is not None})
     dist.barrier()
     return path
 
@@ -128,6 +148,19 @@ def load_sharded(model, optimizer, path: str, scheduler=None) -> int:
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
+    if scheduler is not None:
+        reader = dcp.FileSystemReader(path)
+        metadata = reader.read_metadata()
+        has_scheduler = any(
+            k == "scheduler" or k.startswith("scheduler.")
+            for k in metadata.state_dict_metadata.keys()
+        )
+        if not has_scheduler:
+            raise KeyError(
+                f"Scheduler supplied to load_sharded, but checkpoint at '{path}' "
+                "contains no scheduler state."
+            )
+
     core = _unwrap(model)
     optimizers = [] if optimizer is None else [optimizer]
     model_state, optim_state = get_state_dict(core, optimizers)
@@ -135,7 +168,7 @@ def load_sharded(model, optimizer, path: str, scheduler=None) -> int:
     if optimizer is not None:
         state["optim"] = optim_state
     if scheduler is not None:
-        state["scheduler"] = {}
+        state["scheduler"] = _SchedulerStateful(scheduler)
 
     dcp.load(state, checkpoint_id=path)
     set_state_dict(
@@ -144,8 +177,6 @@ def load_sharded(model, optimizer, path: str, scheduler=None) -> int:
         model_state_dict=state["model"],
         optim_state_dict=state.get("optim"),
     )
-    if scheduler is not None and "scheduler" in state and state["scheduler"]:
-        scheduler.load_state_dict(state["scheduler"])
 
     return meta.get("step", 0)
 
