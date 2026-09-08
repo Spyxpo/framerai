@@ -52,6 +52,8 @@ class FramerTokenizer:
         "<doc>": 4,
         "<doc_end>": 5,
         "<page>": 6,
+        "<reasoning>": 7,
+        "</reasoning>": 8,
     }
 
     def __init__(
