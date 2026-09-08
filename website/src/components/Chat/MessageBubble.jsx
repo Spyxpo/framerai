@@ -1,4 +1,5 @@
 import React from "react";
+import ReactMarkdown from "react-markdown";
 import { User, Bot, Copy, Check, AlertCircle, RefreshCw } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
 import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
@@ -35,24 +36,38 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
       );
     }
 
-    // Parse code blocks
-    const parts = content.split(/(```[\s\S]*?```)/g);
-    return parts.map((part, i) => {
-      if (part.startsWith("```")) {
-        const match = part.match(/```(\w+)?\n?([\s\S]*?)```/);
-        if (match) {
-          return <CodeBlock key={i} language={match[1] || "text"} code={match[2].trim()} />;
-        }
-      }
-      return (
-        <div key={i} className="text-content" dangerouslySetInnerHTML={{
-          __html: part
-            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-            .replace(/`(.*?)`/g, '<code class="inline-code">$1</code>')
-            .replace(/\n/g, "<br/>"),
-        }} />
-      );
-    });
+    // Render Markdown safely via react-markdown (never uses dangerouslySetInnerHTML).
+    // All HTML in the source content is escaped by react-markdown's default
+    // behaviour, preventing XSS from user-supplied or model-generated content.
+    return (
+      <div className="text-content">
+        <ReactMarkdown
+          components={{
+            // Fenced code blocks in react-markdown v10 render as <pre><code>.
+            // We intercept at the <pre> level and delegate to CodeBlock so that
+            // syntax highlighting and copy behaviour are preserved.
+            pre({ children }) {
+              // The direct child is a React element for <code> with a
+              // className like "language-python".
+              const child = React.Children.only(children);
+              if (React.isValidElement(child)) {
+                const { className, children: codeText } = child.props;
+                const language = /language-(\w+)/.exec(className || "")?.[1] || "text";
+                return <CodeBlock language={language} code={String(codeText).trimEnd()} />;
+              }
+              return <pre>{children}</pre>;
+            },
+            // Inline backtick spans — render as a plain styled <code>
+            // (react-markdown does NOT wrap these in <pre>)
+            code({ className, children, ...props }) {
+              return <code className={`inline-code${className ? ` ${className}` : ""}`} {...props}>{children}</code>;
+            },
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
   };
 
   const renderMedia = () => {
