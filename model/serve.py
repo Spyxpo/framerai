@@ -390,17 +390,22 @@ def handle(gen, op, params, mind=None, tools=None):
             else:
                 template_version = "v1"
 
-        if messages and not prompt:
+        if op == "chat":
+            from .tokenizer.chat_template import ChatTemplate
+
+            if messages:
+                prompt = ChatTemplate(version=template_version).format_messages(
+                    messages, add_generation_prompt=True
+                )
+            else:
+                prompt = ChatTemplate(version=template_version).format_messages(
+                    [{"role": "user", "content": prompt}], add_generation_prompt=True
+                )
+        elif messages and not prompt:
             from .tokenizer.chat_template import ChatTemplate
 
             prompt = ChatTemplate(version=template_version).format_messages(
                 messages, add_generation_prompt=True
-            )
-        elif prompt and not prompt.startswith("<"):
-            from .tokenizer.chat_template import ChatTemplate
-
-            prompt = ChatTemplate(version=template_version).format_messages(
-                [{"role": "user", "content": prompt}], add_generation_prompt=True
             )
 
         if documents:
