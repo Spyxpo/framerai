@@ -111,7 +111,7 @@ def render_prompt(registry: ToolRegistry, prompt: str | list[dict[str, Any]]) ->
 
     if prompt.startswith("<system>"):
         return prompt.replace("<system>", f"<system>{instructions}\n", 1)
-    if prompt.startswith("<"):
+    if prompt.startswith(("<user>", "<assistant>", "<tool>", "<tool_call>")):
         return f"<system>{instructions}{prompt}"
 
     messages = [

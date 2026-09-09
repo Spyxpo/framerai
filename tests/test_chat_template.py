@@ -677,4 +677,3 @@ def test_tool_loop_prompt_starting_with_bracket_not_misclassified():
     assert "<user><query> find something" in rendered
     assert rendered.endswith("<assistant>")
     assert rendered.startswith("<system>")
-

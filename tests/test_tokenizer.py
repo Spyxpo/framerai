@@ -553,4 +553,3 @@ def test_allowed_special_with_truncation_and_add_special():
     assert len(ids_trunc) == 5
     assert ids_trunc[0] == tokenizer.sos_id
     assert ids_trunc[-1] == tokenizer.eos_id
-
