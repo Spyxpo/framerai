@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const model = require("./model");
 const { generationCounter } = require("../middleware/limiters");
+const { resolveClientIp } = require("../middleware/rateLimit");
 const config = require("../config");
 const { createLogger } = require("./logger");
 
@@ -198,13 +199,11 @@ function setupWebSocket(wss) {
   wss.on("connection", (ws, req) => {
     const clientId = randomUUID();
     const wsLog = createLogger({ connectionId: clientId });
-    // Rate limit key. There is no Express request here, so read the socket
-    // directly. The forwarded header is only honoured when a proxy is trusted,
-    // otherwise a client could set it and get a fresh bucket per frame.
-    const forwarded = config.trustProxy
-      ? (req?.headers["x-forwarded-for"] || "").split(",")[0].trim()
-      : "";
-    const clientKey = forwarded || req?.socket?.remoteAddress || clientId;
+    // Resolve the client key using the same proxy-trust semantics as Express
+    // req.ip so that REST and WebSocket requests from the same real client
+    // share one rate-limit bucket.  Reading X-Forwarded-For directly (old
+    // code) let a client forge the header to get a fresh bucket per frame.
+    const clientKey = resolveClientIp(req, config.trustProxy) || clientId;
     wsLog.info("WebSocket client connected");
 
     // Track approval state per session
