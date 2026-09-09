@@ -123,4 +123,44 @@ describe("MessageBubble — XSS / HTML-injection safety (Issue #240)", () => {
     );
     expect(screen.getByText("Just plain text here.")).toBeInTheDocument();
   });
+
+  // ── Markdown block-element rendering (follow-up from #240) ───────────────
+
+  it("multiple paragraphs render as separate <p> elements", () => {
+    const content = "First paragraph.\n\nSecond paragraph.";
+    const { container } = render(
+      <MessageBubble message={makeMessage({ content })} />
+    );
+    const paragraphs = container.querySelectorAll(".text-content p");
+    expect(paragraphs.length).toBeGreaterThanOrEqual(2);
+    expect(paragraphs[0].textContent).toContain("First paragraph");
+    expect(paragraphs[1].textContent).toContain("Second paragraph");
+  });
+
+  it("unordered list renders <ul> with <li> children", () => {
+    const content = "- apple\n- banana\n- cherry";
+    const { container } = render(
+      <MessageBubble message={makeMessage({ content })} />
+    );
+    const ul = container.querySelector(".text-content ul");
+    expect(ul).not.toBeNull();
+    const items = ul.querySelectorAll("li");
+    expect(items.length).toBe(3);
+    expect(items[0].textContent).toContain("apple");
+    expect(items[1].textContent).toContain("banana");
+    expect(items[2].textContent).toContain("cherry");
+  });
+
+  it("ordered list renders <ol> with <li> children", () => {
+    const content = "1. first\n2. second\n3. third";
+    const { container } = render(
+      <MessageBubble message={makeMessage({ content })} />
+    );
+    const ol = container.querySelector(".text-content ol");
+    expect(ol).not.toBeNull();
+    const items = ol.querySelectorAll("li");
+    expect(items.length).toBe(3);
+    expect(items[0].textContent).toContain("first");
+    expect(items[2].textContent).toContain("third");
+  });
 });

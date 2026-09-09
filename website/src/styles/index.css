@@ -403,6 +403,37 @@ body {
   word-break: break-word;
 }
 
+.text-content p {
+  margin-top: 0.65em;
+  margin-bottom: 0.65em;
+}
+
+.text-content p:first-child {
+  margin-top: 0;
+}
+
+.text-content p:last-child {
+  margin-bottom: 0;
+}
+
+.text-content ul,
+.text-content ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.text-content ul {
+  list-style-type: disc;
+}
+
+.text-content ol {
+  list-style-type: decimal;
+}
+
+.text-content li {
+  margin-bottom: 0.25em;
+}
+
 .text-content strong {
   font-weight: 600;
 }
