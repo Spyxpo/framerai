@@ -89,6 +89,52 @@ def test_reserved_markers_roundtrip():
     assert tokenizer.decode(ids) == text
 
 
+def test_reserved_reasoning_tokens_and_stability(tmp_path):
+    """Reasoning markers must occupy slots 7 and 8 and leave all existing IDs untouched."""
+    tokenizer = FramerTokenizer()
+    reserved_base = tokenizer.num_special + 256
+
+    assert "<reasoning>" in tokenizer.reserved_tokens
+    assert "</reasoning>" in tokenizer.reserved_tokens
+    assert tokenizer.reserved_tokens["<reasoning>"] == reserved_base + 7
+    assert tokenizer.reserved_tokens["</reasoning>"] == reserved_base + 8
+
+    # All reserved tokens remain at their exact defined offsets relative to reserved_base
+    for name, offset in FramerTokenizer.RESERVED_TOKENS.items():
+        assert tokenizer.reserved_tokens[name] == reserved_base + offset
+
+    # Capacity check: total reserved tokens must not exceed the fixed RESERVED_SLOTS capacity
+    assert len(FramerTokenizer.RESERVED_TOKENS) <= FramerTokenizer.RESERVED_SLOTS
+
+    # Merge boundary remains fixed
+    assert tokenizer.first_merge_id == reserved_base + FramerTokenizer.RESERVED_SLOTS
+
+    # Byte token IDs remain fixed
+    for b in range(256):
+        assert tokenizer.byte_to_token[b] == tokenizer.num_special + b
+
+    # Special token IDs remain fixed
+    for name, tid in FramerTokenizer.SPECIAL_TOKENS.items():
+        assert tokenizer.special_tokens[name] == tid
+
+    # Round trip test for reasoning markers
+    trained_tok = trained()
+    text = "think <reasoning>step 1</reasoning> done"
+    ids = trained_tok.encode(text, add_special=False)
+    assert tokenizer.reserved_tokens["<reasoning>"] in ids
+    assert tokenizer.reserved_tokens["</reasoning>"] in ids
+    assert trained_tok.decode(ids) == text
+
+    # Save and load round-trip preserves reasoning markers
+    trained_tok.save(str(tmp_path))
+    reloaded = FramerTokenizer.load(str(tmp_path))
+    assert "<reasoning>" in reloaded.reserved_tokens
+    assert "</reasoning>" in reloaded.reserved_tokens
+    assert reloaded.reserved_tokens["<reasoning>"] == tokenizer.reserved_tokens["<reasoning>"]
+    assert reloaded.reserved_tokens["</reasoning>"] == tokenizer.reserved_tokens["</reasoning>"]
+    assert reloaded.decode(reloaded.encode(text, add_special=False)) == text
+
+
 def test_adding_a_reserved_marker_does_not_shift_merge_ids():
     """The block is fixed-capacity, so filling a slot moves nothing."""
     base = FramerTokenizer()

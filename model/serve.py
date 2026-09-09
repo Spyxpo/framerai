@@ -309,6 +309,43 @@ def _require_mind(mind, op):
     return mind
 
 
+def _extract_reasoning(
+    content: str,
+    start_marker: str = "<reasoning>",
+    end_marker: str = "</reasoning>",
+) -> tuple[str, str | None]:
+    """Extract reasoning text bounded by marker tokens and strip it from user-visible content.
+
+    Uses actual marker token boundaries rather than regex parsing.
+    """
+    if start_marker not in content:
+        return content, None
+
+    reasoning_parts = []
+    remaining = content
+    cleaned_pieces = []
+
+    while start_marker in remaining:
+        before, rest = remaining.split(start_marker, 1)
+        cleaned_pieces.append(before)
+        if end_marker in rest:
+            reasoning, remaining = rest.split(end_marker, 1)
+            reasoning_parts.append(reasoning.strip())
+            # Clean duplicate assistant role transition if marker split left one
+            if before.endswith("<assistant>") and remaining.startswith("<assistant>"):
+                remaining = remaining[len("<assistant>"):]
+        else:
+            # Unclosed marker (e.g. truncated generation)
+            reasoning_parts.append(rest.strip())
+            remaining = ""
+            break
+
+    cleaned_pieces.append(remaining)
+    cleaned_content = "".join(cleaned_pieces)
+    reasoning_text = "\n\n".join(reasoning_parts) if reasoning_parts else None
+    return cleaned_content, reasoning_text
+
+
 def handle(gen, op, params, mind=None, tools=None):
 
     out_dir = params.get("out_dir", ".")
@@ -318,6 +355,7 @@ def handle(gen, op, params, mind=None, tools=None):
     if op in ("chat", "text"):
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
+        return_reasoning = bool(params.get("reasoning", False))
 
         messages = params.get("messages")
         tool_trace = None
@@ -334,23 +372,34 @@ def handle(gen, op, params, mind=None, tools=None):
             if mind is None:
                 # The trace carries every query and page, so an answer sourced
                 # from the web can be checked rather than taken on faith.
-                return {"content": reply, "tools": tool_trace.to_dict()}
+                reply, reasoning = _extract_reasoning(reply)
+                res = {"content": reply, "tools": tool_trace.to_dict()}
+                if return_reasoning:
+                    res["reasoning"] = reasoning if reasoning is not None else ""
+                return res
             # With a mind attached the tools gather; the mind still answers, so
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
         image, documents = _read_attachments(gen, params.get("attachments"))
 
+        template_version = params.get("chat_template_version")
+        if not template_version:
+            if return_reasoning or (messages and any(m.get("role") == "reasoning" for m in messages)):
+                template_version = "v2"
+            else:
+                template_version = "v1"
+
         if messages and not prompt:
             from .tokenizer.chat_template import ChatTemplate
 
-            prompt = ChatTemplate(version="v1").format_messages(
+            prompt = ChatTemplate(version=template_version).format_messages(
                 messages, add_generation_prompt=True
             )
         elif prompt and not prompt.startswith("<"):
             from .tokenizer.chat_template import ChatTemplate
 
-            prompt = ChatTemplate(version="v1").format_messages(
+            prompt = ChatTemplate(version=template_version).format_messages(
                 [{"role": "user", "content": prompt}], add_generation_prompt=True
             )
 
@@ -367,11 +416,14 @@ def handle(gen, op, params, mind=None, tools=None):
                 max_new_tokens=max_new_tokens,
                 **_sampling(params),
             )
+            reply, reasoning = _extract_reasoning(reply)
             # The trace travels with the reply so a client can show what was
             # recalled and how the model felt, rather than guessing.
             result = {"content": reply, "trace": trace.to_dict()}
             if tool_trace is not None:
                 result["tools"] = tool_trace.to_dict()
+            if return_reasoning:
+                result["reasoning"] = reasoning if reasoning is not None else ""
             return result
         content = gen.generate_text(
             prompt,
@@ -379,7 +431,11 @@ def handle(gen, op, params, mind=None, tools=None):
             image=image,
             **_sampling(params),
         )
-        return {"content": content, **_window_report(gen, max_new_tokens)}
+        content, reasoning = _extract_reasoning(content)
+        result = {"content": content, **_window_report(gen, max_new_tokens)}
+        if return_reasoning:
+            result["reasoning"] = reasoning if reasoning is not None else ""
+        return result
 
     if op == "search":
         tool = _require_tool(tools, "web_search", op)

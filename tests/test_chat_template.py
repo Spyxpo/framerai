@@ -1,5 +1,6 @@
 """Unit tests for ChatTemplate, versioned chat formatting, next-token alignment, and real tool parser integration."""
 
+import pytest
 import torch
 
 from model.tokenizer import ChatTemplate, FramerTokenizer
@@ -263,3 +264,318 @@ def test_attention_mask_returned_and_correct():
     num_real = sum(1 for tok in input_ids.tolist() if tok != tokenizer.pad_id)
     assert (mask[:num_real] == 1).all()
     assert (mask[num_real:] == 0).all()
+
+
+def test_chat_template_format_v2_reasoning_and_v1_compatibility():
+    """Verify v2 emits <reasoning>...</reasoning>, v1 keeps legacy format, and both remain constructible."""
+    # Version compatibility and construction
+    v1_template = ChatTemplate(version="v1")
+    assert v1_template.version == "v1"
+
+    v2_template = ChatTemplate(version="v2")
+    assert v2_template.version == "v2"
+
+    # Default constructor preserves v1 behavior for backward compatibility
+    default_template = ChatTemplate()
+    assert default_template.version == "v1"
+
+    with pytest.raises(ValueError, match="Unsupported ChatTemplate version"):
+        ChatTemplate(version="v3")
+
+    messages_with_reasoning = [
+        {"role": "system", "content": "You are a thinker."},
+        {"role": "user", "content": "Calculate 2+2."},
+        {"role": "reasoning", "content": "2+2 equals 4."},
+        {"role": "assistant", "content": "The answer is 4."},
+    ]
+
+    # v2 renders reasoning segment with opening and closing markers
+    v2_formatted = v2_template.format_messages(messages_with_reasoning)
+    assert v2_formatted == (
+        "<system>You are a thinker."
+        "<user>Calculate 2+2."
+        "<reasoning>2+2 equals 4.</reasoning>"
+        "<assistant>The answer is 4."
+    )
+
+    # v1 leaves legacy behavior intact: reasoning falls through to <reasoning>content
+    v1_formatted = v1_template.format_messages(messages_with_reasoning)
+    assert v1_formatted == (
+        "<system>You are a thinker."
+        "<user>Calculate 2+2."
+        "<reasoning>2+2 equals 4."
+        "<assistant>The answer is 4."
+    )
+
+    # Messages without reasoning format identically under v1 and v2
+    standard_messages = [
+        {"role": "user", "content": "Hello!"},
+        {"role": "assistant", "content": "Hi there!"},
+    ]
+    assert v1_template.format_messages(standard_messages) == v2_template.format_messages(standard_messages)
+
+
+def test_chat_template_reasoning_encode_token_ids():
+    """Reasoning markers must encode to exact reserved token IDs, not decomposed byte tokens."""
+    tokenizer = FramerTokenizer(vocab_size=400)
+    template = ChatTemplate("v2")
+
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "reasoning", "content": "Thinking"},
+        {"role": "assistant", "content": "Hello"},
+    ]
+    formatted = template.format_messages(messages)
+    ids = tokenizer.encode(formatted, add_special=False)
+
+    reserved_base = tokenizer.num_special + 256
+    reasoning_open_id = tokenizer.reserved_tokens["<reasoning>"]
+    reasoning_close_id = tokenizer.reserved_tokens["</reasoning>"]
+    assert reasoning_open_id == reserved_base + 7
+    assert reasoning_close_id == reserved_base + 8
+
+    assert reasoning_open_id in ids
+    assert reasoning_close_id in ids
+
+    # Confirm the markers occur as single tokens, not fragmented raw bytes
+    open_bytes = list(b"<reasoning>")
+    open_byte_tokens = [tokenizer.byte_to_token[b] for b in open_bytes]
+    # The exact consecutive sequence of raw byte tokens should NOT be in ids
+    assert open_byte_tokens != ids[:len(open_byte_tokens)]
+
+
+def test_chat_template_independent_reasoning_masking():
+    """Verify independent masking for reasoning and assistant targets with next-token alignment."""
+    tokenizer = FramerTokenizer(vocab_size=400)
+    template = ChatTemplate("v2")
+
+    messages = [
+        {"role": "user", "content": "Question"},
+        {"role": "reasoning", "content": "Thinking process"},
+        {"role": "assistant", "content": "Direct answer"},
+    ]
+
+    usr_ids = tokenizer.encode("<user>Question", add_special=False)
+    rsn_ids = tokenizer.encode("<reasoning>Thinking process</reasoning>", add_special=False)
+    ast_ids = tokenizer.encode("<assistant>Direct answer", add_special=False)
+
+    prefix_len = 1 + len(usr_ids)  # sos + user
+    rsn_len = len(rsn_ids)
+    ast_len = len(ast_ids)
+
+    # 1. BOTH reasoning and assistant are training targets
+    enc_both = template.encode_conversation(
+        messages, tokenizer, max_len=128, pad_to_max=False,
+        target_reasoning=True, target_assistant=True,
+    )
+    labels_both = enc_both["labels"].tolist()
+
+    # Prompt positions masked
+    for i in range(prefix_len - 1):
+        assert labels_both[i] == -100, f"Prompt pos {i} should be masked"
+
+    # End of user turn predicts first token of reasoning (<reasoning>)
+    assert labels_both[prefix_len - 1] == rsn_ids[0]
+
+    # Inside reasoning tokens are targets
+    for j in range(rsn_len - 1):
+        assert labels_both[prefix_len + j] == rsn_ids[j + 1]
+
+    # End of reasoning turn (</reasoning>) predicts first token of assistant (<assistant>)
+    assert labels_both[prefix_len + rsn_len - 1] == ast_ids[0]
+
+    # Inside assistant tokens are targets
+    for k in range(ast_len - 1):
+        assert labels_both[prefix_len + rsn_len + k] == ast_ids[k + 1]
+
+    # Final label is EOS
+    assert labels_both[-1] == tokenizer.eos_id
+
+    # 2. ONLY reasoning is target (assistant answer masked)
+    enc_rsn_only = template.encode_conversation(
+        messages, tokenizer, max_len=128, pad_to_max=False,
+        target_reasoning=True, target_assistant=False,
+    )
+    labels_rsn_only = enc_rsn_only["labels"].tolist()
+
+    # Prompt masked
+    for i in range(prefix_len - 1):
+        assert labels_rsn_only[i] == -100
+
+    # Reasoning targeted
+    assert labels_rsn_only[prefix_len - 1] == rsn_ids[0]
+    for j in range(rsn_len - 1):
+        assert labels_rsn_only[prefix_len + j] == rsn_ids[j + 1]
+
+    # Assistant positions masked
+    for idx in range(prefix_len + rsn_len - 1, len(labels_rsn_only)):
+        assert labels_rsn_only[idx] == -100, f"Assistant pos {idx} should be masked"
+
+    # 3. ONLY assistant is target (reasoning masked)
+    enc_ast_only = template.encode_conversation(
+        messages, tokenizer, max_len=128, pad_to_max=False,
+        target_reasoning=False, target_assistant=True,
+    )
+    labels_ast_only = enc_ast_only["labels"].tolist()
+
+    # Prompt and reasoning masked
+    for i in range(prefix_len + rsn_len - 1):
+        assert labels_ast_only[i] == -100, f"Prompt/reasoning pos {i} should be masked"
+
+    # Last token of reasoning predicts first assistant token
+    assert labels_ast_only[prefix_len + rsn_len - 1] == ast_ids[0]
+
+    # Assistant targeted
+    for k in range(ast_len - 1):
+        assert labels_ast_only[prefix_len + rsn_len + k] == ast_ids[k + 1]
+    assert labels_ast_only[-1] == tokenizer.eos_id
+
+    # 4. NEITHER is target
+    enc_none = template.encode_conversation(
+        messages, tokenizer, max_len=128, pad_to_max=False,
+        target_reasoning=False, target_assistant=False,
+    )
+    assert all(lbl == -100 for lbl in enc_none["labels"].tolist())
+
+    # 5. Message-level target flag overrides
+    override_messages = [
+        {"role": "user", "content": "Question"},
+        {"role": "reasoning", "content": "Thinking process", "target": True},
+        {"role": "assistant", "content": "Direct answer", "target": False},
+    ]
+    enc_override = template.encode_conversation(
+        override_messages, tokenizer, max_len=128, pad_to_max=False,
+        target_reasoning=False, target_assistant=True,
+    )
+    assert enc_override["labels"].tolist() == labels_rsn_only
+
+
+def test_chat_template_reasoning_decode_roundtrip():
+    """Reasoning markers and content must survive encode/decode round trip with and without reasoning."""
+    tokenizer = FramerTokenizer(vocab_size=400)
+    template = ChatTemplate("v2")
+
+    # With reasoning
+    messages_with = [
+        {"role": "user", "content": "Solve 2+2"},
+        {"role": "reasoning", "content": "Adding numbers: 2+2=4"},
+        {"role": "assistant", "content": "4"},
+    ]
+    formatted_with = template.format_messages(messages_with)
+    encoded_with = tokenizer.encode(formatted_with, add_special=False)
+    decoded_with = tokenizer.decode(encoded_with)
+    assert decoded_with == formatted_with
+    assert "<reasoning>Adding numbers: 2+2=4</reasoning>" in decoded_with
+
+    # Without reasoning
+    messages_without = [
+        {"role": "user", "content": "Solve 2+2"},
+        {"role": "assistant", "content": "4"},
+    ]
+    formatted_without = template.format_messages(messages_without)
+    encoded_without = tokenizer.encode(formatted_without, add_special=False)
+    decoded_without = tokenizer.decode(encoded_without)
+    assert decoded_without == formatted_without
+
+
+def test_serve_reasoning_default_stripped(monkeypatch):
+    """By default, serving strips reasoning from the user-visible content and omits the reasoning field."""
+    from conftest import tiny_config
+    from model.framer import FramerModel
+    from model.generate import FramerGenerator
+    from model.serve import handle
+
+    tokenizer = FramerTokenizer(vocab_size=300)
+    config = tiny_config(vocab_size=tokenizer.vocab_size, max_seq_len=64)
+    generator = FramerGenerator(FramerModel(config), tokenizer, device="cpu")
+
+    def mock_generate_text(prompt, **kwargs):
+        return prompt + "<reasoning>Step-by-step logic here.</reasoning>The final answer is 42."
+
+    monkeypatch.setattr(generator, "generate_text", mock_generate_text)
+
+    # 1. String prompt
+    res1 = handle(generator, "chat", {"prompt": "What is life?", "max_new_tokens": 16})
+    assert "<reasoning>" not in res1["content"]
+    assert "</reasoning>" not in res1["content"]
+    assert "Step-by-step logic here." not in res1["content"]
+    assert "The final answer is 42." in res1["content"]
+    assert "reasoning" not in res1
+
+    # 2. Messages list
+    res2 = handle(
+        generator,
+        "chat",
+        {"messages": [{"role": "user", "content": "What is life?"}], "max_new_tokens": 16},
+    )
+    assert "<reasoning>" not in res2["content"]
+    assert "Step-by-step logic here." not in res2["content"]
+    assert "The final answer is 42." in res2["content"]
+    assert "reasoning" not in res2
+
+
+def test_serve_reasoning_explicitly_requested(monkeypatch):
+    """When reasoning is explicitly requested, return it as a separate field and strip from content."""
+    from conftest import tiny_config
+    from model.framer import FramerModel
+    from model.generate import FramerGenerator
+    from model.serve import handle
+
+    tokenizer = FramerTokenizer(vocab_size=300)
+    config = tiny_config(vocab_size=tokenizer.vocab_size, max_seq_len=64)
+    generator = FramerGenerator(FramerModel(config), tokenizer, device="cpu")
+
+    def mock_generate_text(prompt, **kwargs):
+        return prompt + "<reasoning>Step-by-step logic here.</reasoning>The final answer is 42."
+
+    monkeypatch.setattr(generator, "generate_text", mock_generate_text)
+
+    # 1. Requested via reasoning=True with reasoning present in output
+    res1 = handle(
+        generator,
+        "chat",
+        {"prompt": "What is life?", "max_new_tokens": 16, "reasoning": True},
+    )
+    assert "<reasoning>" not in res1["content"]
+    assert "Step-by-step logic here." not in res1["content"]
+    assert "The final answer is 42." in res1["content"]
+    assert res1.get("reasoning") == "Step-by-step logic here."
+
+    # 2. Requested via reasoning=True when output contains NO reasoning markers
+    monkeypatch.setattr(generator, "generate_text", lambda prompt, **kw: prompt + "Direct answer.")
+    res2 = handle(
+        generator,
+        "chat",
+        {"prompt": "What is life?", "max_new_tokens": 16, "reasoning": True},
+    )
+    assert "Direct answer." in res2["content"]
+    assert res2.get("reasoning") == ""
+
+
+def test_serve_reasoning_unclosed_truncated(monkeypatch):
+    """If generation truncates inside a reasoning segment, strip it from content and return as reasoning if requested."""
+    from conftest import tiny_config
+    from model.framer import FramerModel
+    from model.generate import FramerGenerator
+    from model.serve import handle
+
+    tokenizer = FramerTokenizer(vocab_size=300)
+    config = tiny_config(vocab_size=tokenizer.vocab_size, max_seq_len=64)
+    generator = FramerGenerator(FramerModel(config), tokenizer, device="cpu")
+
+    def mock_generate_text(prompt, **kwargs):
+        return prompt + "<reasoning>Unclosed thinking..."
+
+    monkeypatch.setattr(generator, "generate_text", mock_generate_text)
+
+    # Default: unclosed reasoning is stripped from content
+    res_default = handle(generator, "chat", {"prompt": "Hi", "max_new_tokens": 8})
+    assert "<reasoning>" not in res_default["content"]
+    assert "Unclosed thinking..." not in res_default["content"]
+    assert "reasoning" not in res_default
+
+    # Requested: unclosed reasoning returned in separate field
+    res_req = handle(generator, "chat", {"prompt": "Hi", "max_new_tokens": 8, "reasoning": True})
+    assert "<reasoning>" not in res_req["content"]
+    assert "Unclosed thinking..." not in res_req["content"]
+    assert res_req.get("reasoning") == "Unclosed thinking..."
