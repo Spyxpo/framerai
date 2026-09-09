@@ -6,6 +6,7 @@
  * replicas would need a shared store such as Redis.
  */
 
+const proxyaddr = require("proxy-addr");
 const { ApiError } = require("./errors");
 
 class FixedWindowCounter {
@@ -80,4 +81,45 @@ function rateLimit(counter, message = "Too many requests") {
   };
 }
 
-module.exports = { rateLimit, FixedWindowCounter };
+/**
+ * Resolve the real client IP from an HTTP(S)/WebSocket upgrade request using
+ * the same proxy-trust semantics that Express uses for req.ip.
+ *
+ * Mirrors Express compileTrust (lib/utils.js) so that WebSocket upgrade
+ * requests and REST requests from the same physical client always resolve to
+ * the same key and share one rate-limit bucket.
+ *
+ * Trust values follow Express semantics exactly:
+ *   false / falsy  → trust nobody  (socket address always returned)
+ *   true           → trust all hops
+ *   number n       → trust n hops  (Express uses `(addr, i) => i < n`;
+ *                                   proxyaddr.compile does not accept numbers)
+ *   string/array   → named subnets / CIDRs passed to proxyaddr.compile
+ *
+ * @param {import("http").IncomingMessage} req - The raw HTTP upgrade request.
+ * @param {boolean|number|string} trustProxy    - The value of config.trustProxy.
+ * @returns {string} The resolved client IP address.
+ */
+function resolveClientIp(req, trustProxy) {
+  try {
+    // Mirror Express compileTrust (lib/utils.js) exactly:
+    //   false / falsy  → trust nobody
+    //   true           → trust all hops
+    //   number n       → trust n hops  (proxyaddr.compile does NOT accept numbers)
+    //   string/array   → named subnets / CIDRs via proxyaddr.compile
+    let trust;
+    if (trustProxy === true) {
+      trust = () => true;
+    } else if (typeof trustProxy === "number") {
+      trust = (addr, i) => i < trustProxy;
+    } else {
+      trust = proxyaddr.compile(trustProxy || []);
+    }
+    return proxyaddr(req, trust);
+  } catch {
+    // Fallback to socket address if proxyaddr fails (e.g. malformed header)
+    return req?.socket?.remoteAddress || "unknown";
+  }
+}
+
+module.exports = { rateLimit, FixedWindowCounter, resolveClientIp };
