@@ -12,16 +12,19 @@ class ChatTemplate:
     Formats conversations into structured role segments:
     - system:     <system>...
     - user:       <user>...
+    - reasoning:  <reasoning>...</reasoning>  (v2)
     - assistant:  <assistant>...
     - tool_call:  <tool_call>...
     - tool:       <tool>...
     """
 
-    VERSION = "v1"
+    VERSION = "v2"
+    SUPPORTED_VERSIONS = ("v1", "v2")
 
     def __init__(self, version: str = "v1"):
-        if version != "v1":
-            raise ValueError(f"Unsupported ChatTemplate version: {version!r}. Supported: 'v1'")
+        if version not in self.SUPPORTED_VERSIONS:
+            supported = ", ".join(repr(v) for v in self.SUPPORTED_VERSIONS)
+            raise ValueError(f"Unsupported ChatTemplate version: {version!r}. Supported: {supported}")
         self.version = version
 
     def format_messages(self, messages: list[dict[str, Any]], add_generation_prompt: bool = False) -> str:
@@ -36,6 +39,8 @@ class ChatTemplate:
                 formatted_parts.append(f"<system>{content_str}")
             elif role == "user":
                 formatted_parts.append(f"<user>{content_str}")
+            elif role == "reasoning" and self.version == "v2":
+                formatted_parts.append(f"<reasoning>{content_str}</reasoning>")
             elif role == "assistant":
                 if "tool_calls" in msg and msg["tool_calls"]:
                     tc = msg["tool_calls"]
@@ -82,12 +87,16 @@ class ChatTemplate:
         tokenizer,
         max_len: int = 512,
         pad_to_max: bool = True,
+        target_reasoning: bool = True,
+        target_assistant: bool = True,
     ) -> dict[str, torch.Tensor]:
         """Encode a multi-turn conversation into input_ids and masked labels for SFT.
 
         Labels are pre-shifted for next-token prediction:
         input_ids = full_sequence[:-1]
-        labels = full_sequence[1:] (with non-assistant target positions set to -100)
+        labels = full_sequence[1:] (with non-target positions set to -100)
+
+        Reasoning and assistant turns can be independently targeted or masked.
         """
         full_tokens = [tokenizer.sos_id]
         full_is_target = [False]
@@ -97,12 +106,17 @@ class ChatTemplate:
             content = msg.get("content", "")
             content_str = str(content).strip() if content is not None else ""
 
+            msg_target = msg.get("target")
+
             if role == "system":
                 text = f"<system>{content_str}"
-                is_assistant = False
+                is_target = bool(msg_target) if msg_target is not None else False
             elif role == "user":
                 text = f"<user>{content_str}"
-                is_assistant = False
+                is_target = bool(msg_target) if msg_target is not None else False
+            elif role == "reasoning" and self.version == "v2":
+                text = f"<reasoning>{content_str}</reasoning>"
+                is_target = bool(msg_target) if msg_target is not None else target_reasoning
             elif role == "assistant":
                 if "tool_calls" in msg and msg["tool_calls"]:
                     tc = msg["tool_calls"]
@@ -119,7 +133,7 @@ class ChatTemplate:
                     text = f"<tool_call>{tc_str}</tool_call>"
                 else:
                     text = f"<assistant>{content_str}"
-                is_assistant = True
+                is_target = bool(msg_target) if msg_target is not None else target_assistant
             elif role == "tool_call":
                 if isinstance(content, (dict, list)):
                     c_str = json.dumps(content)
@@ -132,19 +146,19 @@ class ChatTemplate:
                 else:
                     c_str = str(content)
                 text = f"<tool_call>{c_str}</tool_call>"
-                is_assistant = True
+                is_target = bool(msg_target) if msg_target is not None else target_assistant
             elif role in ("tool", "tool_result"):
                 name = msg.get("name", "")
                 prefix = f"[{name}] " if name else ""
                 text = f"<tool>{prefix}{content_str}"
-                is_assistant = False
+                is_target = bool(msg_target) if msg_target is not None else False
             else:
                 text = f"<{role}>{content_str}"
-                is_assistant = False
+                is_target = bool(msg_target) if msg_target is not None else False
 
             turn_ids = tokenizer.encode(text, add_special=False)
             full_tokens.extend(turn_ids)
-            full_is_target.extend([is_assistant] * len(turn_ids))
+            full_is_target.extend([is_target] * len(turn_ids))
 
         full_tokens.append(tokenizer.eos_id)
         full_is_target.append(full_is_target[-1] if full_is_target else False)
