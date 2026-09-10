@@ -97,7 +97,7 @@ def _resolve_and_validate(
     if use_cache and url in _DNS_PIN_CACHE:
         ts, cached_ips = _DNS_PIN_CACHE[url]
         if now - ts < _DNS_PIN_CACHE_TTL:
-            return parsed, cached_ips
+            return parsed, list(cached_ips)
 
     try:
         infos = socket.getaddrinfo(parsed.hostname, None)
@@ -112,7 +112,8 @@ def _resolve_and_validate(
         ip_str = info[4][0]
         address = ipaddress.ip_address(ip_str)
         if (
-            address.is_private
+            not address.is_global
+            or address.is_private
             or address.is_loopback
             or address.is_link_local
             or address.is_reserved
@@ -123,13 +124,16 @@ def _resolve_and_validate(
         if ip_str not in safe_ips:
             safe_ips.append(ip_str)
 
-    _DNS_PIN_CACHE[url] = (now, safe_ips)
-    if len(_DNS_PIN_CACHE) > 256:
-        expired = [k for k, (t, _) in _DNS_PIN_CACHE.items() if now - t >= _DNS_PIN_CACHE_TTL]
-        for k in expired:
-            _DNS_PIN_CACHE.pop(k, None)
+    if use_cache:
+        _DNS_PIN_CACHE[url] = (now, list(safe_ips))
+        if len(_DNS_PIN_CACHE) > 256:
+            expired = [k for k, (t, _) in _DNS_PIN_CACHE.items() if now - t >= _DNS_PIN_CACHE_TTL]
+            for k in expired:
+                _DNS_PIN_CACHE.pop(k, None)
+            while len(_DNS_PIN_CACHE) > 256:
+                _DNS_PIN_CACHE.pop(next(iter(_DNS_PIN_CACHE)), None)
 
-    return parsed, safe_ips
+    return parsed, list(safe_ips)
 
 
 def check_url(url: str) -> str:
@@ -252,7 +256,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
     ) -> Any:
         location = headers.get("location") or headers.get("uri")
-        if not location:
+        if not location or not location.strip():
             return None
 
         # Resolve relative redirect against the current request URL
@@ -283,7 +287,8 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         new_req.redirect_count = redirect_count
         new_req.redirect_dict = visited
 
-        return self.parent.open(new_req, timeout=req.timeout)
+        timeout = getattr(req, "timeout", socket._GLOBAL_DEFAULT_TIMEOUT)
+        return self.parent.open(new_req, timeout=timeout)
 
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
@@ -296,6 +301,7 @@ def _build_safe_opener() -> urllib.request.OpenerDirector:
     opener.add_handler(_PinnedHTTPHandler())
     opener.add_handler(_PinnedHTTPSHandler())
     opener.add_handler(urllib.request.HTTPErrorProcessor())
+    opener.add_handler(urllib.request.UnknownHandler())
     return opener
 
 

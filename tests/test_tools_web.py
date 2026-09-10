@@ -7,6 +7,7 @@ are all exercised against fixed bytes.
 
 import io
 import socket
+import urllib.error
 
 import pytest
 
@@ -29,7 +30,9 @@ from model.tools.web import (
     _build_safe_opener,
     _make_pinned_create,
     _PinnedHTTPConnection,
+    _PinnedHTTPSConnection,
     _PinnedHTTPSHandler,
+    _resolve_and_validate,
     _urllib_transport,
     check_url,
     html_to_text,
@@ -459,6 +462,11 @@ def test_safe_normal_request_urllib_transport(monkeypatch):
         "http://10.0.0.1/",
         "http://172.16.0.1/",
         "http://192.168.1.1/",
+        "http://100.64.0.1/",
+        "http://0.0.0.0/",
+        "http://[::]/",
+        "http://[::ffff:127.0.0.1]/admin",
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",
         "ftp://example.com/x",
         "file:///etc/passwd",
         "http:///nohost",
@@ -703,8 +711,7 @@ def test_dns_address_pinning_prevents_rebinding(monkeypatch):
         gai_queries.append(host)
         if len(gai_queries) == 1:
             return [(2, 1, 6, "", ("93.184.216.34", 0))]
-        # DNS rebinding return
-        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+        pytest.fail(f"DNS resolution was attempted again after initial validation: {host}")
 
     connected: list[tuple[str, int]] = []
 
@@ -823,6 +830,11 @@ def test_pinned_connection_fails_closed_without_hostname_resolution(monkeypatch)
     with pytest.raises(OSError, match="refusing unpinned connection"):
         conn.connect()
 
+    # 5. _PinnedHTTPSConnection without pinned_ips must also fail closed without DNS lookup
+    sconn = _PinnedHTTPSConnection("example.com", 443, pinned_ips=None)
+    with pytest.raises(OSError, match="refusing unpinned connection"):
+        sconn.connect()
+
 
 def test_pinned_connection_tries_multiple_validated_addresses(monkeypatch):
     """Multiple validated public IPs are tried in order if earlier ones fail with OSError."""
@@ -844,3 +856,96 @@ def test_pinned_connection_tries_multiple_validated_addresses(monkeypatch):
     sock = pinned_create(("example.com", 80))
     assert sock is not None
     assert connected == ["198.51.100.1", "198.51.100.2"]
+
+
+def test_http_to_https_redirect_pinned_and_validated(monkeypatch):
+    """Redirect from HTTP to HTTPS validates the HTTPS target, pins to port 443, and preserves SNI."""
+    _DNS_PIN_CACHE.clear()
+
+    hosts_map = {
+        "example.com": "93.184.216.34",
+        "secure.example.org": "93.184.216.35",
+    }
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, *args, **kwargs: [(2, 1, 6, "", (hosts_map.get(host, "93.184.216.34"), 0))],
+    )
+
+    connected: list[tuple[str, int]] = []
+    wrapped_hostnames: list[str | None] = []
+
+    class MockSSLContext:
+        def wrap_socket(self, sock, server_hostname=None):
+            wrapped_hostnames.append(server_hostname)
+            return sock
+
+    opener = _build_safe_opener()
+    for h in opener.handlers:
+        if isinstance(h, _PinnedHTTPSHandler):
+            h._context = MockSSLContext()
+
+    monkeypatch.setattr("model.tools.web._build_safe_opener", lambda: opener)
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        if ip == "93.184.216.34":
+            return _MockResponseSocket(
+                b"HTTP/1.1 301 Moved\r\nLocation: https://secure.example.org/final\r\n\r\n"
+            )
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nsecure-final")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://example.com/start", None, 5.0, 1000)
+    assert data == b"secure-final"
+    assert connected == [
+        ("93.184.216.34", 80),
+        ("93.184.216.35", 443),
+    ]
+    assert wrapped_hostnames == ["secure.example.org"]
+
+
+def test_safe_opener_rejects_unsupported_schemes():
+    """Safe opener has UnknownHandler to reject ftp, file, data without returning None."""
+    opener = _build_safe_opener()
+    for scheme_url in ["ftp://example.com/file", "file:///etc/passwd", "data:text/plain,hello"]:
+        with pytest.raises(urllib.error.URLError, match="unknown url type"):
+            opener.open(scheme_url)
+
+
+def test_dns_pin_cache_immutability_and_redirect_isolation(monkeypatch):
+    """DNS pin cache returns copies and does not get populated by redirect hops."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+
+    # Initial resolution populates cache
+    _, ips1 = _resolve_and_validate("http://example.com/page", use_cache=True)
+    ips1.append("127.0.0.1")  # Attempt caller mutation
+
+    _, ips2 = _resolve_and_validate("http://example.com/page", use_cache=True)
+    assert "127.0.0.1" not in ips2
+    assert ips2 == ["93.184.216.34"]
+
+    # Redirect resolution (use_cache=False) must NOT pollute the cache
+    _, ips_redir = _resolve_and_validate("http://example.org/redirect", use_cache=False)
+    assert "http://example.org/redirect" not in _DNS_PIN_CACHE
+
+
+def test_redirect_whitespace_location(monkeypatch):
+    """Empty or whitespace-only Location headers cause clean HTTP error handling."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        return _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation:   \r\n\r\n")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="returned HTTP 302"):
+        _urllib_transport("http://example.com/test", None, 5.0, 1000)
