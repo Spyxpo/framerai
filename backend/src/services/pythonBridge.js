@@ -56,6 +56,11 @@ function _setTimerImpl(setFn, clearFn) {
   return prev;
 }
 
+// Grace period before escalating from SIGTERM to SIGKILL on a timed-out worker.
+// Long enough for a cooperative Python process to flush and exit, but short
+// enough that a stuck GPU kernel cannot hold a pool slot indefinitely.
+const KILL_ESCALATION_GRACE_MS = Number(process.env.MODEL_KILL_GRACE_MS || 5000);
+
 // Worker state
 class Worker {
   constructor(id) {
@@ -287,9 +292,30 @@ class Worker {
 
         // Kill the worker process. The child.on('exit') handler will fire
         // and trigger WorkerPool.handleWorkerExit() to spawn a replacement.
+        //
+        // We send SIGTERM first (cooperative shutdown), then escalate to
+        // SIGKILL after a grace period. A Python worker blocked inside a
+        // native GPU kernel may not respond to SIGTERM, which would leave
+        // this slot permanently dead and drain the pool to zero (Issue #238).
         if (this.child) {
           this.ready = false;
-          this.child.kill();
+          const dyingChild = this.child;
+          dyingChild.kill(); // SIGTERM — ask nicely
+
+          // Escalate to SIGKILL if the process is still alive after the grace period
+          const escalationTimer = _setTimeout(() => {
+            if (dyingChild && !dyingChild.killed) {
+              const workerLog2 = createLogger({ route: `worker-${this.id}` });
+              workerLog2.warn("worker did not exit after SIGTERM, sending SIGKILL", {});
+              try {
+                dyingChild.kill("SIGKILL");
+              } catch {
+                // Process may have already exited between the timer firing and kill()
+              }
+            }
+          }, KILL_ESCALATION_GRACE_MS);
+          // If the process exits on SIGTERM (normal case), clear the escalation timer
+          dyingChild.once("exit", () => _clearTimeout(escalationTimer));
         }
       }, timeoutMs);
 

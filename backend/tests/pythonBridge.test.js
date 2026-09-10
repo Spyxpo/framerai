@@ -1097,6 +1097,363 @@ describe("pythonBridge worker pool", () => {
     assert.strictEqual(resultB.content, "response-B", "request B should complete with correct response");
   });
 
+  // -------------------------------------------------------------------------
+  // Regression tests for Issue #238:
+  // "A timed-out worker is never force-killed and the pool can drain to zero"
+  //
+  // Root cause: child.kill() sends SIGTERM. A Python worker blocked inside a
+  // native GPU kernel may ignore SIGTERM, so the exit event never fires,
+  // handleWorkerExit() is never called, no replacement is spawned, and the
+  // pool permanently loses that slot.
+  //
+  // Fix: escalate to SIGKILL after a grace period if the process has not
+  // exited. _setTimeout/_clearTimeout are used for the escalation timer so
+  // tests can capture and control it.
+  // -------------------------------------------------------------------------
+
+  describe("Issue #238 regression: timed-out worker force-kill and pool replenishment", { concurrency: 1 }, () => {
+    // A MockChildProcess subclass that ignores SIGTERM (does not emit 'exit')
+    // but dies immediately when kill('SIGKILL') is called. This accurately
+    // models a Python process stuck inside a native extension.
+    class SigTermImmuneMockChildProcess extends MockChildProcess {
+      constructor(...args) {
+        super(...args);
+        this.killSignals = [];
+      }
+
+      kill(signal) {
+        this.killSignals.push(signal || "SIGTERM");
+        if (signal === "SIGKILL") {
+          // Respond to SIGKILL by actually dying
+          this.killed = true;
+          this.emit("exit", 137); // 128 + 9 (SIGKILL)
+        }
+        // SIGTERM is silently ignored — the process does not exit
+      }
+    }
+
+    it("REGRESSION #238: timed-out worker that ignores SIGTERM is force-killed via SIGKILL escalation", async () => {
+      // Demonstrates the bug: with only SIGTERM the exit event never fires,
+      // onExit is never called, and no replacement is spawned.
+      // The fix: _setTimeout fires an escalation that calls kill('SIGKILL').
+
+      process.env.MODEL_WORKERS = "1";
+      process.env.MODEL_TIMEOUT_MS = "50";
+      bridge = require("../src/services/pythonBridge");
+
+      // Replace the spawn mock to produce SIGTERM-immune workers
+      mockSpawn = () => new SigTermImmuneMockChildProcess();
+
+      // Capture escalation timer so we can fire it deterministically
+      let escalationFn = null;
+      const prev = bridge._setTimerImpl(
+        (fn, ms) => {
+          if (ms >= 60000) return { startupTimeout: true }; // startup timeout - don't fire
+          if (ms >= 5000) {
+            // This is the SIGKILL escalation timer (5000ms) — capture it
+            escalationFn = fn;
+            return { escalationTimer: true };
+          }
+          if (ms >= 500 && ms <= 8000) {
+            // Backoff timer — fire immediately for test speed
+            fn();
+            return null;
+          }
+          // Short timers (request timeout 50ms) — run natively
+          return setTimeout(fn, ms);
+        },
+        (id) => {
+          if (id && (id.escalationTimer || id.startupTimeout)) return;
+          clearTimeout(id);
+        }
+      );
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      const worker = spawnedProcesses[0];
+      assert.ok(worker instanceof SigTermImmuneMockChildProcess, "should use SIGTERM-immune worker");
+
+      // Send a request that will time out - attach error handler immediately
+      const reqPromise = bridge.request("chat", { prompt: "slow-gpu-request" }).catch((err) => {
+        // Expected timeout error
+        if (!/timed out/.test(err.message)) throw err;
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Wait for the 50ms request timeout to fire
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Drain the promise
+      await reqPromise;
+
+      // Worker received SIGTERM but is still alive (ignores it)
+      assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should have been sent");
+      assert.strictEqual(worker.killed, false, "worker should NOT be dead yet (ignores SIGTERM)");
+      assert.ok(escalationFn, "SIGKILL escalation timer should have been registered");
+
+      // Without the fix: no replacement would spawn because exit never fires.
+      // Confirm no replacement spawned yet.
+      assert.strictEqual(spawnedProcesses.length, 1, "no replacement before SIGKILL escalation fires");
+
+      // Fire the escalation — this should send SIGKILL, which triggers exit
+      escalationFn();
+      await new Promise((r) => setImmediate(r));
+
+      // Worker should now be dead
+      assert.ok(worker.killSignals.includes("SIGKILL"), "SIGKILL should have been sent after escalation");
+      assert.strictEqual(worker.killed, true, "worker should be dead after SIGKILL");
+
+      bridge._setTimerImpl(prev.set, prev.clear);
+
+      // handleWorkerExit fires and schedules replacement (backoff fires immediately)
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // A replacement worker should have been spawned (proving pool is replenished)
+      assert.ok(spawnedProcesses.length >= 2, `replacement worker should spawn after SIGKILL (found ${spawnedProcesses.length})`);
+    });
+
+    it("REGRESSION #238: pool worker count does not drain to zero when worker ignores SIGTERM", async () => {
+      // Verifies the pool replenishment path works end-to-end after SIGKILL escalation.
+
+      process.env.MODEL_WORKERS = "1";
+      process.env.MODEL_TIMEOUT_MS = "50";
+      bridge = require("../src/services/pythonBridge");
+
+      mockSpawn = () => new SigTermImmuneMockChildProcess();
+
+      // Use zero-delay backoff but capture the escalation timer
+      let escalationFn = null;
+      const prev = bridge._setTimerImpl(
+        (fn, ms) => {
+          if (ms >= 60000) return { startupTimeout: true }; // startup timeout — don't fire
+          if (ms >= 5000) {
+            // SIGKILL escalation — capture it
+            escalationFn = fn;
+            return { escalationTimer: true };
+          }
+          if (ms >= 500 && ms <= 8000) {
+            // Backoff — fire immediately
+            fn();
+            return null;
+          }
+          // Short timers (request timeout 50ms) — run natively
+          return setTimeout(fn, ms);
+        },
+        (id) => {
+          if (id && (id.escalationTimer || id.startupTimeout)) return;
+          clearTimeout(id);
+        }
+      );
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      assert.strictEqual(spawnedProcesses.length, 1, "start: 1 worker");
+      assert.strictEqual(bridge.available(), true, "pool should be available");
+
+      // Fire a request that will time out - attach error handler immediately
+      const reqPromise = bridge.request("chat", { prompt: "will-timeout" }).catch((err) => {
+        if (!/timed out/.test(err.message)) throw err;
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Let the 50ms timeout fire
+      await new Promise((r) => setTimeout(r, 100));
+      await reqPromise;
+
+      // Escalation timer should be registered
+      assert.ok(escalationFn, "escalation timer should be registered after SIGTERM");
+
+      // Before escalation: no replacement (exit hasn't fired)
+      await new Promise((r) => setImmediate(r));
+      assert.strictEqual(spawnedProcesses.length, 1, "no replacement before SIGKILL fires");
+
+      // Fire escalation → worker dies → onExit → handleWorkerExit → backoff fires immediately → spawn
+      escalationFn();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r)); // extra tick for async handleWorkerExit
+
+      assert.ok(spawnedProcesses.length >= 2, `pool should spawn a replacement after SIGKILL (got ${spawnedProcesses.length})`);
+
+      // Make the replacement ready
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      replacement.simulateReady(true);
+      await new Promise((r) => setImmediate(r));
+
+      bridge._setTimerImpl(prev.set, prev.clear);
+
+      // Pool must be usable again
+      assert.strictEqual(bridge.available(), true, "pool should be available after replacement");
+
+      // A new request should complete successfully on the replacement
+      const req2Promise = bridge.request("chat", { prompt: "after-recovery" });
+      await new Promise((r) => setImmediate(r));
+      assert.ok(replacement.lastWrite, "replacement should receive new request");
+      const msg = JSON.parse(replacement.lastWrite);
+      replacement.simulateResponse(msg.id, true, { content: "ok" });
+      const result = await req2Promise;
+      assert.strictEqual(result.content, "ok", "pool should serve requests after SIGKILL recovery");
+    });
+
+    it("REGRESSION #238: escalation timer is cleared when worker exits on SIGTERM (normal case)", async () => {
+      // Confirms the fix does NOT break the normal SIGTERM path:
+      // when the process cooperatively exits, the SIGKILL escalation timer
+      // is cancelled and SIGKILL is never sent.
+
+      process.env.MODEL_WORKERS = "1";
+      process.env.MODEL_TIMEOUT_MS = "50";
+      bridge = require("../src/services/pythonBridge");
+
+      // Normal mock: kill() emits exit immediately (cooperative SIGTERM response)
+      // This is the default MockChildProcess behavior.
+
+      let escalationTimerCleared = false;
+      let escalationTimerRegistered = false;
+      const prev = bridge._setTimerImpl(
+        (fn, ms) => {
+          if (ms >= 60000) return { startupTimeout: true };
+          if (ms >= 5000) {
+            escalationTimerRegistered = true;
+            // Return a real timer but track clearing
+            const id = setTimeout(fn, ms);
+            id._isEscalation = true;
+            return id;
+          }
+          if (ms >= 500 && ms <= 8000) { fn(); return null; }
+          return setTimeout(fn, ms);
+        },
+        (id) => {
+          if (id && id.startupTimeout) return;
+          if (id && id._isEscalation) { escalationTimerCleared = true; }
+          clearTimeout(id);
+        }
+      );
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      // Fire a request that will time out — default mock cooperative kill - attach error handler immediately
+      const reqPromise = bridge.request("chat", { prompt: "cooperative-timeout" }).catch((err) => {
+        if (!/timed out/.test(err.message)) throw err;
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await new Promise((r) => setTimeout(r, 100)); // let 50ms timeout fire
+      await reqPromise;
+
+      bridge._setTimerImpl(prev.set, prev.clear);
+
+      // The escalation timer should have been registered AND then cleared
+      // because the mock process exits immediately on kill() (SIGTERM response)
+      assert.ok(escalationTimerRegistered, "escalation timer should be registered");
+      assert.ok(escalationTimerCleared, "escalation timer should be cleared when process exits on SIGTERM");
+    });
+
+    it("REGRESSION #238: timed-out worker cannot be reused for a later request", async () => {
+      // Verifies that after a timeout the killed worker is never dispatched
+      // a new request. Only the replacement worker handles subsequent requests.
+
+      process.env.MODEL_WORKERS = "1";
+      process.env.MODEL_TIMEOUT_MS = "50";
+      bridge = require("../src/services/pythonBridge");
+
+      mockSpawn = () => new SigTermImmuneMockChildProcess();
+
+      let escalationFn = null;
+      const prev = bridge._setTimerImpl(
+        (fn, ms) => {
+          if (ms >= 60000) return { startupTimeout: true };
+          if (ms >= 5000) { escalationFn = fn; return { escalationTimer: true }; }
+          if (ms >= 500 && ms <= 8000) { fn(); return null; }
+          return setTimeout(fn, ms);
+        },
+        (id) => {
+          if (id && (id.escalationTimer || id.startupTimeout)) return;
+          clearTimeout(id);
+        }
+      );
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      const originalWorker = spawnedProcesses[0];
+
+      // Time out a request - attach error handler immediately
+      const reqPromise = bridge.request("chat", { prompt: "timeout-me" }).catch((err) => {
+        if (!/timed out/.test(err.message)) throw err;
+      });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setTimeout(r, 100));
+      await reqPromise;
+
+      // Fire SIGKILL escalation → exit → replacement spawns
+      assert.ok(escalationFn, "escalation timer must be registered");
+      escalationFn();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      assert.ok(spawnedProcesses.length >= 2, "replacement must spawn");
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      replacement.simulateReady(true);
+      await new Promise((r) => setImmediate(r));
+
+      bridge._setTimerImpl(prev.set, prev.clear);
+
+      // Send a new request — it MUST go to the replacement, not the dead original
+      const req2Promise = bridge.request("chat", { prompt: "new-request" });
+      await new Promise((r) => setImmediate(r));
+
+      assert.ok(replacement.lastWrite, "new request should go to replacement worker");
+      assert.ok(
+        !originalWorker.lastWrite || JSON.parse(originalWorker.lastWrite).params.prompt !== "new-request",
+        "dead original worker must NOT receive new requests"
+      );
+
+      const msg = JSON.parse(replacement.lastWrite);
+      replacement.simulateResponse(msg.id, true, { content: "new-ok" });
+      const result = await req2Promise;
+      assert.strictEqual(result.content, "new-ok");
+    });
+
+    it("REGRESSION #238: normal worker reuse still works after successful requests", async () => {
+      // Confirms the fix does not break the happy path: successful requests
+      // continue to be served by the same worker (no unnecessary replacement).
+
+      process.env.MODEL_WORKERS = "1";
+      bridge = require("../src/services/pythonBridge");
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      const worker = spawnedProcesses[0];
+
+      // First successful request
+      const req1 = bridge.request("chat", { prompt: "req1" });
+      await new Promise((r) => setImmediate(r));
+      const msg1 = JSON.parse(worker.lastWrite);
+      worker.simulateResponse(msg1.id, true, { content: "r1" });
+      const res1 = await req1;
+      assert.strictEqual(res1.content, "r1");
+
+      // Second successful request — same worker, no replacement
+      const req2 = bridge.request("chat", { prompt: "req2" });
+      await new Promise((r) => setImmediate(r));
+      const msg2 = JSON.parse(worker.lastWrite);
+      worker.simulateResponse(msg2.id, true, { content: "r2" });
+      const res2 = await req2;
+      assert.strictEqual(res2.content, "r2");
+
+      assert.strictEqual(spawnedProcesses.length, 1, "no new workers spawned for successful requests");
+    });
+  });
+
   it("REGRESSION TEST: approval_request after timeout should not route to wrong currentRequest", async () => {
     // This test verifies the fix for approval routing confusion:
     // When request A times out, the worker is killed. Late approval_request
