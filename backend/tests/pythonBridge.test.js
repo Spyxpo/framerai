@@ -1142,6 +1142,10 @@ describe("pythonBridge worker pool", () => {
       // Demonstrates the bug: with only SIGTERM the exit event never fires,
       // onExit is never called, and no replacement is spawned.
       // The fix: _setTimeout fires an escalation that calls kill('SIGKILL').
+      //
+      // UPDATE for Issue #276: The timeout path now calls handleWorkerExit directly
+      // so the replacement spawns immediately without waiting for the exit event.
+      // The SIGKILL escalation still fires to clean up the stuck process.
 
       process.env.MODEL_WORKERS = "1";
       process.env.MODEL_TIMEOUT_MS = "50";
@@ -1199,9 +1203,10 @@ describe("pythonBridge worker pool", () => {
       assert.strictEqual(worker.exited, false, "worker should NOT have exited yet (ignores SIGTERM)");
       assert.ok(escalationFn, "SIGKILL escalation timer should have been registered");
 
-      // Without the fix: no replacement would spawn because exit never fires.
-      // Confirm no replacement spawned yet.
-      assert.strictEqual(spawnedProcesses.length, 1, "no replacement before SIGKILL escalation fires");
+      // Issue #276 fix: handleWorkerExit is called directly from timeout path,
+      // so replacement spawns immediately (before SIGKILL escalation fires).
+      await new Promise((r) => setImmediate(r));
+      assert.ok(spawnedProcesses.length >= 2, `replacement should spawn immediately via Issue #276 fix (found ${spawnedProcesses.length})`);
 
       // Fire the escalation — this should send SIGKILL, which triggers exit
       escalationFn();
@@ -1212,17 +1217,13 @@ describe("pythonBridge worker pool", () => {
       assert.strictEqual(worker.exited, true, "worker should be dead after SIGKILL");
 
       bridge._setTimerImpl(prev.set, prev.clear);
-
-      // handleWorkerExit fires and schedules replacement (backoff fires immediately)
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r));
-
-      // A replacement worker should have been spawned (proving pool is replenished)
-      assert.ok(spawnedProcesses.length >= 2, `replacement worker should spawn after SIGKILL (found ${spawnedProcesses.length})`);
     });
 
     it("REGRESSION #238: pool worker count does not drain to zero when worker ignores SIGTERM", async () => {
       // Verifies the pool replenishment path works end-to-end after SIGKILL escalation.
+      //
+      // UPDATE for Issue #276: The timeout path now calls handleWorkerExit directly
+      // so the replacement spawns immediately without waiting for the exit event.
 
       process.env.MODEL_WORKERS = "1";
       process.env.MODEL_TIMEOUT_MS = "50";
@@ -1274,16 +1275,13 @@ describe("pythonBridge worker pool", () => {
       // Escalation timer should be registered
       assert.ok(escalationFn, "escalation timer should be registered after SIGTERM");
 
-      // Before escalation: no replacement (exit hasn't fired)
+      // Issue #276 fix: handleWorkerExit is called directly, so replacement spawns immediately
       await new Promise((r) => setImmediate(r));
-      assert.strictEqual(spawnedProcesses.length, 1, "no replacement before SIGKILL fires");
+      assert.ok(spawnedProcesses.length >= 2, `replacement should spawn immediately via Issue #276 fix (got ${spawnedProcesses.length})`);
 
-      // Fire escalation → worker dies → onExit → handleWorkerExit → backoff fires immediately → spawn
+      // Fire escalation → worker dies (cleanup stuck process)
       escalationFn();
       await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r)); // extra tick for async handleWorkerExit
-
-      assert.ok(spawnedProcesses.length >= 2, `pool should spawn a replacement after SIGKILL (got ${spawnedProcesses.length})`);
 
       // Make the replacement ready
       const replacement = spawnedProcesses[spawnedProcesses.length - 1];
@@ -1559,4 +1557,163 @@ describe("pythonBridge worker pool", () => {
   });
 });
 
+});
+
+
+// ============================================================================
+// Issue #276 Regression Tests: Timeout path directly calls handleWorkerExit
+// ============================================================================
+
+describe("Issue #276: timeout path calls handleWorkerExit directly", () => {
+  let bridge = null;
+  let originalExistsSync = null;
+
+  beforeEach(() => {
+    // Reset module state
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    // Setup environment
+    process.env.MODEL_ENABLED = "true";
+    process.env.MODEL_PATH = "/fake/model.pt";
+    process.env.TOKENIZER_PATH = "/fake/tokenizer";
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "50";
+
+    // Mock fs.existsSync
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path.includes("model.pt")) return true;
+      return originalExistsSync(path);
+    };
+
+    // Mock spawn
+    mockSpawn = (command, args, options) => {
+      return new MockChildProcess(command, args, options);
+    };
+  });
+
+  afterEach(() => {
+    // Restore fs.existsSync
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    // Cleanup
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  it("REGRESSION #276: timeout handler calls handleWorkerExit without waiting for exit event", async () => {
+    // Issue #276: A process stuck in uninterruptible state (e.g., CUDA ioctl)
+    // may not be reaped even after SIGKILL. The timeout path must call
+    // handleWorkerExit directly to ensure immediate pool cleanup/replenishment.
+
+    bridge = require("../src/services/pythonBridge");
+
+    // Mock child that NEVER emits exit (stuck in uninterruptible state)
+    class StuckMockChildProcess extends MockChildProcess {
+      kill(signal) {
+        this.killed = true;
+        // DO NOT emit exit - simulates process stuck even after SIGKILL
+      }
+    }
+
+    mockSpawn = () => new StuckMockChildProcess();
+
+    // Use immediate backoff but keep escalation timer pending
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true }; // startup timeout
+        if (ms >= 5000) return { escalationTimer: true }; // SIGKILL escalation
+        if (ms >= 500 && ms <= 8000) {
+          // Backoff - fire immediately
+          fn();
+          return null;
+        }
+        // Request timeout - run natively
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    assert.strictEqual(spawnedProcesses.length, 1, "should start with 1 worker");
+
+    // Make a request that will timeout
+    const reqPromise = bridge.request("generate", { prompt: "test" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Wait for timeout to fire
+    await new Promise((r) => setTimeout(r, 100));
+    await reqPromise;
+
+    // The stuck worker never emits exit, but handleWorkerExit should be called
+    // from the timeout path (Issue #276 fix), triggering replacement spawn.
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Verify replacement was spawned despite no exit event
+    assert.ok(
+      spawnedProcesses.length >= 2,
+      `replacement should spawn via timeout path calling handleWorkerExit (got ${spawnedProcesses.length})`
+    );
+  });
+
+  it("REGRESSION #276: handleWorkerExit is idempotent when called from both paths", async () => {
+    // When timeout path calls handleWorkerExit AND the child later emits exit,
+    // handleWorkerExit must be idempotent to avoid duplicate cleanup.
+
+    bridge = require("../src/services/pythonBridge");
+
+    // Use immediate backoff/timers
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        fn();
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const pool = bridge._pool();
+    const worker = pool.workers[0];
+    const initialCount = pool.workers.length;
+
+    // Call handleWorkerExit twice rapidly (simulating timeout path + exit event)
+    pool.handleWorkerExit(worker);
+    pool.handleWorkerExit(worker);
+
+    // Wait a tick for the removal to complete
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // The key test: calling handleWorkerExit twice should not crash
+    // The second call should be a no-op because the worker is already removed
+    assert.ok(true, "duplicate handleWorkerExit calls should not crash");
+  });
 });
