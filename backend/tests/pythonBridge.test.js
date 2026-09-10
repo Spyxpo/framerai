@@ -1119,13 +1119,19 @@ describe("pythonBridge worker pool", () => {
       constructor(...args) {
         super(...args);
         this.killSignals = [];
+        this.exited = false;
       }
 
       kill(signal) {
         this.killSignals.push(signal || "SIGTERM");
+        // Real ChildProcess sets `killed` as soon as a signal is DELIVERED, not
+        // when the process exits. Mirror that here, otherwise the mock would let
+        // a `!child.killed` liveness check pass in tests while never firing in
+        // production. Aliveness is tracked separately via `exited`.
+        this.killed = true;
         if (signal === "SIGKILL") {
           // Respond to SIGKILL by actually dying
-          this.killed = true;
+          this.exited = true;
           this.emit("exit", 137); // 128 + 9 (SIGKILL)
         }
         // SIGTERM is silently ignored — the process does not exit
@@ -1190,7 +1196,7 @@ describe("pythonBridge worker pool", () => {
 
       // Worker received SIGTERM but is still alive (ignores it)
       assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should have been sent");
-      assert.strictEqual(worker.killed, false, "worker should NOT be dead yet (ignores SIGTERM)");
+      assert.strictEqual(worker.exited, false, "worker should NOT have exited yet (ignores SIGTERM)");
       assert.ok(escalationFn, "SIGKILL escalation timer should have been registered");
 
       // Without the fix: no replacement would spawn because exit never fires.
@@ -1203,7 +1209,7 @@ describe("pythonBridge worker pool", () => {
 
       // Worker should now be dead
       assert.ok(worker.killSignals.includes("SIGKILL"), "SIGKILL should have been sent after escalation");
-      assert.strictEqual(worker.killed, true, "worker should be dead after SIGKILL");
+      assert.strictEqual(worker.exited, true, "worker should be dead after SIGKILL");
 
       bridge._setTimerImpl(prev.set, prev.clear);
 

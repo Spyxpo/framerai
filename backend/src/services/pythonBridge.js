@@ -302,9 +302,13 @@ class Worker {
           const dyingChild = this.child;
           dyingChild.kill(); // SIGTERM — ask nicely
 
-          // Escalate to SIGKILL if the process is still alive after the grace period
+          // Escalate to SIGKILL if the process is still alive after the grace
+          // period. Track the exit ourselves: child.killed only reports that a
+          // signal was delivered, so it is already true after the SIGTERM above
+          // and says nothing about whether the process actually went away.
+          let exited = false;
           const escalationTimer = _setTimeout(() => {
-            if (dyingChild && !dyingChild.killed) {
+            if (!exited) {
               const workerLog2 = createLogger({ route: `worker-${this.id}` });
               workerLog2.warn("worker did not exit after SIGTERM, sending SIGKILL", {});
               try {
@@ -315,14 +319,16 @@ class Worker {
             }
           }, KILL_ESCALATION_GRACE_MS);
           // If the process exits on SIGTERM (normal case), clear the escalation timer
-          dyingChild.once("exit", () => _clearTimeout(escalationTimer));
+          dyingChild.once("exit", () => {
+            exited = true;
+            _clearTimeout(escalationTimer);
+          });
         }
       }, timeoutMs);
 
       const requestState = { resolve, reject, timer, options, requestId: id };
       this.pending.set(id, requestState);
       this.currentRequest = requestState;
-      this.currentRequestId = id;
       this.currentRequestId = id;
 
       try {
