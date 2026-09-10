@@ -5,6 +5,9 @@ parsing, redirect unwrapping, address filtering, truncation, and loop control
 are all exercised against fixed bytes.
 """
 
+import io
+import socket
+
 import pytest
 
 from model.tools import (
@@ -19,9 +22,15 @@ from model.tools import (
 from model.tools.base import Tool
 from model.tools.loop import ToolCallError
 from model.tools.web import (
+    _DNS_PIN_CACHE,
     SearchClient,
     WebFetchTool,
     WebSearchTool,
+    _build_safe_opener,
+    _make_pinned_create,
+    _PinnedHTTPConnection,
+    _PinnedHTTPSHandler,
+    _urllib_transport,
     check_url,
     html_to_text,
     unwrap_redirect,
@@ -383,3 +392,455 @@ def test_check_url_allows_a_public_address(monkeypatch):
         "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
     )
     assert check_url("https://example.com/page") == "https://example.com/page"
+
+
+class _MockResponseSocket:
+    """A mock socket that feeds scripted HTTP response bytes and tracks calls."""
+
+    def __init__(self, response_bytes: bytes):
+        self._raw = response_bytes
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    def setsockopt(self, *args, **kwargs):
+        pass
+
+    def getsockopt(self, *args, **kwargs):
+        return socket.SOCK_STREAM
+
+    def sendall(self, data: bytes):
+        self.sent.append(data)
+
+    def makefile(self, mode="r", *args, **kwargs):
+        return io.BytesIO(self._raw)
+
+    def close(self):
+        self.closed = True
+
+
+# --- Issue #237: redirect revalidation, address pinning, and SSRF tests ---
+
+
+def test_safe_normal_request_urllib_transport(monkeypatch):
+    """A. Safe normal request: standard valid public URL succeeds and retrieves page."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    body = b"<html><head><title>Test Page</title></head><body>Hello world</body></html>"
+    resp = b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        return _MockResponseSocket(resp)
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://example.com/test", None, 5.0, 1000)
+    assert data == body
+    assert connected == [("93.184.216.34", 80)]
+
+    # Also test through WebFetchTool with default client
+    client = SearchClient()
+    result = WebFetchTool(client).run(url="http://example.com/test")
+    assert result.ok
+    assert "Test Page" in result.content
+    assert "Hello world" in result.content
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/",
+        "http://172.16.0.1/",
+        "http://192.168.1.1/",
+        "ftp://example.com/x",
+        "file:///etc/passwd",
+        "http:///nohost",
+        "http://[::1]/admin",
+        "http://[fe80::1]/admin",
+    ],
+)
+def test_blocked_initial_url_urllib_transport(url):
+    """B. Blocked initial URL: private/loopback/link-local/scheme targets rejected."""
+    _DNS_PIN_CACHE.clear()
+    with pytest.raises(ToolError):
+        _urllib_transport(url, None, 5.0, 1000)
+
+
+def test_blocked_redirect_to_loopback(monkeypatch):
+    """C. Blocked redirect: public URL redirecting to 127.0.0.1 must be rejected."""
+    _DNS_PIN_CACHE.clear()
+
+    def fake_gai(host, *args, **kwargs):
+        if host == "example.com":
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", fake_gai)
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        resp = b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:8080/admin\r\n\r\n"
+        return _MockResponseSocket(resp)
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="127.0.0.1"):
+        _urllib_transport("http://example.com/start", None, 5.0, 1000)
+
+    # 127.0.0.1 was NEVER connected to
+    assert connected == [("93.184.216.34", 80)]
+
+
+def test_blocked_redirect_to_cloud_metadata(monkeypatch):
+    """C. Blocked redirect: redirect to 169.254.169.254 must be rejected."""
+    _DNS_PIN_CACHE.clear()
+
+    def fake_gai(host, *args, **kwargs):
+        if host == "example.com":
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        return [(2, 1, 6, "", ("169.254.169.254", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", fake_gai)
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        resp = b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\n\r\n"
+        return _MockResponseSocket(resp)
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="169.254.169.254"):
+        _urllib_transport("http://example.com/start", None, 5.0, 1000)
+
+    # Metadata service was NEVER connected to
+    assert connected == [("93.184.216.34", 80)]
+
+
+@pytest.mark.parametrize(
+    "bad_location",
+    [
+        "ftp://example.com/file",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "gopher://example.com/",
+    ],
+)
+def test_blocked_redirect_to_non_http_schemes(bad_location, monkeypatch):
+    """C. Blocked redirect: redirects to non-http/https schemes rejected."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        resp = f"HTTP/1.1 302 Found\r\nLocation: {bad_location}\r\n\r\n".encode()
+        return _MockResponseSocket(resp)
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="only http and https"):
+        _urllib_transport("http://example.com/start", None, 5.0, 1000)
+
+
+def test_multi_hop_redirect_success(monkeypatch):
+    """D. Multi-hop redirect: public -> public -> public succeeds."""
+    _DNS_PIN_CACHE.clear()
+
+    hosts_map = {
+        "example.com": "93.184.216.34",
+        "example.org": "93.184.216.35",
+        "example.net": "93.184.216.36",
+    }
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, *args, **kwargs: [(2, 1, 6, "", (hosts_map.get(host, "93.184.216.34"), 0))],
+    )
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        if ip == "93.184.216.34":
+            return _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation: http://example.org/2\r\n\r\n")
+        elif ip == "93.184.216.35":
+            return _MockResponseSocket(b"HTTP/1.1 301 Moved\r\nLocation: http://example.net/3\r\n\r\n")
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfinal")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://example.com/1", None, 5.0, 1000)
+    assert data == b"final"
+    assert connected == [
+        ("93.184.216.34", 80),
+        ("93.184.216.35", 80),
+        ("93.184.216.36", 80),
+    ]
+
+
+def test_multi_hop_redirect_blocked_at_unsafe_hop(monkeypatch):
+    """D. Multi-hop redirect: public -> public -> private rejected at unsafe hop."""
+    _DNS_PIN_CACHE.clear()
+
+    hosts_map = {
+        "example.com": "93.184.216.34",
+        "example.org": "93.184.216.35",
+        "private.local": "10.0.0.1",
+    }
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, *args, **kwargs: [(2, 1, 6, "", (hosts_map.get(host, "127.0.0.1"), 0))],
+    )
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        if ip == "93.184.216.34":
+            return _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation: http://example.org/2\r\n\r\n")
+        elif ip == "93.184.216.35":
+            return _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation: http://private.local/secret\r\n\r\n")
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\n\r\nunsafe")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="10.0.0.1"):
+        _urllib_transport("http://example.com/1", None, 5.0, 1000)
+
+    # Verified: Public 1 and Public 2 were requested, but private.local was NEVER connected
+    assert connected == [
+        ("93.184.216.34", 80),
+        ("93.184.216.35", 80),
+    ]
+
+
+def test_redirect_limit_loop(monkeypatch):
+    """E. Redirect limit: redirect loop terminates cleanly."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        return _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation: /loop\r\n\r\n")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="redirect loop detected|too many redirects"):
+        _urllib_transport("http://example.com/loop", None, 5.0, 1000)
+
+
+def test_redirect_limit_excessive_chain(monkeypatch):
+    """E. Redirect limit: redirect chain exceeding limit terminates cleanly."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    hop = 0
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        nonlocal hop
+        hop += 1
+        return _MockResponseSocket(
+            f"HTTP/1.1 302 Found\r\nLocation: /step_{hop}\r\n\r\n".encode()
+        )
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    with pytest.raises(ToolError, match="too many redirects"):
+        _urllib_transport("http://example.com/step_0", None, 5.0, 1000)
+
+
+def test_relative_redirect(monkeypatch):
+    """F. Relative redirect: relative Location header resolved correctly against current URL."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    sockets: list[_MockResponseSocket] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        if not sockets:
+            sock = _MockResponseSocket(b"HTTP/1.1 302 Found\r\nLocation: ../sibling/page.html\r\n\r\n")
+        else:
+            sock = _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nsuccess")
+        sockets.append(sock)
+        return sock
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://example.com/dir/sub/index.html", None, 5.0, 1000)
+    assert data == b"success"
+    # Second request must have requested /dir/sibling/page.html
+    second_request = b"".join(sockets[1].sent).decode()
+    assert "GET /dir/sibling/page.html HTTP/1.1" in second_request
+
+
+def test_dns_address_pinning_prevents_rebinding(monkeypatch):
+    """G. DNS / Address pinning: socket connection uses address selected during validation.
+
+    Resolver returns a safe public IP on initial validation, but if called a second time
+    returns a private IP (DNS rebinding). The actual socket connection connects to the
+    pinned public IP, and the resolver is NOT queried during socket connection.
+    """
+    _DNS_PIN_CACHE.clear()
+
+    gai_queries: list[str] = []
+
+    def fake_gai(host, *args, **kwargs):
+        gai_queries.append(host)
+        if len(gai_queries) == 1:
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        # DNS rebinding return
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+
+    monkeypatch.setattr("socket.getaddrinfo", fake_gai)
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://rebind.example.com/test", None, 5.0, 1000)
+    assert data == b"OK"
+    # Resolver was queried only once (during validation), NOT a second time during connect
+    assert gai_queries == ["rebind.example.com"]
+    # Connected directly to the pinned public address, never to 127.0.0.1
+    assert connected == [("93.184.216.34", 80)]
+
+
+def test_https_sni_and_hostname_preserved(monkeypatch):
+    """H. HTTPS: TLS hostname/SNI and certificate validation use domain, socket uses pinned IP."""
+    _DNS_PIN_CACHE.clear()
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_a, **_k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+
+    connected: list[tuple[str, int]] = []
+    created_sockets: list[_MockResponseSocket] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        sock = _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHTTPS")
+        created_sockets.append(sock)
+        return sock
+
+    wrapped_hostnames: list[str | None] = []
+
+    class MockSSLContext:
+        def wrap_socket(self, sock, server_hostname=None):
+            wrapped_hostnames.append(server_hostname)
+            return sock
+
+    opener = _build_safe_opener()
+    for h in opener.handlers:
+        if isinstance(h, _PinnedHTTPSHandler):
+            h._context = MockSSLContext()
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+    monkeypatch.setattr("model.tools.web._build_safe_opener", lambda: opener)
+
+    data = _urllib_transport("https://secure.example.com/page", None, 5.0, 1000)
+    assert data == b"HTTPS"
+
+    # Socket connected to the pinned IP on port 443
+    assert connected == [("93.184.216.34", 443)]
+    # wrap_socket received the original domain name for SNI and cert check
+    assert wrapped_hostnames == ["secure.example.com"]
+    # Request headers contain Host: secure.example.com
+    request_headers = b"".join(created_sockets[0].sent).decode()
+    assert "Host: secure.example.com" in request_headers
+
+
+def test_ipv6_public_address_supported_and_pinned(monkeypatch):
+    """IPv6: Public IPv6 address is supported and pinned, while IPv6 loopback is blocked."""
+    _DNS_PIN_CACHE.clear()
+    public_ipv6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+    def fake_gai(host, *args, **kwargs):
+        if host == "::1":
+            return [(10, 1, 6, "", ("::1", 0, 0, 0))]
+        return [(10, 1, 6, "", (public_ipv6, 0, 0, 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", fake_gai)
+
+    connected: list[tuple[str, int]] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append((ip, port))
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nIPv6")
+
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    data = _urllib_transport("http://ipv6.example.com/test", None, 5.0, 1000)
+    assert data == b"IPv6"
+    assert connected == [(public_ipv6, 80)]
+
+    # IPv6 loopback must be rejected
+    with pytest.raises(ToolError, match="::1"):
+        check_url("http://[::1]/admin")
+
+
+def test_pinned_connection_fails_closed_without_hostname_resolution(monkeypatch):
+    """Pinned connection path must fail closed and never fall back to hostname resolution."""
+
+    def forbid_dns(*args, **kwargs):
+        pytest.fail("socket.getaddrinfo was called during pinned connection!")
+
+    monkeypatch.setattr("socket.getaddrinfo", forbid_dns)
+
+    # 1. Unpinned connection with None must fail closed
+    pinned_create_none = _make_pinned_create(None)
+    with pytest.raises(OSError, match="refusing unpinned connection"):
+        pinned_create_none(("example.com", 80))
+
+    # 2. Unpinned connection with empty list must fail closed
+    pinned_create_empty = _make_pinned_create([])
+    with pytest.raises(OSError, match="refusing unpinned connection"):
+        pinned_create_empty(("example.com", 80))
+
+    # 3. Connection with non-IP target must fail closed rather than resolving
+    pinned_create_hostname = _make_pinned_create(["example.com"])
+    with pytest.raises(OSError, match="invalid pinned IP address"):
+        pinned_create_hostname(("example.com", 80))
+
+    # 4. _PinnedHTTPConnection without pinned_ips must also fail closed without DNS lookup
+    conn = _PinnedHTTPConnection("example.com", 80, pinned_ips=None)
+    with pytest.raises(OSError, match="refusing unpinned connection"):
+        conn.connect()
+
+
+def test_pinned_connection_tries_multiple_validated_addresses(monkeypatch):
+    """Multiple validated public IPs are tried in order if earlier ones fail with OSError."""
+    connected: list[str] = []
+
+    def fake_connect(ip, port, timeout=None, source_address=None):
+        connected.append(ip)
+        if ip == "198.51.100.1":
+            raise OSError("Connection refused on primary IP")
+        return _MockResponseSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+
+    def forbid_dns(*args, **kwargs):
+        pytest.fail("socket.getaddrinfo was called during connection!")
+
+    monkeypatch.setattr("socket.getaddrinfo", forbid_dns)
+    monkeypatch.setattr("model.tools.web._connect_socket", fake_connect)
+
+    pinned_create = _make_pinned_create(["198.51.100.1", "198.51.100.2"])
+    sock = pinned_create(("example.com", 80))
+    assert sock is not None
+    assert connected == ["198.51.100.1", "198.51.100.2"]
