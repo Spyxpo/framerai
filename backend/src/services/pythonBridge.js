@@ -308,7 +308,15 @@ class Worker {
           // and says nothing about whether the process actually went away.
           let exited = false;
           const escalationTimer = _setTimeout(() => {
-            if (!exited) {
+            // `exited` is set by the 'exit' listener below, but handleWorkerExit()
+            // (invoked directly, just below, per Issue #276) calls cleanup(), which
+            // removes that listener before the real exit can ever reach it. Node
+            // still tracks real process termination on the child object itself,
+            // independent of listeners, so fall back to that when our own
+            // listener-based tracking has gone stale (Issue: stale SIGKILL
+            // escalation after worker exits).
+            const confirmedExited = exited || dyingChild.exitCode !== null || dyingChild.signalCode !== null;
+            if (!confirmedExited) {
               const workerLog2 = createLogger({ route: `worker-${this.id}` });
               workerLog2.warn("worker did not exit after SIGTERM, sending SIGKILL", {});
               try {
@@ -318,7 +326,9 @@ class Worker {
               }
             }
           }, KILL_ESCALATION_GRACE_MS);
-          // If the process exits on SIGTERM (normal case), clear the escalation timer
+          // Fast path: if the process exits on SIGTERM before handleWorkerExit()
+          // tears down this listener, clear the escalation timer immediately
+          // instead of waiting out the grace period.
           dyingChild.once("exit", () => {
             exited = true;
             _clearTimeout(escalationTimer);
