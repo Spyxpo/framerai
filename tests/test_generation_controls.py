@@ -481,3 +481,12 @@ def test_serve_finish_reason_is_stateless():
     assert res["finish_reason"] in ("stop", "eos", "length")
     assert res["finish_reason"] != "corrupted"
 
+
+def test_serve_handles_monkeypatched_string_generator(monkeypatch):
+    """handle gracefully unpacks even when generator.generate_text is mocked to return a bare str."""
+    gen = _make_generator()
+    monkeypatch.setattr(gen, "generate_text", lambda prompt, **kw: "Mock string output")
+    res = handle(gen, "chat", {"prompt": "hi"})
+    assert res["content"] == "Mock string output"
+    assert "finish_reason" in res
+    assert res["finish_reason"] == "eos"

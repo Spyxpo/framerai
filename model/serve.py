@@ -529,6 +529,7 @@ def handle(gen, op, params, mind=None, tools=None):
         else:
             content = out
             finish_reason = getattr(gen, "last_finish_reason", "eos") or "eos"
+
         content, reasoning = _extract_reasoning(content)
         result = {
             "content": content,
