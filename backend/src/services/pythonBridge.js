@@ -323,6 +323,14 @@ class Worker {
             exited = true;
             _clearTimeout(escalationTimer);
           });
+
+          // Issue #276: Make the timeout path directly invoke handleWorkerExit
+          // to ensure pool cleanup happens immediately, without depending on
+          // the child exit event. A process stuck in an uninterruptible operation
+          // (e.g., CUDA ioctl) may not be reaped promptly even after SIGKILL.
+          if (this.onExit) {
+            this.onExit(this);
+          }
         }
       }, timeoutMs);
 
@@ -444,16 +452,21 @@ class WorkerPool {
   async handleWorkerExit(deadWorker) {
     if (this.stopped) return;
     const workerId = deadWorker.id;
+
+    // Make idempotent: if this worker is not in our active pool, it was
+    // already removed (e.g., by the timeout path calling handleWorkerExit).
+    const idx = this.workers.indexOf(deadWorker);
+    if (idx < 0) {
+      return;
+    }
+
     if (this._stabilityTimers.has(workerId)) {
       _clearTimeout(this._stabilityTimers.get(workerId));
       this._stabilityTimers.delete(workerId);
     }
 
     // Remove dead worker from the live set
-    const idx = this.workers.indexOf(deadWorker);
-    if (idx >= 0) {
-      this.workers.splice(idx, 1);
-    }
+    this.workers.splice(idx, 1);
     deadWorker.cleanup();
 
     const attempts = (this._restartCounts.get(workerId) || 0) + 1;
