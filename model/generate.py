@@ -31,6 +31,52 @@ def _filter_logits(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tens
     return logits
 
 
+def _apply_repetition_penalty(
+    logits: torch.Tensor,
+    seen_tokens: list[int] | set[int],
+    penalty: float,
+) -> torch.Tensor:
+    """Apply repetition penalty to logits for tokens that have already appeared.
+
+    Standard semantics:
+    - If logit < 0: multiply by penalty (making it more negative)
+    - If logit > 0: divide by penalty (making it less positive)
+    Does not mutate the original tensor.
+    """
+    if penalty is None or penalty == 1.0 or not seen_tokens:
+        return logits
+    if penalty <= 0:
+        raise ValueError(f"repetition_penalty must be positive, got {penalty}")
+
+    vocab_size = logits.shape[-1]
+    token_ids = [int(t) for t in set(seen_tokens) if 0 <= t < vocab_size]
+    if not token_ids:
+        return logits
+
+    logits = logits.clone()
+    idx = torch.tensor(token_ids, dtype=torch.long, device=logits.device)
+    scores = logits[0, idx]
+
+    pos_mask = scores > 0
+    neg_mask = scores < 0
+    penalized = scores.clone()
+    penalized[pos_mask] = scores[pos_mask] / penalty
+    penalized[neg_mask] = scores[neg_mask] * penalty
+
+    logits[0, idx] = penalized
+    return logits
+
+
+def _make_seed_generator(device, seed: int | None) -> torch.Generator | None:
+    """Create a seeded torch.Generator on device, falling back to default device if unsupported."""
+    if seed is None:
+        return None
+    try:
+        return torch.Generator(device=device).manual_seed(int(seed))
+    except (RuntimeError, TypeError):
+        return torch.Generator().manual_seed(int(seed))
+
+
 class FramerGenerator:
     """High-level generation interface for FramerAI."""
 
@@ -42,6 +88,7 @@ class FramerGenerator:
         # rather than hidden, so a short or truncated answer is explicable.
         self.last_prompt_tokens_dropped = 0
         self.last_max_new_tokens = 0
+        self.last_finish_reason = None
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, tokenizer_path: str, device: str = "auto"):
@@ -254,11 +301,15 @@ class FramerGenerator:
         temperature: float = 0.7,
         top_k: int = 50,
         top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        stop: list[str] | str | None = None,
+        seed: int | None = None,
         image: torch.Tensor = None,
         audio: torch.Tensor = None,
         prefill_chunk_size: int = None,
+        return_reason: bool = False,
         allowed_special=None,
-    ) -> str:
+    ) -> str | tuple[str, str]:
         """Generate text, optionally conditioned on an image or audio.
 
         Uses an incremental KV cache: the prompt is encoded once, then each new
@@ -319,21 +370,212 @@ class FramerGenerator:
             input_ids, prefix_embeds, prefill_chunk_size, modality_embeds=modality_embeds
         )
 
+        stop_list = [stop] if isinstance(stop, str) else list(stop or [])
+        stop_list = [s for s in stop_list if s]
+
+        generator = _make_seed_generator(self.device, seed)
+
         generated = list(tokens)
+        new_tokens = []
+        finish_reason = "length"
+
         for _ in range(max_new_tokens):
-            step = logits / max(temperature, 1e-6)
-            step = _filter_logits(step, top_k, top_p)
-            probs = F.softmax(step, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1).item()
-            generated.append(next_token)
+            step = _apply_repetition_penalty(logits, generated, repetition_penalty)
+            if temperature <= 0:
+                next_token = step.argmax(dim=-1).item()
+            else:
+                step = step / temperature
+                step = _filter_logits(step, top_k, top_p)
+                probs = F.softmax(step, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1, generator=generator).item()
+
             if next_token == self.tokenizer.eos_id:
+                finish_reason = "eos"
+                generated.append(next_token)
                 break
+
+            generated.append(next_token)
+            new_tokens.append(next_token)
+
+            if stop_list:
+                gen_text = self.tokenizer.decode(new_tokens)
+                earliest_stop_idx = -1
+                for s in stop_list:
+                    idx = gen_text.find(s)
+                    if idx != -1:
+                        if earliest_stop_idx == -1 or idx < earliest_stop_idx:
+                            earliest_stop_idx = idx
+                if earliest_stop_idx != -1:
+                    finish_reason = "stop"
+                    break
+
             nxt = torch.tensor([[next_token]], device=self.device)
             out = self.model.forward_lm(nxt, past_kvs=past, use_cache=True)
             past = out["past_kvs"]
             logits = out["logits"][:, -1, :]
 
-        return self.tokenizer.decode(generated)
+        self.last_finish_reason = finish_reason
+
+        if finish_reason == "stop":
+            gen_text = self.tokenizer.decode(new_tokens)[:earliest_stop_idx]
+            prompt_text = self.tokenizer.decode(tokens)
+            final_text = prompt_text + gen_text
+        else:
+            final_text = self.tokenizer.decode(generated)
+
+        if return_reason:
+            return final_text, finish_reason
+        return final_text
+
+    @torch.no_grad()
+    def generate_stream(
+        self,
+        prompt: str | list[int],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        stop: list[str] | str | None = None,
+        seed: int | None = None,
+        image: torch.Tensor = None,
+        audio: torch.Tensor = None,
+        prefill_chunk_size: int = None,
+        return_reason: bool = False,
+        allowed_special=None,
+    ):
+        """Yield text deltas incrementally as generation progresses."""
+        image_embeds = audio_embeds = None
+        if image is not None:
+            image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
+        if audio is not None:
+            audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
+
+        present = [e for e in (image_embeds, audio_embeds) if e is not None]
+        prefix_embeds, modality_embeds = None, None
+
+        if not isinstance(prompt, str):
+            ids = list(prompt)
+            budget = self._window_budget(max_new_tokens, present)
+            if budget is not None:
+                ids, max_new_tokens = self._fit_ids(ids, max_new_tokens, *budget)
+            tokens = [self.tokenizer.sos_id] + ids + [self.tokenizer.eos_id]
+            prefix_embeds = torch.cat(present, dim=1) if present else None
+        else:
+            prompt, max_new_tokens = self._fit_to_window(
+                prompt, max_new_tokens, present, allowed_special=allowed_special
+            )
+            if self._interleaving() and present:
+                tokens, modality_embeds = self._interleaved_prompt(
+                    prompt, image_embeds, audio_embeds, allowed_special=allowed_special
+                )
+            else:
+                tokens = self.tokenizer.encode(
+                    prompt, add_special=True, allowed_special=allowed_special
+                )
+                prefix_embeds = torch.cat(present, dim=1) if present else None
+
+        input_ids = torch.tensor([tokens], device=self.device)
+
+        # Prefill the prompt (+ modality prefix) and seed the cache.
+        past, logits = self._prefill(
+            input_ids, prefix_embeds, prefill_chunk_size, modality_embeds=modality_embeds
+        )
+
+        stop_list = [stop] if isinstance(stop, str) else list(stop or [])
+        stop_list = [s for s in stop_list if s]
+
+        generator = _make_seed_generator(self.device, seed)
+
+        generated = list(tokens)
+        new_tokens = []
+        emitted_len = 0
+        pending_buffer = ""
+        finish_reason = "length"
+
+        for _ in range(max_new_tokens):
+            step = _apply_repetition_penalty(logits, generated, repetition_penalty)
+            if temperature <= 0:
+                next_token = step.argmax(dim=-1).item()
+            else:
+                step = step / temperature
+                step = _filter_logits(step, top_k, top_p)
+                probs = F.softmax(step, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1, generator=generator).item()
+
+            if next_token == self.tokenizer.eos_id:
+                finish_reason = "eos"
+                generated.append(next_token)
+                break
+
+            generated.append(next_token)
+            new_tokens.append(next_token)
+
+            decoded_full = self.tokenizer.decode(new_tokens)
+            if not decoded_full.endswith("\ufffd"):
+                unemitted = decoded_full[emitted_len:]
+                if unemitted:
+                    pending_buffer += unemitted
+                    emitted_len = len(decoded_full)
+
+                if stop_list:
+                    earliest_idx = -1
+                    for s in stop_list:
+                        idx = pending_buffer.find(s)
+                        if idx != -1:
+                            if earliest_idx == -1 or idx < earliest_idx:
+                                earliest_idx = idx
+
+                    if earliest_idx != -1:
+                        finish_reason = "stop"
+                        to_emit = pending_buffer[:earliest_idx]
+                        pending_buffer = ""
+                        if return_reason:
+                            yield (to_emit, finish_reason)
+                        elif to_emit:
+                            yield to_emit
+                        break
+
+                    holdback_len = 0
+                    for s in stop_list:
+                        for p_len in range(min(len(s) - 1, len(pending_buffer)), 0, -1):
+                            if pending_buffer.endswith(s[:p_len]):
+                                holdback_len = max(holdback_len, p_len)
+                                break
+
+                    safe_len = len(pending_buffer) - holdback_len
+                    if safe_len > 0:
+                        delta = pending_buffer[:safe_len]
+                        pending_buffer = pending_buffer[safe_len:]
+                        yield (delta, None) if return_reason else delta
+                else:
+                    if pending_buffer:
+                        delta = pending_buffer
+                        pending_buffer = ""
+                        yield (delta, None) if return_reason else delta
+
+            nxt = torch.tensor([[next_token]], device=self.device)
+            out = self.model.forward_lm(nxt, past_kvs=past, use_cache=True)
+            past = out["past_kvs"]
+            logits = out["logits"][:, -1, :]
+
+        if finish_reason != "stop":
+            decoded_full = self.tokenizer.decode(new_tokens)
+            unemitted = decoded_full[emitted_len:]
+            if unemitted:
+                pending_buffer += unemitted
+                emitted_len = len(decoded_full)
+
+            if return_reason:
+                delta = pending_buffer
+                pending_buffer = ""
+                yield (delta, finish_reason)
+            elif pending_buffer:
+                delta = pending_buffer
+                pending_buffer = ""
+                yield delta
+
+        self.last_finish_reason = finish_reason
 
     @torch.no_grad()
     def generate_chat(
@@ -343,10 +585,14 @@ class FramerGenerator:
         temperature: float = 0.7,
         top_k: int = 50,
         top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        stop: list[str] | str | None = None,
+        seed: int | None = None,
         image: torch.Tensor = None,
         audio: torch.Tensor = None,
         prefill_chunk_size: int = None,
-    ) -> str:
+        return_reason: bool = False,
+    ) -> str | tuple[str, str]:
         """Generate an assistant continuation for structured conversation messages using ChatTemplate."""
         from .tokenizer.chat_template import ChatTemplate
 
@@ -358,13 +604,60 @@ class FramerGenerator:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            stop=stop,
+            seed=seed,
             image=image,
             audio=audio,
             prefill_chunk_size=prefill_chunk_size,
+            return_reason=return_reason,
         )
+        if return_reason:
+            if isinstance(raw_output, tuple) and len(raw_output) == 2:
+                raw_text, reason = raw_output
+            else:
+                raw_text, reason = raw_output, getattr(self, "last_finish_reason", "eos") or "eos"
+            if raw_text.startswith(prompt):
+                raw_text = raw_text[len(prompt):]
+            return raw_text, reason
         if raw_output.startswith(prompt):
             return raw_output[len(prompt):]
         return raw_output
+
+    @torch.no_grad()
+    def generate_chat_stream(
+        self,
+        messages: list[dict],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        stop: list[str] | str | None = None,
+        seed: int | None = None,
+        image: torch.Tensor = None,
+        audio: torch.Tensor = None,
+        prefill_chunk_size: int = None,
+        return_reason: bool = False,
+    ):
+        """Stream an assistant continuation for structured conversation messages using ChatTemplate."""
+        from .tokenizer.chat_template import ChatTemplate
+
+        template = ChatTemplate(version="v1")
+        yield from self.generate_stream(
+            template.encode_prompt(messages, self.tokenizer, add_generation_prompt=True),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            stop=stop,
+            seed=seed,
+            image=image,
+            audio=audio,
+            prefill_chunk_size=prefill_chunk_size,
+            return_reason=return_reason,
+        )
 
     @torch.no_grad()
     def generate_image(

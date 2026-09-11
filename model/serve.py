@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import inspect
 import io
 import json
 import os
@@ -177,8 +178,24 @@ def _window_report(gen, requested_max_new_tokens):
 
 def _sampling(params):
     """Sampling controls the caller set, leaving the rest to the generator."""
-    keys = ("temperature", "top_k", "top_p")
-    return {k: params[k] for k in keys if params.get(k) is not None}
+    keys = ("temperature", "top_k", "top_p", "repetition_penalty", "stop", "seed")
+    res = {}
+    for k in keys:
+        if k in params and params[k] is not None:
+            val = params[k]
+            if k == "temperature":
+                res[k] = float(val)
+            elif k == "top_k":
+                res[k] = int(val)
+            elif k == "top_p":
+                res[k] = float(val)
+            elif k == "repetition_penalty":
+                res[k] = float(val)
+            elif k == "stop":
+                res[k] = [val] if isinstance(val, str) else list(val)
+            elif k == "seed":
+                res[k] = int(val)
+    return res
 
 
 def _load_image(path, config):
@@ -353,6 +370,7 @@ def handle(gen, op, params, mind=None, tools=None):
     prompt = params.get("prompt", "")
 
     if op in ("chat", "text"):
+        is_stream = bool(params.get("stream", False))
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
         return_reasoning = bool(params.get("reasoning", False))
@@ -443,12 +461,15 @@ def handle(gen, op, params, mind=None, tools=None):
             prompt = f"{attached}\n\n{prompt}" if prompt else attached
 
         if mind is not None:
+            mind_sampling = {
+                k: v for k, v in _sampling(params).items() if k in ("temperature", "top_k", "top_p")
+            }
             reply, trace = mind.converse(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 prompt_ids=prompt_ids,
                 allowed_special=allowed_special,
-                **_sampling(params),
+                **mind_sampling,
             )
             reply, reasoning = _extract_reasoning(reply)
             # The trace travels with the reply so a client can show what was
@@ -459,15 +480,61 @@ def handle(gen, op, params, mind=None, tools=None):
             if return_reasoning:
                 result["reasoning"] = reasoning if reasoning is not None else ""
             return result
-        content = gen.generate_text(
+
+        if is_stream:
+            def _stream_generator():
+                parts = []
+                finish_reason = "length"
+                for item in gen.generate_stream(
+                    prompt if prompt_ids is None else prompt_ids,
+                    max_new_tokens=max_new_tokens,
+                    image=image,
+                    allowed_special=allowed_special,
+                    return_reason=True,
+                    **_sampling(params),
+                ):
+                    if isinstance(item, tuple) and len(item) == 2:
+                        delta, reason = item
+                    else:
+                        delta, reason = item, None
+                    if reason is not None:
+                        finish_reason = reason
+                    if delta:
+                        parts.append(delta)
+                        yield {"delta": delta, "done": False}
+
+                full_text = "".join(parts)
+                cleaned, reasoning = _extract_reasoning(full_text)
+                res = {
+                    "content": cleaned,
+                    "finish_reason": finish_reason,
+                    **_window_report(gen, max_new_tokens),
+                }
+                if return_reasoning:
+                    res["reasoning"] = reasoning if reasoning is not None else ""
+                yield {"delta": "", "done": True, "result": res}
+
+            return _stream_generator()
+
+        out = gen.generate_text(
             prompt if prompt_ids is None else prompt_ids,
             max_new_tokens=max_new_tokens,
             image=image,
             allowed_special=allowed_special,
+            return_reason=True,
             **_sampling(params),
         )
+        if isinstance(out, tuple) and len(out) == 2:
+            content, finish_reason = out
+        else:
+            content = out
+            finish_reason = getattr(gen, "last_finish_reason", "eos") or "eos"
         content, reasoning = _extract_reasoning(content)
-        result = {"content": content, **_window_report(gen, max_new_tokens)}
+        result = {
+            "content": content,
+            "finish_reason": finish_reason,
+            **_window_report(gen, max_new_tokens),
+        }
         if return_reasoning:
             result["reasoning"] = reasoning if reasoning is not None else ""
         return result
@@ -793,7 +860,11 @@ def main():
                 # Persist after every request: a mind that only survives a clean
                 # shutdown is a mind that loses its day whenever the worker dies.
                 mind.save(args.mind)
-            _print({"id": req_id, "ok": True, "result": result})
+            if inspect.isgenerator(result):
+                for chunk in result:
+                    _print({"id": req_id, "ok": True, "type": "stream", **chunk})
+            else:
+                _print({"id": req_id, "ok": True, "result": result})
         except Exception as exc:  # noqa: BLE001 - never let one request kill the worker
             _print({"id": req_id, "ok": False, "error": str(exc)})
 

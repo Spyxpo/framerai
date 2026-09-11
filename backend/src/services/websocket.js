@@ -300,11 +300,29 @@ function setupWebSocket(wss) {
             }
           };
 
+          let streamedFromWorker = false;
+          let accumulated = "";
+
+          const onStream = (chunk) => {
+            if (ws.readyState !== 1 /* OPEN */) return;
+            if (chunk && chunk.delta) {
+              streamedFromWorker = true;
+              accumulated += chunk.delta;
+              safeSend(ws, {
+                type: "stream",
+                conversationId,
+                content: accumulated,
+                done: false,
+                responseType: "text",
+              });
+            }
+          };
+
           const response = await model.processMessage(
             messages,
             messageType,
             settings,
-            { onApprovalRequest, operatorCtx },
+            { onApprovalRequest, operatorCtx, onStream },
             operatorCtx
           );
 
@@ -334,28 +352,39 @@ function setupWebSocket(wss) {
             return;
           }
 
-          // Normal text/code streaming by word-splitting
-          const words = response.content.split(" ");
-          let accumulated = "";
-
-          for (let i = 0; i < words.length; i++) {
-            if (ws.readyState !== 1 /* OPEN */) break;
-
-            accumulated += (i > 0 ? " " : "") + words[i];
-            const isDone = i === words.length - 1;
-            const sent = safeSend(ws, {
+          if (streamedFromWorker) {
+            safeSend(ws, {
               type: "stream",
               conversationId,
-              content: accumulated,
-              done: isDone,
+              content: response.content || accumulated,
+              done: true,
               responseType: response.type,
-              metadata: isDone ? response.metadata : undefined,
+              metadata: response.metadata,
             });
+          } else {
+            // Fallback: simulated streaming for mock mode or non-streamed worker responses
+            const words = response.content.split(" ");
+            let acc = "";
 
-            if (!sent || isDone) break;
+            for (let i = 0; i < words.length; i++) {
+              if (ws.readyState !== 1 /* OPEN */) break;
 
-            // Simulate token generation delay
-            await new Promise((r) => setTimeout(r, 20 + Math.random() * 30));
+              acc += (i > 0 ? " " : "") + words[i];
+              const isDone = i === words.length - 1;
+              const sent = safeSend(ws, {
+                type: "stream",
+                conversationId,
+                content: acc,
+                done: isDone,
+                responseType: response.type,
+                metadata: isDone ? response.metadata : undefined,
+              });
+
+              if (!sent || isDone) break;
+
+              // Simulate token generation delay
+              await new Promise((r) => setTimeout(r, 20 + Math.random() * 30));
+            }
           }
         }
 
