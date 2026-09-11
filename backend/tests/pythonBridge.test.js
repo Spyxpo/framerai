@@ -1557,6 +1557,87 @@ describe("pythonBridge worker pool", () => {
     replacement.simulateResponse(msgB.id, true, { content: "response-B" });
     await reqBPromise;
   });
+
+  // -------------------------------------------------------------------------
+  // Regression tests for Issue #278:
+  // "WorkerPool.available() must reflect dispatchable workers"
+  //
+  // Root cause: available() only checked isConfigured() && !disabled. It never
+  // looked at the actual worker pool, so a worker that merely exists in
+  // pool.workers (busy, still starting, or mid-termination) made available()
+  // report true even though dispatch() had nothing to hand the request to.
+  // -------------------------------------------------------------------------
+
+  describe("Issue #278 regression: available() reflects dispatchable workers", () => {
+    it("REGRESSION #278: available() is false when the only worker is busy (not dispatchable)", async () => {
+      process.env.MODEL_WORKERS = "1";
+      bridge = require("../src/services/pythonBridge");
+
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      await startPromise;
+
+      assert.strictEqual(bridge.available(), true, "available before any request is in flight");
+
+      // Occupy the only worker with an in-flight request
+      const reqPromise = bridge.request("chat", { prompt: "occupy" });
+      await new Promise((r) => setImmediate(r));
+
+      assert.strictEqual(
+        bridge.available(),
+        false,
+        "available() must be false while the only worker in the pool is busy"
+      );
+
+      // Resolve so pending state/timers are cleaned up before the test ends
+      const msg = JSON.parse(spawnedProcesses[0].lastWrite);
+      spawnedProcesses[0].simulateResponse(msg.id, true, { content: "done" });
+      await reqPromise;
+
+      assert.strictEqual(bridge.available(), true, "available() returns true once the worker frees up");
+    });
+
+    it("available() is true when a ready, idle worker exists", async () => {
+      bridge = require("../src/services/pythonBridge");
+      const startPromise = bridge.start();
+      setImmediate(() => {
+        spawnedProcesses[0].simulateReady(true);
+        spawnedProcesses[1].simulateReady(true);
+      });
+      await startPromise;
+
+      assert.strictEqual(bridge.available(), true, "should be available with idle ready workers");
+    });
+
+    it("available() reflects mixed workers: true while any worker is dispatchable, false once all are busy", async () => {
+      bridge = require("../src/services/pythonBridge"); // MODEL_WORKERS defaults to 2 in beforeEach
+      const startPromise = bridge.start();
+      setImmediate(() => {
+        spawnedProcesses[0].simulateReady(true);
+        spawnedProcesses[1].simulateReady(true);
+      });
+      await startPromise;
+
+      // Occupy worker 0 only - worker 1 is still idle
+      const req1Promise = bridge.request("chat", { prompt: "occupy-1" });
+      await new Promise((r) => setImmediate(r));
+
+      assert.strictEqual(bridge.available(), true, "should be available while worker 1 is still idle");
+
+      // Occupy worker 1 too - now both workers are busy
+      const req2Promise = bridge.request("chat", { prompt: "occupy-2" });
+      await new Promise((r) => setImmediate(r));
+
+      assert.strictEqual(bridge.available(), false, "should be unavailable once all workers are busy");
+
+      // Clean up
+      const msg1 = JSON.parse(spawnedProcesses[0].lastWrite);
+      const msg2 = JSON.parse(spawnedProcesses[1].lastWrite);
+      spawnedProcesses[0].simulateResponse(msg1.id, true, { content: "d1" });
+      spawnedProcesses[1].simulateResponse(msg2.id, true, { content: "d2" });
+      await Promise.all([req1Promise, req2Promise]);
+    });
+  });
 });
 
 });

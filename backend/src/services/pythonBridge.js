@@ -627,7 +627,12 @@ async function request(op, params = {}, optionsOrRequestId = null, operatorCtx =
 }
 
 function available() {
-  return isConfigured() && !disabled;
+  if (!isConfigured() || disabled) return false;
+  // Before the pool has been started, request() starts it lazily on first
+  // use, so there are no worker objects yet to inspect - treat that as
+  // available rather than reporting false for workers that don't exist yet.
+  if (!pool) return true;
+  return Boolean(pool.getAvailableWorker());
 }
 
 /**
