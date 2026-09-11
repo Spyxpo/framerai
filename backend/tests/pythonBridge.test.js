@@ -1560,16 +1560,27 @@ describe("pythonBridge worker pool", () => {
 
   // -------------------------------------------------------------------------
   // Regression tests for Issue #278:
-  // "WorkerPool.available() must reflect dispatchable workers"
+  // "WorkerPool availability must reflect dispatchable workers"
   //
-  // Root cause: available() only checked isConfigured() && !disabled. It never
-  // looked at the actual worker pool, so a worker that merely exists in
-  // pool.workers (busy, still starting, or mid-termination) made available()
-  // report true even though dispatch() had nothing to hand the request to.
+  // Root cause of the first attempt at this fix: available() was changed to
+  // check the actual worker pool (ready && !busy), but available() is the
+  // "real model vs placeholder" gate that model.js checks at all 8 of its
+  // call sites before calling bridge.request(). bridge.request() already
+  // queues a request when every worker is busy (see "should queue requests
+  // when all workers are busy" above), so making available() track busy
+  // state made model.js skip the bridge - and its queueing - entirely once
+  // every worker was busy, silently falling back to placeholder output for
+  // requests that should have queued and completed for real.
+  //
+  // The fix: available() stays exactly isConfigured() && !disabled (a config
+  // gate, unaffected by worker load). Dispatchability is exposed separately
+  // via hasAvailableWorker(), mirroring WorkerPool.getAvailableWorker()'s
+  // "ready && !busy" semantics for callers that specifically need to know
+  // whether a request would dispatch immediately or queue.
   // -------------------------------------------------------------------------
 
-  describe("Issue #278 regression: available() reflects dispatchable workers", () => {
-    it("REGRESSION #278: available() is false when the only worker is busy (not dispatchable)", async () => {
+  describe("Issue #278 regression: hasAvailableWorker() reflects dispatchable workers", () => {
+    it("REGRESSION #278: hasAvailableWorker() is false when the only worker is busy, while available() stays true", async () => {
       process.env.MODEL_WORKERS = "1";
       bridge = require("../src/services/pythonBridge");
 
@@ -1578,15 +1589,21 @@ describe("pythonBridge worker pool", () => {
       await startPromise;
 
       assert.strictEqual(bridge.available(), true, "available before any request is in flight");
+      assert.strictEqual(bridge.hasAvailableWorker(), true, "a dispatchable worker exists before any request");
 
       // Occupy the only worker with an in-flight request
       const reqPromise = bridge.request("chat", { prompt: "occupy" });
       await new Promise((r) => setImmediate(r));
 
       assert.strictEqual(
-        bridge.available(),
+        bridge.hasAvailableWorker(),
         false,
-        "available() must be false while the only worker in the pool is busy"
+        "hasAvailableWorker() must be false while the only worker in the pool is busy"
+      );
+      assert.strictEqual(
+        bridge.available(),
+        true,
+        "available() must stay true while busy - it is a config gate, not a capacity check"
       );
 
       // Resolve so pending state/timers are cleaned up before the test ends
@@ -1594,10 +1611,10 @@ describe("pythonBridge worker pool", () => {
       spawnedProcesses[0].simulateResponse(msg.id, true, { content: "done" });
       await reqPromise;
 
-      assert.strictEqual(bridge.available(), true, "available() returns true once the worker frees up");
+      assert.strictEqual(bridge.hasAvailableWorker(), true, "hasAvailableWorker() returns true once the worker frees up");
     });
 
-    it("available() is true when a ready, idle worker exists", async () => {
+    it("hasAvailableWorker() is true when a ready, idle worker exists", async () => {
       bridge = require("../src/services/pythonBridge");
       const startPromise = bridge.start();
       setImmediate(() => {
@@ -1606,10 +1623,10 @@ describe("pythonBridge worker pool", () => {
       });
       await startPromise;
 
-      assert.strictEqual(bridge.available(), true, "should be available with idle ready workers");
+      assert.strictEqual(bridge.hasAvailableWorker(), true, "should have a dispatchable worker with idle ready workers");
     });
 
-    it("available() reflects mixed workers: true while any worker is dispatchable, false once all are busy", async () => {
+    it("hasAvailableWorker() reflects mixed workers: true while any worker is dispatchable, false once all are busy", async () => {
       bridge = require("../src/services/pythonBridge"); // MODEL_WORKERS defaults to 2 in beforeEach
       const startPromise = bridge.start();
       setImmediate(() => {
@@ -1622,13 +1639,15 @@ describe("pythonBridge worker pool", () => {
       const req1Promise = bridge.request("chat", { prompt: "occupy-1" });
       await new Promise((r) => setImmediate(r));
 
-      assert.strictEqual(bridge.available(), true, "should be available while worker 1 is still idle");
+      assert.strictEqual(bridge.hasAvailableWorker(), true, "should have a dispatchable worker while worker 1 is still idle");
+      assert.strictEqual(bridge.available(), true, "available() is unaffected by worker 0 being busy");
 
       // Occupy worker 1 too - now both workers are busy
       const req2Promise = bridge.request("chat", { prompt: "occupy-2" });
       await new Promise((r) => setImmediate(r));
 
-      assert.strictEqual(bridge.available(), false, "should be unavailable once all workers are busy");
+      assert.strictEqual(bridge.hasAvailableWorker(), false, "no worker is dispatchable once all workers are busy");
+      assert.strictEqual(bridge.available(), true, "available() is unaffected even when every worker is busy");
 
       // Clean up
       const msg1 = JSON.parse(spawnedProcesses[0].lastWrite);
@@ -1636,6 +1655,74 @@ describe("pythonBridge worker pool", () => {
       spawnedProcesses[0].simulateResponse(msg1.id, true, { content: "d1" });
       spawnedProcesses[1].simulateResponse(msg2.id, true, { content: "d2" });
       await Promise.all([req1Promise, req2Promise]);
+    });
+
+    it("REGRESSION #278/#279: a third concurrent request queues through the bridge instead of falling back to placeholder output", async () => {
+      // Reproduces the exact shape of model.js's gating pattern at all 8 of
+      // its call sites: `if (bridge.available()) { try bridge.request() }
+      // else { use placeholder }`. With MODEL_WORKERS=2, a third concurrent
+      // request must still be routed through bridge.request() (which queues
+      // it internally) rather than skipping the bridge because a capacity
+      // check reported "unavailable". This mirrors the maintainer's repro
+      // for the PR #279 review.
+      bridge = require("../src/services/pythonBridge"); // MODEL_WORKERS defaults to 2 in beforeEach
+
+      const startPromise = bridge.start();
+      setImmediate(() => {
+        spawnedProcesses[0].simulateReady(true);
+        spawnedProcesses[1].simulateReady(true);
+      });
+      await startPromise;
+
+      // Mirrors model.js: gate on bridge.available(), fall back to a
+      // placeholder marker when it reports false.
+      async function callLikeModelJs(prompt) {
+        if (bridge.available()) {
+          return bridge.request("chat", { prompt });
+        }
+        return { content: "PLACEHOLDER", placeholder: true };
+      }
+
+      const req1Promise = callLikeModelJs("req1");
+      const req2Promise = callLikeModelJs("req2");
+      await new Promise((r) => setImmediate(r));
+
+      // Both workers are now busy; available() must still gate "true" here -
+      // this is the exact moment the old (buggy) available() implementation
+      // would have flipped to false and made the third call below skip the
+      // bridge entirely.
+      assert.strictEqual(bridge.available(), true, "available() must remain true while both workers are busy");
+      assert.strictEqual(bridge.hasAvailableWorker(), false, "no worker is currently dispatchable");
+
+      const req3Promise = callLikeModelJs("req3");
+      await new Promise((r) => setImmediate(r));
+
+      // The third request must have been queued inside the pool, not
+      // resolved as a placeholder.
+      const pool = bridge._pool();
+      assert.strictEqual(pool.queue.length, 1, "the third request should be queued by the pool, not skipped");
+
+      // Complete the two in-flight requests; the queued third should then
+      // dispatch and complete for real.
+      const msg1 = JSON.parse(spawnedProcesses[0].lastWrite);
+      const msg2 = JSON.parse(spawnedProcesses[1].lastWrite);
+      spawnedProcesses[0].simulateResponse(msg1.id, true, { content: "result1" });
+      spawnedProcesses[1].simulateResponse(msg2.id, true, { content: "result2" });
+
+      const result1 = await req1Promise;
+      const result2 = await req2Promise;
+      assert.strictEqual(result1.content, "result1");
+      assert.strictEqual(result2.content, "result2");
+
+      await new Promise((r) => setImmediate(r));
+      const workerWithReq3 = spawnedProcesses.find((p) => p.lastWrite && JSON.parse(p.lastWrite).params.prompt === "req3");
+      assert.ok(workerWithReq3, "queued third request should eventually dispatch to a freed worker");
+      const msg3 = JSON.parse(workerWithReq3.lastWrite);
+      workerWithReq3.simulateResponse(msg3.id, true, { content: "result3" });
+
+      const result3 = await req3Promise;
+      assert.strictEqual(result3.content, "result3", "third request must complete via the bridge, not a placeholder");
+      assert.strictEqual(result3.placeholder, undefined, "third request must not have fallen back to placeholder output");
     });
   });
 });

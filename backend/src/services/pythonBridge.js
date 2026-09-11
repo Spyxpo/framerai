@@ -627,12 +627,17 @@ async function request(op, params = {}, optionsOrRequestId = null, operatorCtx =
 }
 
 function available() {
-  if (!isConfigured() || disabled) return false;
-  // Before the pool has been started, request() starts it lazily on first
-  // use, so there are no worker objects yet to inspect - treat that as
-  // available rather than reporting false for workers that don't exist yet.
-  if (!pool) return true;
-  return Boolean(pool.getAvailableWorker());
+  return isConfigured() && !disabled;
+}
+
+/**
+ * Whether the pool currently has a worker that is ready and idle, i.e. one
+ * that dispatch() could hand a request to right now without queueing it.
+ * Unlike available(), this says nothing about configuration - it is a
+ * capacity check, not the "real model vs placeholder" gate.
+ */
+function hasAvailableWorker() {
+  return Boolean(pool && pool.getAvailableWorker());
 }
 
 /**
@@ -655,4 +660,4 @@ async function start() {
   }
 }
 
-module.exports = { request, available, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
+module.exports = { request, available, hasAvailableWorker, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
