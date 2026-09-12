@@ -200,12 +200,12 @@ class ShellPolicy:
                 if "=" in argument:
                     # Extract path from --flag=path pattern
                     _, value = argument.split("=", 1)
-                    if value and (os.sep in value or value.startswith("~") or ".." in value):
+                    if value and (os.sep in value or "/" in value or value.startswith("~") or ".." in value or os.path.isabs(value)):
                         path_to_check = value
                 # Skip other flags - they'll be caught if they have a separate value argument
                 else:
                     continue
-            elif os.sep not in argument and not argument.startswith("~") and ".." not in argument:
+            elif os.sep not in argument and "/" not in argument and not argument.startswith("~") and ".." not in argument and not os.path.isabs(argument):
                 continue
             else:
                 path_to_check = argument

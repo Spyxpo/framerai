@@ -121,6 +121,24 @@ def test_file_flag_with_embedded_path_escapes_sandbox(sandbox):
     assert "outside the sandbox" in decision.reason
 
 
+def test_absolute_path_blocked_in_arguments(sandbox):
+    """Issue #236.3: Absolute paths like /etc/passwd should be blocked."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # Absolute path should be validated against sandbox
+    decision = policy.decide(["cat", "/etc/passwd"])
+    assert not decision
+    assert "outside the sandbox" in decision.reason
+
+
+def test_absolute_path_in_flag_blocked(sandbox):
+    """Issue #236.3: Absolute paths in flags should also be blocked."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # Absolute path embedded in flag should be validated
+    decision = policy.decide(["cat", "--file=/etc/passwd"])
+    assert not decision
+    assert "outside the sandbox" in decision.reason
+
+
 # --- Vulnerability 4: Caller timeout bypasses policy maximum -----------------
 
 
