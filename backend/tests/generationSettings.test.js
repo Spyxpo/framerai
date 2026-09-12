@@ -26,6 +26,20 @@ test("readSettings validates repetition_penalty", () => {
   assert.equal(valid.errors.length, 0);
   assert.equal(valid.result.repetition_penalty, 1.2);
 
+  const minBoundary = parse({ repetition_penalty: 0.0001 });
+  assert.equal(minBoundary.errors.length, 0);
+  assert.equal(minBoundary.result.repetition_penalty, 0.0001);
+
+  const maxBoundary = parse({ repetition_penalty: 10 });
+  assert.equal(maxBoundary.errors.length, 0);
+  assert.equal(maxBoundary.result.repetition_penalty, 10);
+
+  const belowMin = parse({ repetition_penalty: 0.00005 });
+  assert.ok(belowMin.errors.some((e) => e.field === "settings.repetition_penalty"));
+
+  const aboveMax = parse({ repetition_penalty: 10.1 });
+  assert.ok(aboveMax.errors.some((e) => e.field === "settings.repetition_penalty"));
+
   const zero = parse({ repetition_penalty: 0 });
   assert.ok(zero.errors.some((e) => e.field === "settings.repetition_penalty"));
 

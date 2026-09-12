@@ -65,7 +65,7 @@ function readSettings(parent) {
 function readRepetitionPenalty(v) {
   const raw = v.source.repetition_penalty;
   if (raw === undefined || raw === null || raw === "") return undefined;
-  const val = v.number("repetition_penalty");
+  const val = v.number("repetition_penalty", LIMITS.repetition_penalty);
   if (val !== undefined && val <= 0) {
     v.fail("repetition_penalty", "must be greater than 0");
     return undefined;
