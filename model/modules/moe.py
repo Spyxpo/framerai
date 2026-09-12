@@ -19,9 +19,11 @@ Two dispatch paths are provided:
 """
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..training.expert_parallel import all_to_all_combine, all_to_all_dispatch
 from .transformer import FeedForward
 
 
@@ -72,8 +74,18 @@ class MoEFeedForward(nn.Module):
         topk_probs, topk_idx = router_probs.topk(self.top_k, dim=-1)  # (N, k)
         topk_gates = (topk_probs / (topk_probs.sum(-1, keepdim=True) + 1e-9)).to(x.dtype)
 
-        # Dispatch: grouped (CUDA, large batches) or loop (CPU, tiny batches)
-        if self._should_use_grouped_dispatch(x_flat):
+        if (
+            self.ep_plan is not None
+            and self.ep_plan.enabled
+            and (dist.is_available() and dist.is_initialized())
+        ):
+            out = self._ep_expert_forward(x_flat, topk_idx, topk_gates)
+        elif self.expert_offset != 0 and (self.ep_plan is None or not self.ep_plan.enabled):
+            raise RuntimeError(
+                f"Invalid expert-parallel configuration: expert_offset={self.expert_offset} "
+                "is non-zero but ep_plan is missing or disabled."
+            )
+        elif self._should_use_grouped_dispatch(x_flat):
             out = self._grouped_expert_forward(x_flat, topk_idx, topk_gates)
         else:
             out = self._loop_expert_forward(x_flat, topk_idx, topk_gates)
@@ -83,6 +95,100 @@ class MoEFeedForward(nn.Module):
 
         aux = self._aux_loss(router_probs, topk_idx, router_logits, N)
         return out.view(B, T, D), aux
+
+    def _ep_expert_forward(self, x_flat, topk_idx, topk_gates):
+        """Expert-parallel dispatch: communicate off-rank tokens via all-to-all."""
+        N, D = x_flat.shape
+        k = self.top_k
+        plan = self.ep_plan
+        ep_world = plan.ep_world
+        per_rank = self.n_experts // ep_world
+
+        # 1. Flatten token-expert assignments: (N*k,)
+        assignments = topk_idx.reshape(-1)
+        token_ids = (
+            torch.arange(N, device=x_flat.device, dtype=torch.long)
+            .unsqueeze(1)
+            .expand(N, k)
+            .reshape(-1)
+        )
+        gates_flat = topk_gates.reshape(-1)
+
+        # 2. Determine destination rank for each assignment
+        dest_ranks = assignments // per_rank
+
+        # 3. Sort by destination rank to form contiguous chunks per destination rank
+        sort_idx = torch.argsort(dest_ranks, stable=True)
+        sorted_dest_ranks = dest_ranks[sort_idx]
+        sorted_token_ids = token_ids[sort_idx]
+        sorted_expert_ids = assignments[sort_idx]
+        sorted_gates = gates_flat[sort_idx]
+
+        # 4. Gather tokens and calculate send counts per rank
+        send_tokens = x_flat[sorted_token_ids]
+        send_counts = torch.bincount(sorted_dest_ranks, minlength=ep_world)
+
+        # 5. Dispatch tokens and assigned expert IDs to owning ranks
+        recv_tokens, recv_counts = all_to_all_dispatch(send_tokens, send_counts, plan)
+        recv_expert_ids, _ = all_to_all_dispatch(sorted_expert_ids.unsqueeze(-1), send_counts, plan)
+        recv_expert_ids = recv_expert_ids.squeeze(-1)
+
+        # 6. Process local experts on received tokens
+        local_expert_ids = recv_expert_ids - self.expert_offset
+        local_outputs = self._forward_local_experts(recv_tokens, local_expert_ids)
+
+        # 7. Return expert outputs to originating rank
+        combined = all_to_all_combine(local_outputs, send_counts, recv_counts, plan)
+
+        # 8. Apply routing gates and scatter-add back to token positions
+        gated = combined * sorted_gates.unsqueeze(-1)
+        out = torch.zeros(N, D, dtype=x_flat.dtype, device=x_flat.device)
+        out.index_add_(0, sorted_token_ids, gated)
+
+        return out
+
+    def _forward_local_experts(self, tokens: torch.Tensor, local_expert_ids: torch.Tensor) -> torch.Tensor:
+        """Evaluate local experts on a batch of tokens, returning outputs in the same order."""
+        M, D = tokens.shape
+        E_local = len(self.experts)
+        if M == 0 or E_local == 0:
+            return tokens.new_zeros((M, D))
+
+        if self._should_use_grouped_dispatch(tokens):
+            sorted_experts, sort_idx = local_expert_ids.sort(stable=True)
+            sorted_tokens = tokens[sort_idx]
+
+            counts = torch.bincount(sorted_experts, minlength=E_local)
+            offsets = torch.zeros(E_local + 1, dtype=torch.long, device=tokens.device)
+            offsets[1:] = counts.cumsum(0)
+
+            expert_outputs = torch.zeros(M, D, dtype=tokens.dtype, device=tokens.device)
+            for local_e in range(E_local):
+                start, end = offsets[local_e].item(), offsets[local_e + 1].item()
+                if start == end:
+                    continue
+                tok_slice = sorted_tokens[start:end]
+                exp = self.experts[local_e]
+                h = F.silu(F.linear(tok_slice, exp.w1.weight)) * F.linear(tok_slice, exp.w3.weight)
+                expert_outputs[start:end] = F.linear(h, exp.w2.weight)
+
+            if self.training and E_local > 0:
+                dropout_p = self.experts[0].dropout.p
+                if dropout_p > 0:
+                    expert_outputs = F.dropout(expert_outputs, p=dropout_p, training=True)
+
+            local_outputs = torch.empty_like(expert_outputs)
+            local_outputs[sort_idx] = expert_outputs
+            return local_outputs
+        else:
+            local_outputs = torch.zeros(M, D, dtype=tokens.dtype, device=tokens.device)
+            for local_e, expert in enumerate(self.experts):
+                mask = (local_expert_ids == local_e)
+                if not mask.any():
+                    continue
+                idx = mask.nonzero(as_tuple=True)[0]
+                local_outputs[idx] = expert(tokens[idx])
+            return local_outputs
 
     def _should_use_grouped_dispatch(self, x_flat):
         """Use grouped dispatch on all devices for workloads above the threshold."""
