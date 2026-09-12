@@ -9,8 +9,16 @@ on.
 
 import copy
 import os
+import queue
 import sys
 import uuid
+
+# The 2-rank tests below spawn fresh interpreters, which re-import this module to
+# unpickle their worker functions. Those children run without pytest, so
+# `conftest` resolves against sys.path alone and finds the root conftest.py
+# instead of the one beside this file. Putting the tests directory first keeps
+# the parent and the spawned children on tests/conftest.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest
 import torch
@@ -266,11 +274,15 @@ def _run_distributed_test(worker_fn, tmp_path, test_name: str):
             join=True,
         )
     except Exception as exc:
+        # A child that fails puts its traceback on the queue and then dies, so the
+        # feeder thread may not have flushed it yet when we get here. Draining with
+        # `empty()` races that flush and reports a bare exit code instead of the
+        # reason, so wait briefly for one entry per rank.
         errors = []
-        while not error_queue.empty():
+        for _ in range(2):
             try:
-                errors.append(error_queue.get_nowait())
-            except Exception:
+                errors.append(error_queue.get(timeout=5))
+            except queue.Empty:
                 break
         if errors:
             formatted = "\n\n".join(
