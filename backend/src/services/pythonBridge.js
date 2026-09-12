@@ -61,6 +61,17 @@ function _setTimerImpl(setFn, clearFn) {
 // enough that a stuck GPU kernel cannot hold a pool slot indefinitely.
 const KILL_ESCALATION_GRACE_MS = Number(process.env.MODEL_KILL_GRACE_MS || 5000);
 
+// Liveness watchdog: a worker that stops heartbeating for this long is
+// considered wedged (e.g., stuck in an uninterruptible CUDA ioctl). The
+// timeout must be >> MODEL_HEARTBEAT_INTERVAL to avoid false positives from
+// scheduling jitter or GC pauses.
+const HEARTBEAT_TIMEOUT_MS = Number(process.env.MODEL_HEARTBEAT_TIMEOUT_MS || 15000);
+
+// Grace period before the first heartbeat is expected. Covers model load,
+// Python startup, and thread initialization. Must be >> STARTUP_TIMEOUT_MS
+// would be redundant, so this only applies after the worker reports ready.
+const HEARTBEAT_STARTUP_GRACE_MS = Number(process.env.MODEL_HEARTBEAT_STARTUP_GRACE_MS || 10000);
+
 // Worker state
 class Worker {
   constructor(id) {
@@ -76,6 +87,10 @@ class Worker {
     this.nextId = 1;
     this._safetyTimer = null;
     this.onSuccess = null;
+    // Liveness tracking: a worker that stops heartbeating is wedged, even if
+    // it is busy. Request duration alone is NOT proof of a stuck worker.
+    this.lastHeartbeat = null;
+    this._livenessTimer = null;
   }
 
   spawn() {
@@ -124,11 +139,23 @@ class Worker {
               // the API can size its own limits to the model it is serving
               // rather than to a constant that fits neither end of the range.
               if (msg.info && typeof msg.info === "object") this.info = msg.info;
+              // Start liveness watchdog after a grace period (covers heartbeat
+              // thread startup). The watchdog tracks heartbeats to detect a
+              // wedged worker (e.g., stuck in CUDA ioctl) even if busy.
+              this.lastHeartbeat = Date.now();
+              this._livenessTimer = _setTimeout(() => {
+                this.checkLiveness();
+              }, HEARTBEAT_STARTUP_GRACE_MS);
               resolve(true);
             } else {
               workerLog.warn("failed to load", { error: msg.error });
               resolve(false);
             }
+            continue;
+          }
+          if (msg.type === "heartbeat") {
+            // Update liveness timestamp - this worker is alive even if busy
+            this.lastHeartbeat = Date.now();
             continue;
           }
           if (msg.type === "approval_request") {
@@ -220,6 +247,11 @@ class Worker {
           _clearTimeout(this._safetyTimer);
           this._safetyTimer = null;
         }
+        // Clear liveness timer
+        if (this._livenessTimer) {
+          _clearTimeout(this._livenessTimer);
+          this._livenessTimer = null;
+        }
         // Reject current request if any
         if (this.currentRequest) {
           const { reject, timer } = this.currentRequest;
@@ -250,6 +282,67 @@ class Worker {
         }
       }, STARTUP_TIMEOUT_MS);
     });
+  }
+
+  checkLiveness() {
+    // Recurring watchdog: check if heartbeats have stopped. A worker can be
+    // busy for an arbitrarily long time as long as heartbeats continue. If
+    // heartbeats stop, the worker is wedged (e.g., stuck in CUDA ioctl).
+    if (!this.ready || !this.child || this._livenessTimer === null) {
+      // Worker already dead, not yet ready, or liveness check stopped
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - this.lastHeartbeat;
+
+    if (elapsed > HEARTBEAT_TIMEOUT_MS) {
+      const workerLog = createLogger({ route: `worker-${this.id}` });
+      workerLog.warn("heartbeat timeout, worker is wedged", {
+        lastHeartbeatMs: elapsed,
+        timeoutMs: HEARTBEAT_TIMEOUT_MS,
+      });
+
+      // Worker is wedged - terminate it. The exit handler will trigger
+      // replacement via handleWorkerExit. Same escalation path as request
+      // timeout: SIGTERM, then SIGKILL after grace period.
+      this.ready = false;
+      _clearTimeout(this._livenessTimer);
+      this._livenessTimer = null;
+      const dyingChild = this.child;
+      dyingChild.kill(); // SIGTERM
+
+      let exited = false;
+      const escalationTimer = _setTimeout(() => {
+        const confirmedExited = exited || dyingChild.exitCode !== null || dyingChild.signalCode !== null;
+        if (!confirmedExited) {
+          const workerLog2 = createLogger({ route: `worker-${this.id}` });
+          workerLog2.warn("wedged worker did not exit after SIGTERM, sending SIGKILL", {});
+          try {
+            dyingChild.kill("SIGKILL");
+          } catch {
+            // Process may have already exited
+          }
+        }
+      }, KILL_ESCALATION_GRACE_MS);
+
+      dyingChild.once("exit", () => {
+        exited = true;
+        _clearTimeout(escalationTimer);
+      });
+
+      // Call handleWorkerExit directly (Issue #276 fix) to ensure immediate
+      // pool cleanup without waiting for the exit event.
+      if (this.onExit) {
+        this.onExit(this);
+      }
+    } else {
+      // Still alive - reschedule next check. Use a fixed interval instead of
+      // calculating remaining time to avoid scheduling logic issues.
+      this._livenessTimer = _setTimeout(() => {
+        this.checkLiveness();
+      }, Math.min(HEARTBEAT_TIMEOUT_MS / 2, 5000)); // Check at half the timeout interval, max 5s
+    }
   }
 
   sendApprovalResponse(approvalId, approved) {
@@ -401,6 +494,10 @@ class Worker {
     if (this._safetyTimer) {
       _clearTimeout(this._safetyTimer);
       this._safetyTimer = null;
+    }
+    if (this._livenessTimer) {
+      _clearTimeout(this._livenessTimer);
+      this._livenessTimer = null;
     }
     if (this.child) {
       this.child.removeAllListeners();
