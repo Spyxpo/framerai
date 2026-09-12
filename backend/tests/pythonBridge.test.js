@@ -22,6 +22,13 @@ class MockChildProcess extends EventEmitter {
     this.args = args;
     this.options = options;
     this.killed = false;
+    // Mirrors real ChildProcess: set by the runtime when the process actually
+    // terminates, independent of any 'exit' listeners attached to it. Tests
+    // that check escalation logic against a listener-stripped child rely on
+    // this pair rather than an emitted event reaching a (possibly removed)
+    // listener.
+    this.exitCode = null;
+    this.signalCode = null;
     this.stdin = {
       write: (data) => {
         this.lastWrite = data;
@@ -33,8 +40,11 @@ class MockChildProcess extends EventEmitter {
     spawnedProcesses.push(this);
   }
 
-  kill() {
+  kill(signal) {
     this.killed = true;
+    // A cooperative process terminated by a signal reports a null exit code
+    // and the signal that killed it - matches real ChildProcess semantics.
+    this.signalCode = signal || "SIGTERM";
     this.emit("exit", 0);
   }
 
@@ -55,6 +65,7 @@ class MockChildProcess extends EventEmitter {
   }
 
   simulateExit(code = 0) {
+    this.exitCode = code;
     this.emit("exit", code);
   }
 }
@@ -1132,9 +1143,11 @@ describe("pythonBridge worker pool", () => {
         if (signal === "SIGKILL") {
           // Respond to SIGKILL by actually dying
           this.exited = true;
+          this.signalCode = "SIGKILL";
           this.emit("exit", 137); // 128 + 9 (SIGKILL)
         }
-        // SIGTERM is silently ignored — the process does not exit
+        // SIGTERM is silently ignored — the process does not exit, so
+        // exitCode/signalCode both stay null, same as a genuinely live process.
       }
     }
 
@@ -1883,5 +1896,192 @@ describe("Issue #276: timeout path calls handleWorkerExit directly", () => {
     // The key test: calling handleWorkerExit twice should not crash
     // The second call should be a no-op because the worker is already removed
     assert.ok(true, "duplicate handleWorkerExit calls should not crash");
+  });
+});
+
+
+// ============================================================================
+// Regression tests: stale SIGKILL escalation after worker exits
+//
+// Root cause: the timeout path's escalation timer tracks whether the worker
+// exited via a `once("exit", ...)` listener attached to the child process.
+// Issue #276 made the timeout path call handleWorkerExit() directly and
+// synchronously, right after sending SIGTERM - before the real (async) exit
+// event can ever arrive. handleWorkerExit() -> cleanup() then calls
+// child.removeAllListeners(), which strips that listener before it has a
+// chance to observe the real exit. When the worker later does honour SIGTERM
+// and exit, nothing is left to notice, so the escalation timer fires anyway,
+// logs the misleading "worker did not exit after SIGTERM, sending SIGKILL",
+// and sends SIGKILL to an already-dead process.
+// ============================================================================
+
+describe("Regression: stale SIGKILL escalation after worker exits", () => {
+  let bridge = null;
+  let originalExistsSync = null;
+
+  // Models a real ChildProcess: kill() does NOT synchronously emit 'exit'
+  // (real process termination is always asynchronous, reported later by the
+  // OS/libuv). finishExit() simulates that later, real termination.
+  class AsyncExitMockChildProcess extends MockChildProcess {
+    constructor(...args) {
+      super(...args);
+      this.killSignals = [];
+    }
+
+    kill(signal) {
+      this.killSignals.push(signal || "SIGTERM");
+      this.killed = true;
+      // Do not emit 'exit' here - a real process dies asynchronously.
+    }
+
+    finishExit(code = 0, signal = null) {
+      if (signal) {
+        this.signalCode = signal;
+        this.exitCode = null;
+      } else {
+        this.exitCode = code;
+        this.signalCode = null;
+      }
+      this.emit("exit", code, signal);
+    }
+  }
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    process.env.MODEL_ENABLED = "true";
+    process.env.MODEL_PATH = "/fake/model.pt";
+    process.env.TOKENIZER_PATH = "/fake/tokenizer";
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "50";
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path.includes("model.pt")) return true;
+      return originalExistsSync(path);
+    };
+
+    mockSpawn = () => new AsyncExitMockChildProcess();
+  });
+
+  afterEach(() => {
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  // Intercepts _setTimeout/_clearTimeout the same way the Issue #238/#276
+  // tests do: startup timeouts and stability timers become inert sentinels,
+  // backoff fires immediately, and the escalation timer is captured so it
+  // can be fired deterministically instead of waiting out the real grace
+  // period.
+  function interceptTimers(bridge) {
+    let escalationFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true }; // startup timeout / stability timer
+        if (ms >= 5000) {
+          escalationFn = fn;
+          return { escalationTimer: true };
+        }
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.longTimer || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+    return { prev, getEscalationFn: () => escalationFn };
+  }
+
+  it("TEST A - REGRESSION: does not send a stale SIGKILL once the worker has actually exited after SIGTERM", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const { prev, getEscalationFn } = interceptTimers(bridge);
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    const reqPromise = bridge.request("chat", { prompt: "will-timeout" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Let the 50ms request timeout fire: SIGTERM is sent, and the #276 fix
+    // calls handleWorkerExit()/cleanup() synchronously right afterwards.
+    await new Promise((r) => setTimeout(r, 100));
+    await reqPromise;
+
+    assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should have been sent");
+    const escalationFn = getEscalationFn();
+    assert.ok(escalationFn, "escalation timer should have been registered");
+
+    // The worker cooperatively honours SIGTERM and exits shortly after -
+    // well before the escalation grace period would fire. This happens
+    // after cleanup() has already run and stripped the exit listener.
+    worker.finishExit(0);
+
+    // Fire the escalation timer (simulating the grace period elapsing).
+    escalationFn();
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    assert.ok(
+      !worker.killSignals.includes("SIGKILL"),
+      `escalation must not send SIGKILL to an already-exited worker (signals sent: ${JSON.stringify(worker.killSignals)})`
+    );
+  });
+
+  it("TEST B - worker that never exits after SIGTERM still gets escalated to SIGKILL", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const { prev, getEscalationFn } = interceptTimers(bridge);
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    const reqPromise = bridge.request("chat", { prompt: "will-timeout" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+    });
+    await new Promise((r) => setImmediate(r));
+
+    await new Promise((r) => setTimeout(r, 100));
+    await reqPromise;
+
+    assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should have been sent");
+    const escalationFn = getEscalationFn();
+    assert.ok(escalationFn, "escalation timer should have been registered");
+
+    // The worker never exits (genuinely stuck) - do NOT call finishExit().
+    escalationFn();
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    assert.ok(
+      worker.killSignals.includes("SIGKILL"),
+      "escalation must still send SIGKILL to a worker that never exited"
+    );
   });
 });
