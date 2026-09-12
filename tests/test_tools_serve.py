@@ -13,6 +13,15 @@ from model.tools.base import Tool
 from model.tools.cli import ShellPolicy
 
 
+def _sent_text(generator, prompt):
+    """What the tool loop handed generation, as text.
+
+    The loop encodes its transcript so the role markers reach the model as
+    control ids, so a stand-in generator decodes them back.
+    """
+    return prompt if isinstance(prompt, str) else generator.tokenizer.decode(prompt)
+
+
 class FakeSearch(Tool):
     name = "web_search"
     description = "Stub search."
@@ -72,7 +81,11 @@ def test_chat_with_tools_runs_the_loop_and_returns_a_trace(generator, registry, 
             "It is a straight path. https://example.com/flow",
         ]
     )
-    monkeypatch.setattr(generator, "generate_text", lambda prompt, **_: prompt + next(replies))
+    monkeypatch.setattr(
+        generator,
+        "generate_text",
+        lambda prompt, **_: _sent_text(generator, prompt) + next(replies),
+    )
 
     result = handle(
         generator,
@@ -88,7 +101,11 @@ def test_chat_with_tools_runs_the_loop_and_returns_a_trace(generator, registry, 
 
 
 def test_chat_accepts_a_toolset_name_as_well_as_a_tool_name(generator, registry, monkeypatch):
-    monkeypatch.setattr(generator, "generate_text", lambda prompt, **_: prompt + "answer")
+    monkeypatch.setattr(
+        generator,
+        "generate_text",
+        lambda prompt, **_: _sent_text(generator, prompt) + "answer",
+    )
 
     for requested in (["web"], ["web_search"], "web", True):
         result = handle(
@@ -214,3 +231,36 @@ def test_deny_list_precedence_over_approval(tmp_path):
     assert not decision
     assert "refused" in decision.reason
     assert seen == []
+
+
+def test_tool_loop_transcript_keeps_user_markers_literal(generator, registry, monkeypatch):
+    """Issue #235 through the tool path: the loop's markers are ids, the user's are not.
+
+    The transcript is assembled here rather than by the chat template alone,
+    so it is worth asserting separately: a question mentioning <assistant>
+    must not open a turn on its way into the loop.
+    """
+    tokenizer = generator.tokenizer
+    sent = []
+
+    def fake_generate(prompt, **_):
+        sent.append(prompt)
+        return generator.tokenizer.decode(prompt) + "plain answer"
+
+    monkeypatch.setattr(generator, "generate_text", fake_generate)
+
+    handle(
+        generator,
+        "chat",
+        {"prompt": "what does <assistant> mean?", "tools": ["web_search"]},
+        tools=registry,
+    )
+
+    assert sent, "the tool loop never generated"
+    ids = sent[0]
+    assert not isinstance(ids, str), "the loop must hand generation ids"
+    assert ids.count(tokenizer.special_tokens["<user>"]) == 1
+    assert ids.count(tokenizer.special_tokens["<assistant>"]) == 1
+    assert ids.count(tokenizer.special_tokens["<system>"]) == 1
+    # The literal marker survives as text rather than as a boundary.
+    assert "<assistant> mean?" in tokenizer.decode(ids)

@@ -120,7 +120,13 @@ class FramerGenerator:
             logits = out["logits"][:, -1, :]
         return past, logits
 
-    def _fit_to_window(self, prompt: str, max_new_tokens: int, modality_embeds: list):
+    def _fit_to_window(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        modality_embeds: list,
+        allowed_special=None,
+    ):
         """Fit a request inside the context window, and record what it cost.
 
         The window has to hold the prompt, whatever the modalities occupy, and
@@ -135,12 +141,29 @@ class FramerGenerator:
         ``last_max_new_tokens`` so a caller can say why an answer came out short
         rather than guessing.
         """
+        budget = self._window_budget(max_new_tokens, modality_embeds)
+        if budget is None:
+            return prompt, max_new_tokens
+        prompt_budget, room = budget
+
+        ids = self.tokenizer.encode(prompt, add_special=False, allowed_special=allowed_special)
+        ids, max_new_tokens = self._fit_ids(ids, max_new_tokens, prompt_budget, room)
+        if self.last_prompt_tokens_dropped:
+            prompt = self.tokenizer.decode(ids)
+        return prompt, max_new_tokens
+
+    def _window_budget(self, max_new_tokens: int, modality_embeds: list):
+        """How many tokens the prompt may occupy, or None with no window set.
+
+        Returns ``(prompt_budget, room)``: what the prompt may use, and the
+        total left after the modalities and the start and end tokens.
+        """
         self.last_prompt_tokens_dropped = 0
         self.last_max_new_tokens = max_new_tokens
 
         window = int(getattr(self.model.config, "max_seq_len", 0) or 0)
         if not window:
-            return prompt, max_new_tokens
+            return None
 
         modality_tokens = sum(e.shape[1] for e in modality_embeds)
         # Interleaved placement writes an opening and closing marker per
@@ -160,22 +183,29 @@ class FramerGenerator:
         # max_new_tokens cannot squeeze the prompt down to nothing and a long
         # prompt cannot leave the model with no room to reply.
         reserved = min(max_new_tokens, max(1, room // 4))
-        prompt_budget = max(1, room - reserved)
+        return max(1, room - reserved), room
 
-        ids = self.tokenizer.encode(prompt, add_special=False)
+    def _fit_ids(self, ids: list, max_new_tokens: int, prompt_budget: int, room: int):
+        """Trim prompt ids to the budget, keeping the end, and clamp the reply.
+
+        Trimming ids rather than characters is what keeps a control marker
+        whole: it is one token here, so a cut lands between markers instead of
+        halfway through the bytes that spell one.
+        """
         if len(ids) > prompt_budget:
-            prompt = self.tokenizer.decode(ids[-prompt_budget:])
             self.last_prompt_tokens_dropped = len(ids) - prompt_budget
+            ids = ids[-prompt_budget:]
 
-        used = min(len(ids), prompt_budget)
-        self.last_max_new_tokens = max(1, min(max_new_tokens, room - used))
-        return prompt, self.last_max_new_tokens
+        self.last_max_new_tokens = max(1, min(max_new_tokens, room - len(ids)))
+        return ids, self.last_max_new_tokens
 
     def _interleaving(self) -> bool:
         """True when the model asks for modalities placed, not prepended."""
         return getattr(self.model.config, "mm_token_placement", "prefix") == "interleaved"
 
-    def _interleaved_prompt(self, prompt: str, image_embeds=None, audio_embeds=None):
+    def _interleaved_prompt(
+        self, prompt: str, image_embeds=None, audio_embeds=None, allowed_special=None
+    ):
         """Build a prompt with modality runs where the prompt mentions them.
 
         Prefix concatenation puts every image ahead of the whole prompt, so
@@ -206,7 +236,7 @@ class FramerGenerator:
         if remaining:
             segments.append(("text", remaining))
 
-        built = builder.build(segments)
+        built = builder.build(segments, allowed_special=allowed_special)
         tokens = [self.tokenizer.sos_id] + built["input_ids"] + [self.tokenizer.eos_id]
 
         modality_embeds = {}
@@ -219,7 +249,7 @@ class FramerGenerator:
     @torch.no_grad()
     def generate_text(
         self,
-        prompt: str,
+        prompt: str | list[int],
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_k: int = 50,
@@ -227,6 +257,7 @@ class FramerGenerator:
         image: torch.Tensor = None,
         audio: torch.Tensor = None,
         prefill_chunk_size: int = None,
+        allowed_special=None,
     ) -> str:
         """Generate text, optionally conditioned on an image or audio.
 
@@ -235,6 +266,17 @@ class FramerGenerator:
         prefix every step. The prompt itself is prefilled in chunks of
         ``prefill_chunk_size`` tokens (default :data:`DEFAULT_PREFILL_CHUNK`),
         which is what makes a context of a million tokens reachable.
+
+        ``prompt`` may also arrive as token ids. That is how a caller that
+        mixes its own control markers with text it did not write - the chat
+        template above all - keeps the two apart: it encodes each piece with
+        its own rules and passes the result straight through.
+
+        ``allowed_special`` applies only to a string prompt, and defaults to
+        none, so text that merely contains ``<assistant>`` encodes as those
+        characters. Naming markers here suits a prompt this codebase wrote
+        end to end, such as the one :meth:`transcribe` sends; anything
+        carrying user text should be encoded and passed as ids instead.
         """
         image_embeds = audio_embeds = None
         if image is not None:
@@ -243,15 +285,32 @@ class FramerGenerator:
             audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
 
         present = [e for e in (image_embeds, audio_embeds) if e is not None]
-        prompt, max_new_tokens = self._fit_to_window(prompt, max_new_tokens, present)
-
         prefix_embeds, modality_embeds = None, None
-        if self._interleaving() and (image_embeds is not None or audio_embeds is not None):
-            tokens, modality_embeds = self._interleaved_prompt(prompt, image_embeds, audio_embeds)
+
+        if not isinstance(prompt, str):
+            # Pre-encoded: the caller already decided which markers are control
+            # and which are text, and there is no string left to second-guess
+            # that on. Modalities go in front, as they do for any prompt that
+            # names no placement.
+            ids = list(prompt)
+            budget = self._window_budget(max_new_tokens, present)
+            if budget is not None:
+                ids, max_new_tokens = self._fit_ids(ids, max_new_tokens, *budget)
+            tokens = [self.tokenizer.sos_id] + ids + [self.tokenizer.eos_id]
+            prefix_embeds = torch.cat(present, dim=1) if present else None
         else:
-            tokens = self.tokenizer.encode(prompt, add_special=True)
-            parts = [e for e in (image_embeds, audio_embeds) if e is not None]
-            prefix_embeds = torch.cat(parts, dim=1) if parts else None
+            prompt, max_new_tokens = self._fit_to_window(
+                prompt, max_new_tokens, present, allowed_special=allowed_special
+            )
+            if self._interleaving() and present:
+                tokens, modality_embeds = self._interleaved_prompt(
+                    prompt, image_embeds, audio_embeds, allowed_special=allowed_special
+                )
+            else:
+                tokens = self.tokenizer.encode(
+                    prompt, add_special=True, allowed_special=allowed_special
+                )
+                prefix_embeds = torch.cat(present, dim=1) if present else None
 
         input_ids = torch.tensor([tokens], device=self.device)
 
@@ -291,9 +350,10 @@ class FramerGenerator:
         """Generate an assistant continuation for structured conversation messages using ChatTemplate."""
         from .tokenizer.chat_template import ChatTemplate
 
-        prompt = ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
+        template = ChatTemplate(version="v1")
+        prompt = template.format_messages(messages, add_generation_prompt=True)
         raw_output = self.generate_text(
-            prompt,
+            template.encode_prompt(messages, self.tokenizer, add_generation_prompt=True),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
@@ -470,6 +530,7 @@ class FramerGenerator:
         code_prompt = f"<code>Write {language} code: {prompt}\n```{language}\n"
         return self.generate_text(
             code_prompt,
+            allowed_special={"<code>"},
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=40,
@@ -497,6 +558,7 @@ class FramerGenerator:
         """Transcribe or describe audio (audio understanding -> text)."""
         return self.generate_text(
             prompt,
+            allowed_special={"<audio>", "<audio_end>"},
             max_new_tokens=max_new_tokens,
             temperature=0.3,
             top_k=40,

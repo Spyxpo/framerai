@@ -49,7 +49,11 @@ def test_sft_dataset_loss_mask_and_label_alignment(tmp_path):
         assert labels[i].item() == -100, f"Prompt position at index {i} must be masked with -100"
 
     # 3. The first non-masked label MUST correspond to the first assistant token
-    ast_ids = tokenizer.encode("<assistant>Python is a programming language.", add_special=False)
+    ast_ids = tokenizer.encode(
+        "<assistant>Python is a programming language.",
+        add_special=False,
+        allowed_special={"<assistant>"},
+    )
     assert labels[first_target_idx].item() == ast_ids[0], (
         f"Position {first_target_idx} label must predict first assistant token {ast_ids[0]}, "
         f"got {labels[first_target_idx].item()}"
