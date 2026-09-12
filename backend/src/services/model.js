@@ -363,9 +363,13 @@ async function modelChat(intent, content, settings = {}, requestIdOrOptions = nu
   const params = history && history.length > 1
     ? { messages: history, ...settings }
     : { prompt: content, ...settings };
+  if (opts.options?.onStream) {
+    params.stream = true;
+  }
   if (attachments.length) params.attachments = attachments;
   const result = await bridge.request(op, params, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
+  if (result.finish_reason) metadata.finish_reason = result.finish_reason;
   // Report what actually reached the model, so a dropped attachment is visible
   // rather than looking like the model ignored it.
   if (attachments.length) metadata.attachments = attachments.map((a) => a.kind);

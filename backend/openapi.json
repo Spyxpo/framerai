@@ -1340,7 +1340,7 @@
         "properties": {
           "temperature": {
             "type": "number",
-            "minimum": 0.1,
+            "minimum": 0,
             "maximum": 2
           },
           "top_p": {
