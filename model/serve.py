@@ -34,12 +34,29 @@ import json
 import os
 import select
 import sys
+import threading
 import uuid
+
+# Thread-safe stdout lock to prevent heartbeat thread from interleaving with
+# main thread's request/response JSON output.
+_print_lock = threading.Lock()
 
 
 def _print(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    with _print_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+
+def _heartbeat_loop(interval_sec, stop_event):
+    """Emit periodic heartbeat signals on stdout until stopped.
+
+    Runs on a daemon thread. The bridge tracks these to distinguish a worker
+    that is busy but healthy (heartbeats continue) from one that is wedged
+    (heartbeats stop, e.g., stuck in an uninterruptible CUDA ioctl).
+    """
+    while not stop_event.wait(interval_sec):
+        _print({"type": "heartbeat"})
 
 
 def make_stdio_approver(root: str, timeout_sec: float = 30.0):
@@ -674,6 +691,10 @@ def main():
         "--cli-approval-timeout", type=float, default=float(os.environ.get("MODEL_CLI_APPROVAL_TIMEOUT", 30.0)),
         help="wall-clock seconds to wait for command approval in ask mode before failing closed",
     )
+    parser.add_argument(
+        "--heartbeat-interval", type=float, default=float(os.environ.get("MODEL_HEARTBEAT_INTERVAL", 2.0)),
+        help="seconds between liveness heartbeat signals; the bridge uses these to detect wedged workers",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -738,6 +759,17 @@ def main():
         ready["tools_error"] = tools_error
     _print(ready)
 
+    # Start heartbeat thread to signal liveness while processing requests.
+    # The bridge tracks these to distinguish a busy-but-healthy worker from
+    # one that is wedged (e.g., stuck in an uninterruptible CUDA ioctl).
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(args.heartbeat_interval, heartbeat_stop),
+        daemon=True,
+    )
+    heartbeat_thread.start()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -758,6 +790,10 @@ def main():
             _print({"id": req_id, "ok": True, "result": result})
         except Exception as exc:  # noqa: BLE001 - never let one request kill the worker
             _print({"id": req_id, "ok": False, "error": str(exc)})
+
+    # Stop heartbeat thread cleanly on shutdown
+    heartbeat_stop.set()
+    heartbeat_thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":

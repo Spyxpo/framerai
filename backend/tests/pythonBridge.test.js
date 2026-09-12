@@ -2085,3 +2085,439 @@ describe("Regression: stale SIGKILL escalation after worker exits", () => {
     );
   });
 });
+
+
+// ============================================================================
+// Issue #278 Heartbeat/Liveness Tests
+// ============================================================================
+
+describe("Issue #278: Heartbeat liveness mechanism", () => {
+  let bridge = null;
+  let originalExistsSync = null;
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    process.env.MODEL_ENABLED = "true";
+    process.env.MODEL_PATH = "/fake/model.pt";
+    process.env.MODEL_TOKENIZER_PATH = "/fake/tokenizer";
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_HEARTBEAT_TIMEOUT_MS = "100"; // Short for testing
+    process.env.MODEL_HEARTBEAT_STARTUP_GRACE_MS = "50"; // Short for testing
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path.includes("model.pt")) return true;
+      return originalExistsSync(path);
+    };
+
+    mockSpawn = () => new MockChildProcess();
+  });
+
+  afterEach(() => {
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  it("TEST A: heartbeats are received and update worker lastHeartbeat timestamp", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const pool = bridge._pool();
+    const worker = pool.workers[0];
+    const initialHeartbeat = worker.lastHeartbeat;
+
+    assert.ok(initialHeartbeat > 0, "lastHeartbeat should be set after worker becomes ready");
+
+    // Simulate heartbeat
+    await new Promise((r) => setTimeout(r, 10));
+    spawnedProcesses[0].stdout.emit("data", Buffer.from('{"type":"heartbeat"}\n'));
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(worker.lastHeartbeat > initialHeartbeat, "lastHeartbeat should update when heartbeat is received");
+  });
+
+  it("TEST B: healthy busy worker continues sending heartbeats and is NOT treated as wedged", async () => {
+    process.env.MODEL_TIMEOUT_MS = "500"; // Long enough for the test
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const pool = bridge._pool();
+    const worker = pool.workers[0];
+
+    // Start a long-running request
+    const reqPromise = bridge.request("chat", { prompt: "long-running" });
+    await new Promise((r) => setImmediate(r));
+
+    assert.strictEqual(worker.busy, true, "worker should be busy");
+
+    // Simulate periodic heartbeats during the long request
+    const heartbeatInterval = setInterval(() => {
+      if (spawnedProcesses[0] && !spawnedProcesses[0].killed) {
+        spawnedProcesses[0].stdout.emit("data", Buffer.from('{"type":"heartbeat"}\n'));
+      }
+    }, 20);
+
+    // Wait longer than HEARTBEAT_TIMEOUT_MS but keep sending heartbeats
+    await new Promise((r) => setTimeout(r, 150));
+
+    clearInterval(heartbeatInterval);
+
+    // Worker should still be alive (not killed)
+    assert.strictEqual(spawnedProcesses[0].killed, false, "worker should NOT be killed while heartbeats continue");
+    assert.strictEqual(worker.ready, true, "worker should still be ready");
+
+    // Complete the request normally
+    const msg = JSON.parse(spawnedProcesses[0].lastWrite);
+    spawnedProcesses[0].simulateResponse(msg.id, true, { content: "done" });
+    await reqPromise;
+  });
+
+  it("TEST C: worker that stops sending heartbeats is detected as wedged and terminated", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    // Use immediate backoff for faster test
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true }; // Don't auto-fire escalation
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // Start a request (worker becomes busy)
+    const reqPromise = bridge.request("chat", { prompt: "will-wedge" }).catch(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // DO NOT send any heartbeats - simulates wedged worker
+    // Wait for heartbeat timeout + startup grace + margin
+    await new Promise((r) => setTimeout(r, 200));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Worker should have been killed due to heartbeat timeout
+    assert.ok(worker.killed, "worker should be killed when heartbeats stop");
+
+    // Cleanup
+    await reqPromise;
+  });
+
+  it("TEST D: wedged worker follows safe termination/replacement path (SIGTERM → SIGKILL)", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    // SIGTERM-immune worker that needs SIGKILL
+    class SigTermImmuneMockChildProcess extends MockChildProcess {
+      constructor(...args) {
+        super(...args);
+        this.killSignals = [];
+        this.exited = false;
+      }
+
+      kill(signal) {
+        this.killSignals.push(signal || "SIGTERM");
+        this.killed = true;
+        if (signal === "SIGKILL") {
+          this.exited = true;
+          this.signalCode = "SIGKILL";
+          this.emit("exit", 137);
+        }
+      }
+    }
+
+    mockSpawn = () => new SigTermImmuneMockChildProcess();
+
+    let escalationFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) {
+          escalationFn = fn;
+          return { escalationTimer: true };
+        }
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // Start request then stop heartbeats
+    const reqPromise = bridge.request("chat", { prompt: "wedge" }).catch(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // Wait for heartbeat timeout
+    await new Promise((r) => setTimeout(r, 200));
+
+    // SIGTERM should be sent
+    assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should be sent to wedged worker");
+    assert.ok(escalationFn, "escalation timer should be registered");
+
+    // Fire escalation
+    escalationFn();
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // SIGKILL should be sent
+    assert.ok(worker.killSignals.includes("SIGKILL"), "SIGKILL should be sent after escalation");
+
+    // Replacement should spawn
+    await new Promise((r) => setImmediate(r));
+    assert.ok(spawnedProcesses.length >= 2, "replacement worker should spawn");
+
+    await reqPromise;
+  });
+
+  it("TEST E: multiple workers - one wedged does not affect healthy workers", async () => {
+    process.env.MODEL_WORKERS = "2";
+    process.env.MODEL_TIMEOUT_MS = "500"; // Long enough for the test
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true };
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+    await startPromise;
+
+    const worker0 = spawnedProcesses[0];
+    const worker1 = spawnedProcesses[1];
+
+    // Worker 0: start request and send heartbeats (healthy busy)
+    const req0Promise = bridge.request("chat", { prompt: "req0" });
+    await new Promise((r) => setImmediate(r));
+
+    const heartbeat0 = setInterval(() => {
+      if (!worker0.killed) {
+        worker0.stdout.emit("data", Buffer.from('{"type":"heartbeat"}\n'));
+      }
+    }, 20);
+
+    // Worker 1: start request but stop heartbeats (wedged)
+    const req1Promise = bridge.request("chat", { prompt: "req1" }).catch(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // Wait for worker 1 to be detected as wedged
+    await new Promise((r) => setTimeout(r, 200));
+
+    clearInterval(heartbeat0);
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Worker 1 should be killed
+    assert.ok(worker1.killed, "wedged worker 1 should be killed");
+
+    // Worker 0 should still be alive
+    assert.strictEqual(worker0.killed, false, "healthy worker 0 should NOT be killed");
+
+    // Complete worker 0 request
+    const msg0 = JSON.parse(worker0.lastWrite);
+    worker0.simulateResponse(msg0.id, true, { content: "done0" });
+    await req0Promise;
+
+    await req1Promise;
+  });
+
+  it("TEST F: startup grace period prevents premature wedge detection", async () => {
+    process.env.MODEL_HEARTBEAT_STARTUP_GRACE_MS = "200";
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // During grace period: no heartbeats yet, but worker should not be killed
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.strictEqual(worker.killed, false, "worker should NOT be killed during startup grace period");
+
+    // Send heartbeats periodically after grace period
+    const heartbeatInterval = setInterval(() => {
+      if (!worker.killed) {
+        worker.stdout.emit("data", Buffer.from('{"type":"heartbeat"}\n'));
+      }
+    }, 20);
+
+    // After grace period with heartbeats, worker should remain alive
+    await new Promise((r) => setTimeout(r, 150));
+
+    clearInterval(heartbeatInterval);
+
+    assert.strictEqual(worker.killed, false, "worker should remain alive after grace period when heartbeats are sent");
+  });
+
+  it("TEST G: existing #277 idempotency test still passes with heartbeat mechanism", async () => {
+    // Verify that handleWorkerExit idempotency (Issue #277) is preserved
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 50 && ms <= 10000) return { livenessTimer: true }; // Don't fire liveness checks (covers 50ms-5000ms range)
+        fn();
+        return null;
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.livenessTimer)) return;
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const pool = bridge._pool();
+    const worker = pool.workers[0];
+
+    // Call handleWorkerExit twice (simulating timeout + exit event)
+    pool.handleWorkerExit(worker);
+    pool.handleWorkerExit(worker);
+
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Should not crash - idempotency is preserved
+    assert.ok(true, "handleWorkerExit is still idempotent with heartbeat mechanism");
+  });
+
+  it("TEST H: existing #281 stale SIGKILL test still passes with heartbeat mechanism", async () => {
+    // Verify that stale SIGKILL escalation fix (Issue #281) is preserved
+    bridge = require("../src/services/pythonBridge");
+
+    class AsyncExitMockChildProcess extends MockChildProcess {
+      constructor(...args) {
+        super(...args);
+        this.killSignals = [];
+      }
+
+      kill(signal) {
+        this.killSignals.push(signal || "SIGTERM");
+        this.killed = true;
+      }
+
+      finishExit(code = 0, signal = null) {
+        if (signal) {
+          this.signalCode = signal;
+          this.exitCode = null;
+        } else {
+          this.exitCode = code;
+          this.signalCode = null;
+        }
+        this.emit("exit", code, signal);
+      }
+    }
+
+    mockSpawn = () => new AsyncExitMockChildProcess();
+
+    let escalationFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        if (ms >= 5000) {
+          escalationFn = fn;
+          return { escalationTimer: true };
+        }
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.longTimer || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // Stop heartbeats to trigger wedge detection
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should be sent");
+    assert.ok(escalationFn, "escalation timer should be registered");
+
+    // Worker exits cooperatively after SIGTERM
+    worker.finishExit(0);
+
+    // Fire escalation
+    escalationFn();
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // SIGKILL should NOT be sent to already-exited worker (Issue #281 fix)
+    assert.ok(
+      !worker.killSignals.includes("SIGKILL"),
+      "stale SIGKILL escalation fix is preserved - no SIGKILL to exited worker"
+    );
+  });
+});
