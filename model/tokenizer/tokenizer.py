@@ -155,6 +155,7 @@ class FramerTokenizer:
         add_special: bool = True,
         max_length: int = None,
         keep: str = "tail",
+        allowed_special: set[str] | list[str] | tuple[str, ...] | str | None = None,
     ) -> list:
         """Encode text to token IDs, optionally bounded to ``max_length``.
 
@@ -164,16 +165,37 @@ class FramerTokenizer:
         end of the text, which is where a question sits after a long document,
         and ``"head"`` holds the beginning. The special tokens are added after
         truncation, so the cap is what the model actually receives.
+
+        By default, ``allowed_special`` is None, meaning known control markers
+        (such as <user>, <assistant>, <system>, <reasoning>, etc.) occurring in
+        input text are not mapped to special token IDs and remain literal text
+        bytes. Pass a collection of marker strings or "all" to explicitly allow
+        specific special tokens.
         """
         if keep not in ("head", "tail"):
             raise ValueError(f"keep must be 'head' or 'tail', got '{keep}'")
-        # Handle special token markers
-        special_pattern = "|".join(re.escape(t) for t in self.marker_tokens)
-        parts = re.split(f"({special_pattern})", text)
+
+        if allowed_special is None or allowed_special == "none":
+            allowed_set = set()
+        elif allowed_special == "all":
+            allowed_set = set(self.marker_tokens.keys())
+        elif isinstance(allowed_special, str):
+            allowed_set = {allowed_special}
+        else:
+            allowed_set = set(allowed_special)
+
+        # Handle special token markers if explicitly allowed
+        active_markers = [t for t in self.marker_tokens if t in allowed_set]
+        if active_markers:
+            active_markers.sort(key=len, reverse=True)
+            special_pattern = "|".join(re.escape(t) for t in active_markers)
+            parts = re.split(f"({special_pattern})", text)
+        else:
+            parts = [text]
 
         tokens = []
         for part in parts:
-            if part in self.marker_tokens:
+            if part in allowed_set and part in self.marker_tokens:
                 tokens.append(self.marker_tokens[part])
             elif part:
                 # Byte-level encoding
