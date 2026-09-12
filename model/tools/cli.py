@@ -78,6 +78,13 @@ DENY_PATTERNS = (
     (r":\(\)\s*\{.*\|.*&.*\}", "fork bomb"),
     (r"^(nc|ncat|netcat|telnet)\b", "raw network access; use the web tools"),
     (r"^(git)\b.*\bpush\b.*--force", "force push"),
+    # Prevent arbitrary code execution via interpreter flags
+    (r"^(python|python3)\b.*\s-c\b", "arbitrary Python code execution via -c flag"),
+    (r"^(node|nodejs)\b.*\s-e\b", "arbitrary JavaScript code execution via -e flag"),
+    (r"^npm\b.*\s(exec|run-script|explore)\b", "arbitrary code execution via npm"),
+    # Prevent destructive file operations
+    (r"^find\b.*\s-(delete|exec|execdir)\b", "destructive find operations"),
+    (r"^sed\b.*\s-i", "in-place file modification via sed"),
 )
 
 #: Operators that only mean something to a shell. Commands run with
@@ -185,14 +192,29 @@ class ShellPolicy:
     def _escaping_argument(self, argv: list[str]) -> str | None:
         """The first path-shaped argument that leaves the sandbox, if any."""
         for argument in argv[1:]:
+            # Check both standalone arguments and flag-embedded paths (--flag=path)
+            path_to_check = None
+
             if argument.startswith("-"):
+                # Check for --flag=value or --flag value patterns
+                if "=" in argument:
+                    # Extract path from --flag=path pattern
+                    _, value = argument.split("=", 1)
+                    if value and (os.sep in value or "/" in value or value.startswith("~") or ".." in value or os.path.isabs(value)):
+                        path_to_check = value
+                # Skip other flags - they'll be caught if they have a separate value argument
+                else:
+                    continue
+            elif os.sep not in argument and "/" not in argument and not argument.startswith("~") and ".." not in argument and not os.path.isabs(argument):
                 continue
-            if os.sep not in argument and not argument.startswith("~") and ".." not in argument:
-                continue
-            try:
-                self.resolve(argument)
-            except ToolError:
-                return argument
+            else:
+                path_to_check = argument
+
+            if path_to_check:
+                try:
+                    self.resolve(path_to_check)
+                except ToolError:
+                    return argument  # Return the original argument for error message
         return None
 
     def record(self, reason: str) -> None:
@@ -249,7 +271,8 @@ class ShellTool(Tool):
         return self._spawn(command, argv, timeout)
 
     def _spawn(self, command: str, argv: list[str], timeout: float | None) -> ToolResult:
-        limit = float(timeout or self.policy.timeout)
+        # Policy timeout is a hard maximum, not just a default
+        limit = min(float(timeout or self.policy.timeout), self.policy.timeout)
         try:
             process = subprocess.Popen(  # noqa: S603 - argv list, shell=False, scrubbed env
                 argv,
@@ -320,6 +343,8 @@ class ReadFileTool(Tool):
     ) -> ToolResult:
         if not path:
             return ToolResult.failure("read_file needs a path")
+        if self.policy.mode == "off":
+            return ToolResult.failure("the cli tool is off; start the worker with --tools cli")
         resolved = self.policy.resolve(path)
         if not os.path.isfile(resolved):
             return ToolResult.failure(f"{path!r} is not a file")
@@ -354,6 +379,8 @@ class ListDirTool(Tool):
         self.policy = policy or ShellPolicy()
 
     def run(self, path: str = ".", **_: Any) -> ToolResult:
+        if self.policy.mode == "off":
+            return ToolResult.failure("the cli tool is off; start the worker with --tools cli")
         resolved = self.policy.resolve(path or ".")
         if not os.path.isdir(resolved):
             return ToolResult.failure(f"{path!r} is not a directory")
