@@ -26,6 +26,10 @@ RESULT_CLOSE = "</tool_result>"
 
 _CALL_RE = re.compile(re.escape(CALL_OPEN) + r"\s*(.*?)\s*" + re.escape(CALL_CLOSE), re.DOTALL)
 
+# A prompt opening with one of these was formatted by its author, not typed by
+# a user, so it is passed through rather than wrapped in a turn of its own.
+_PREFORMATTED = ("<system>", "<user>", "<assistant>", "<reasoning>", "<tool>", "<tool_call>")
+
 INSTRUCTIONS = f"""You can use tools to find information you do not already have.
 
 To use one, emit exactly one block and then stop:
@@ -111,7 +115,7 @@ def render_prompt(registry: ToolRegistry, prompt: str | list[dict[str, Any]]) ->
 
     if prompt.startswith("<system>"):
         return prompt.replace("<system>", f"<system>{instructions}\n", 1)
-    if prompt.startswith(("<user>", "<assistant>", "<tool>", "<tool_call>")):
+    if prompt.startswith(_PREFORMATTED):
         return f"<system>{instructions}{prompt}"
 
     messages = [
@@ -119,6 +123,57 @@ def render_prompt(registry: ToolRegistry, prompt: str | list[dict[str, Any]]) ->
         {"role": "user", "content": prompt},
     ]
     return ChatTemplate(version="v1").format_messages(messages, add_generation_prompt=True)
+
+
+def _instructed_messages(registry: ToolRegistry, prompt: str | list[dict[str, Any]]) -> list[dict]:
+    """The conversation render_prompt would format, as messages."""
+    instructions = INSTRUCTIONS.replace("{tools}", registry.describe())
+    if isinstance(prompt, str):
+        return [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": prompt},
+        ]
+
+    has_system = False
+    messages = []
+    for msg in prompt:
+        if msg.get("role") == "system" and not has_system:
+            has_system = True
+            content = msg.get("content", "")
+            sys_content = f"{instructions}\n{content}".strip() if content else instructions
+            messages.append({"role": "system", "content": sys_content})
+        else:
+            messages.append(msg)
+    if not has_system:
+        messages.insert(0, {"role": "system", "content": instructions})
+    return messages
+
+
+def render_prompt_ids(
+    registry: ToolRegistry, prompt: str | list[dict[str, Any]], tokenizer
+) -> list[int]:
+    """What render_prompt renders, encoded so the roles survive as control ids.
+
+    Encoding the rendered string instead would have to allow the role markers
+    back wholesale, and a question that merely mentions ``<assistant>`` would
+    open a turn. Here the template encodes turn by turn, so only the markers it
+    wrote become ids.
+
+    A prompt that arrives already formatted is the exception: its author placed
+    those markers, so they are honoured as written.
+    """
+    from model.tokenizer.chat_template import ChatTemplate
+
+    template = ChatTemplate(version="v1")
+    if isinstance(prompt, str) and prompt.startswith(_PREFORMATTED):
+        return tokenizer.encode(
+            render_prompt(registry, prompt),
+            add_special=False,
+            allowed_special=template.allowed_special,
+        )
+    return template.encode_prompt(
+        _instructed_messages(registry, prompt), tokenizer, add_generation_prompt=True
+    )
 
 
 def parse_tool_call(text: str) -> ToolCall | None:
@@ -165,35 +220,63 @@ def _format_result(name: str, result: ToolResult) -> str:
     return f"{RESULT_OPEN}{name} ({status}): {result.content}{RESULT_CLOSE}"
 
 
+def _extend(transcript: str, transcript_ids, reply: str, rendered: str, tokenizer):
+    """Append a reply and a tool result to the transcript, in both forms.
+
+    What is appended is model output and tool output, neither of which this
+    codebase wrote, so nothing in it is allowed to become a control id.
+    """
+    chunk = f"\n{reply}\n{rendered}\n"
+    if transcript_ids is not None:
+        transcript_ids = transcript_ids + tokenizer.encode(chunk, add_special=False)
+    return transcript + chunk, transcript_ids
+
+
 def run_tool_loop(
-    generate: Callable[[str], str],
+    generate: Callable[[str | list[int]], str],
     registry: ToolRegistry,
     prompt: str | list[dict[str, Any]],
     max_steps: int = 4,
+    tokenizer=None,
 ) -> tuple[str, ToolTrace]:
     """Generate with tools available, returning ``(reply, trace)``.
 
     With an empty registry this is one plain generation, so a caller can hand
     the loop an empty registry instead of branching around it.
+
+    Given a ``tokenizer``, the transcript is encoded here and ``generate`` is
+    called with ids, which is what lets the role markers reach the model as
+    boundaries while a marker inside a question, a reply, or a fetched page
+    stays as the characters it is. Without one the transcript is passed as
+    text and every marker in it is literal.
     """
     trace = ToolTrace()
     if not len(registry):
         trace.stopped = "no_tools"
-        if isinstance(prompt, list):
-            from model.tokenizer.chat_template import ChatTemplate
+        from model.tokenizer.chat_template import ChatTemplate
 
-            prompt_str = ChatTemplate(version="v1").format_messages(
-                prompt, add_generation_prompt=True
+        template = ChatTemplate(version="v1")
+        if isinstance(prompt, list):
+            prompt_str = template.format_messages(prompt, add_generation_prompt=True)
+            sent = (
+                template.encode_prompt(prompt, tokenizer, add_generation_prompt=True)
+                if tokenizer is not None
+                else prompt_str
             )
         else:
             prompt_str = prompt
-        return _continuation(generate(prompt_str), prompt_str).strip(), trace
+            sent = tokenizer.encode(prompt, add_special=False) if tokenizer is not None else prompt
+        return _continuation(generate(sent), prompt_str).strip(), trace
 
     transcript = render_prompt(registry, prompt)
+    transcript_ids = (
+        render_prompt_ids(registry, prompt, tokenizer) if tokenizer is not None else None
+    )
     reply = ""
 
     for _ in range(max(1, max_steps)):
-        reply = _continuation(generate(transcript), transcript).strip()
+        sent = transcript if transcript_ids is None else transcript_ids
+        reply = _continuation(generate(sent), transcript).strip()
 
         try:
             call = parse_tool_call(reply)
@@ -202,7 +285,9 @@ def run_tool_loop(
             # chance to fix its own syntax, which is cheaper than failing here.
             result = ToolResult.failure(str(exc))
             trace.steps.append(ToolStep(name="(malformed)", arguments={}, result=result))
-            transcript += f"\n{reply}\n{_format_result('tool_call', result)}\n"
+            transcript, transcript_ids = _extend(
+                transcript, transcript_ids, reply, _format_result("tool_call", result), tokenizer
+            )
             continue
 
         if call is None:
@@ -211,7 +296,9 @@ def run_tool_loop(
 
         result = registry.run(call.name, call.arguments)
         trace.steps.append(ToolStep(name=call.name, arguments=call.arguments, result=result))
-        transcript += f"\n{reply}\n{_format_result(call.name, result)}\n"
+        transcript, transcript_ids = _extend(
+            transcript, transcript_ids, reply, _format_result(call.name, result), tokenizer
+        )
 
     trace.stopped = "max_steps"
     # The last reply is still a call, so strip it: a caller wants prose, and the

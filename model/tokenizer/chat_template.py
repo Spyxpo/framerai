@@ -6,6 +6,18 @@ from typing import Any
 import torch
 
 
+def _json_str(value: Any) -> str:
+    """Render a tool payload as compact JSON, or as its own text if it is not JSON."""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        try:
+            return json.dumps(json.loads(value))
+        except Exception:
+            return value
+    return str(value)
+
+
 class ChatTemplate:
     """Versioned Chat Template for SFT, DPO, and inference.
 
@@ -103,6 +115,113 @@ class ChatTemplate:
             text += "<assistant>"
         return text
 
+    def _turn_ids(
+        self,
+        msg: dict[str, Any],
+        tokenizer,
+        content_allowed: set[str] | list[str] | str | None = None,
+        target_reasoning: bool = True,
+        target_assistant: bool = True,
+    ) -> tuple[list[int], bool]:
+        """Encode one message to ids, and say whether it is a training target.
+
+        The markers are encoded separately from the content and only they are
+        allowed to become control ids. That separation is the whole point: once
+        a turn is flattened to a string the two are indistinguishable, and
+        allowing the markers back would allow every marker the user typed too.
+        """
+        role = msg.get("role", "").lower()
+        content = msg.get("content", "")
+        content_str = str(content).strip() if content is not None else ""
+        msg_target = msg.get("target")
+
+        template_allowed = self.allowed_special
+        turn_ids: list[int] = []
+
+        def marker(text: str, allowed=None) -> None:
+            turn_ids.extend(
+                tokenizer.encode(
+                    text,
+                    add_special=False,
+                    allowed_special=template_allowed if allowed is None else allowed,
+                )
+            )
+
+        def body(text: str) -> None:
+            if text:
+                turn_ids.extend(
+                    tokenizer.encode(text, add_special=False, allowed_special=content_allowed)
+                )
+
+        if role == "system":
+            marker("<system>")
+            body(content_str)
+            is_target = bool(msg_target) if msg_target is not None else False
+        elif role == "user":
+            marker("<user>")
+            body(content_str)
+            is_target = bool(msg_target) if msg_target is not None else False
+        elif role == "reasoning" and self.version == "v2":
+            marker("<reasoning>")
+            body(content_str)
+            marker("</reasoning>")
+            is_target = bool(msg_target) if msg_target is not None else target_reasoning
+        elif role == "assistant":
+            if "tool_calls" in msg and msg["tool_calls"]:
+                marker("<tool_call>")
+                body(_json_str(msg["tool_calls"]))
+                marker("</tool_call>")
+            else:
+                marker("<assistant>")
+                body(content_str)
+            is_target = bool(msg_target) if msg_target is not None else target_assistant
+        elif role == "tool_call":
+            marker("<tool_call>")
+            body(_json_str(content))
+            marker("</tool_call>")
+            is_target = bool(msg_target) if msg_target is not None else target_assistant
+        elif role in ("tool", "tool_result"):
+            name = msg.get("name", "")
+            prefix = f"[{name}] " if name else ""
+            marker("<tool>")
+            body(f"{prefix}{content_str}")
+            is_target = bool(msg_target) if msg_target is not None else False
+        else:
+            tag = f"<{role}>"
+            marker(tag, allowed={tag} if tag in tokenizer.marker_tokens else None)
+            body(content_str)
+            is_target = bool(msg_target) if msg_target is not None else False
+
+        return turn_ids, is_target
+
+    def encode_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        tokenizer,
+        add_generation_prompt: bool = True,
+        allowed_special: set[str] | list[str] | str | None = None,
+    ) -> list[int]:
+        """Encode a conversation to prompt ids for inference.
+
+        ``format_messages`` is for reading and for callers that want the text.
+        Generation takes these ids instead, because the round trip through a
+        string is lossy in the one way that matters: a re-encode cannot tell
+        the ``<assistant>`` this template wrote from the one that arrived
+        inside a message, so it either drops both boundaries or forges one.
+        """
+        ids: list[int] = []
+        for msg in messages:
+            turn_ids, _ = self._turn_ids(msg, tokenizer, content_allowed=allowed_special)
+            ids.extend(turn_ids)
+
+        if add_generation_prompt:
+            opener = tokenizer.encode(
+                "<assistant>", add_special=False, allowed_special=self.allowed_special
+            )
+            if ids[-len(opener):] != opener:
+                ids.extend(opener)
+        return ids
+
     def encode_conversation(
         self,
         messages: list[dict[str, Any]],
@@ -124,86 +243,14 @@ class ChatTemplate:
         full_tokens = [tokenizer.sos_id]
         full_is_target = [False]
 
-        template_allowed = self.allowed_special
-
         for msg in messages:
-            role = msg.get("role", "").lower()
-            content = msg.get("content", "")
-            content_str = str(content).strip() if content is not None else ""
-
-            msg_target = msg.get("target")
-
-            turn_ids = []
-            if role == "system":
-                turn_ids.extend(tokenizer.encode("<system>", add_special=False, allowed_special=template_allowed))
-                if content_str:
-                    turn_ids.extend(tokenizer.encode(content_str, add_special=False, allowed_special=allowed_special))
-                is_target = bool(msg_target) if msg_target is not None else False
-            elif role == "user":
-                turn_ids.extend(tokenizer.encode("<user>", add_special=False, allowed_special=template_allowed))
-                if content_str:
-                    turn_ids.extend(tokenizer.encode(content_str, add_special=False, allowed_special=allowed_special))
-                is_target = bool(msg_target) if msg_target is not None else False
-            elif role == "reasoning" and self.version == "v2":
-                turn_ids.extend(tokenizer.encode("<reasoning>", add_special=False, allowed_special=template_allowed))
-                if content_str:
-                    turn_ids.extend(tokenizer.encode(content_str, add_special=False, allowed_special=allowed_special))
-                turn_ids.extend(tokenizer.encode("</reasoning>", add_special=False, allowed_special=template_allowed))
-                is_target = bool(msg_target) if msg_target is not None else target_reasoning
-            elif role == "assistant":
-                if "tool_calls" in msg and msg["tool_calls"]:
-                    tc = msg["tool_calls"]
-                    if isinstance(tc, (dict, list)):
-                        tc_str = json.dumps(tc)
-                    elif isinstance(tc, str):
-                        try:
-                            parsed = json.loads(tc)
-                            tc_str = json.dumps(parsed)
-                        except Exception:
-                            tc_str = tc
-                    else:
-                        tc_str = str(tc)
-                    turn_ids.extend(tokenizer.encode("<tool_call>", add_special=False, allowed_special=template_allowed))
-                    if tc_str:
-                        turn_ids.extend(tokenizer.encode(tc_str, add_special=False, allowed_special=allowed_special))
-                    turn_ids.extend(tokenizer.encode("</tool_call>", add_special=False, allowed_special=template_allowed))
-                else:
-                    turn_ids.extend(tokenizer.encode("<assistant>", add_special=False, allowed_special=template_allowed))
-                    if content_str:
-                        turn_ids.extend(tokenizer.encode(content_str, add_special=False, allowed_special=allowed_special))
-                is_target = bool(msg_target) if msg_target is not None else target_assistant
-            elif role == "tool_call":
-                if isinstance(content, (dict, list)):
-                    c_str = json.dumps(content)
-                elif isinstance(content, str):
-                    try:
-                        parsed = json.loads(content)
-                        c_str = json.dumps(parsed)
-                    except Exception:
-                        c_str = content
-                else:
-                    c_str = str(content)
-                turn_ids.extend(tokenizer.encode("<tool_call>", add_special=False, allowed_special=template_allowed))
-                if c_str:
-                    turn_ids.extend(tokenizer.encode(c_str, add_special=False, allowed_special=allowed_special))
-                turn_ids.extend(tokenizer.encode("</tool_call>", add_special=False, allowed_special=template_allowed))
-                is_target = bool(msg_target) if msg_target is not None else target_assistant
-            elif role in ("tool", "tool_result"):
-                name = msg.get("name", "")
-                prefix = f"[{name}] " if name else ""
-                turn_ids.extend(tokenizer.encode("<tool>", add_special=False, allowed_special=template_allowed))
-                payload = f"{prefix}{content_str}"
-                if payload:
-                    turn_ids.extend(tokenizer.encode(payload, add_special=False, allowed_special=allowed_special))
-                is_target = bool(msg_target) if msg_target is not None else False
-            else:
-                tag = f"<{role}>"
-                tag_allowed = {tag} if tag in tokenizer.marker_tokens else None
-                turn_ids.extend(tokenizer.encode(tag, add_special=False, allowed_special=tag_allowed))
-                if content_str:
-                    turn_ids.extend(tokenizer.encode(content_str, add_special=False, allowed_special=allowed_special))
-                is_target = bool(msg_target) if msg_target is not None else False
-
+            turn_ids, is_target = self._turn_ids(
+                msg,
+                tokenizer,
+                content_allowed=allowed_special,
+                target_reasoning=target_reasoning,
+                target_assistant=target_assistant,
+            )
             full_tokens.extend(turn_ids)
             full_is_target.extend([is_target] * len(turn_ids))
 

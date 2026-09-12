@@ -423,6 +423,8 @@ class Mind:
         top_p: float = 0.9,
         reward: float = 0.0,
         use_context: bool = True,
+        prompt_ids: list[int] | None = None,
+        allowed_special=None,
     ) -> tuple[str | None, MindTrace]:
         """Perceive a prompt, answer it in the current state, and remember both.
 
@@ -437,11 +439,13 @@ class Mind:
         """
         with self.lock:
             return self._converse(
-                prompt, max_new_tokens, temperature, top_k, top_p, reward, use_context
+                prompt, max_new_tokens, temperature, top_k, top_p, reward,
+                use_context, prompt_ids, allowed_special,
             )
 
     def _converse(
-        self, prompt, max_new_tokens, temperature, top_k, top_p, reward, use_context
+        self, prompt, max_new_tokens, temperature, top_k, top_p, reward, use_context,
+        prompt_ids=None, allowed_special=None,
     ) -> tuple[str | None, MindTrace]:
         self._defer_sleep = True
         try:
@@ -456,8 +460,18 @@ class Mind:
             if self.generator is not None:
                 preamble = self.context(trace) if use_context else ""
                 full_prompt = f"{preamble}\n\n{prompt}" if preamble else prompt
+                # With ids the caller has already settled which markers are
+                # control; the recalled context is prepended in the same form
+                # so nothing has to be read back out of a string.
+                sent = full_prompt
+                if prompt_ids is not None:
+                    tok = self.generator.tokenizer
+                    sent = list(prompt_ids)
+                    if preamble:
+                        sent = tok.encode(f"{preamble}\n\n", add_special=False) + sent
                 decoded = self.generator.generate_text(
-                    full_prompt, max_new_tokens=max_new_tokens, **trace.sampling
+                    sent, max_new_tokens=max_new_tokens,
+                    allowed_special=allowed_special, **trace.sampling
                 )
                 response = self._continuation(full_prompt, decoded)
                 trace.response = response

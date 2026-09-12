@@ -362,12 +362,22 @@ def handle(gen, op, params, mind=None, tools=None):
         if active is not None:
             from .tools import run_tool_loop
 
-            def generate(text):
-                return gen.generate_text(text, max_new_tokens=max_new_tokens, **_sampling(params))
+            # The loop encodes its own transcript, so what arrives here is
+            # already ids with the role markers resolved.
+            def generate(encoded):
+                return gen.generate_text(
+                    encoded,
+                    max_new_tokens=max_new_tokens,
+                    **_sampling(params),
+                )
 
             tool_input = messages if messages else prompt
             reply, tool_trace = run_tool_loop(
-                generate, active, tool_input, max_steps=params.get("max_tool_steps", 4)
+                generate,
+                active,
+                tool_input,
+                max_steps=params.get("max_tool_steps", 4),
+                tokenizer=gen.tokenizer,
             )
             if mind is None:
                 # The trace carries every query and page, so an answer sourced
@@ -390,35 +400,54 @@ def handle(gen, op, params, mind=None, tools=None):
             else:
                 template_version = "v1"
 
-        if op == "chat":
+        # Markers this function wrote around text it did not. Encoding the
+        # turns to ids keeps the two apart: a string prompt would have to be
+        # re-read later, and a re-read cannot tell the <assistant> the template
+        # placed from one the user typed.
+        prompt_ids = None
+        allowed_special = set()
+
+        if messages or prompt:
             from .tokenizer.chat_template import ChatTemplate
 
-            if messages:
-                prompt = ChatTemplate(version=template_version).format_messages(
-                    messages, add_generation_prompt=True
-                )
-            else:
-                prompt = ChatTemplate(version=template_version).format_messages(
-                    [{"role": "user", "content": prompt}], add_generation_prompt=True
-                )
-        elif messages and not prompt:
-            from .tokenizer.chat_template import ChatTemplate
+            template = ChatTemplate(version=template_version)
+            turns = None
+            if op == "chat":
+                turns = messages if messages else [{"role": "user", "content": prompt}]
+            elif messages and not prompt:
+                turns = messages
 
-            prompt = ChatTemplate(version=template_version).format_messages(
-                messages, add_generation_prompt=True
-            )
+            if turns is not None:
+                prompt = template.format_messages(turns, add_generation_prompt=True)
+                prompt_ids = template.encode_prompt(
+                    turns, gen.tokenizer, add_generation_prompt=True
+                )
 
         if documents:
             # Applied after the chat template has resolved the prompt, so an
             # attachment reaches the model whether the turn arrived as a single
             # prompt or as a conversation. The document goes ahead of the
             # question, so the answer is grounded in what was attached.
-            prompt = "\n\n".join([*documents, prompt]) if prompt else "\n\n".join(documents)
+            from .document import DOC_MARKERS
+
+            attached = "\n\n".join(documents)
+            if prompt_ids is not None:
+                prompt_ids = (
+                    gen.tokenizer.encode(
+                        f"{attached}\n\n", add_special=False, allowed_special=DOC_MARKERS
+                    )
+                    + prompt_ids
+                )
+            else:
+                allowed_special |= DOC_MARKERS
+            prompt = f"{attached}\n\n{prompt}" if prompt else attached
 
         if mind is not None:
             reply, trace = mind.converse(
                 prompt,
                 max_new_tokens=max_new_tokens,
+                prompt_ids=prompt_ids,
+                allowed_special=allowed_special,
                 **_sampling(params),
             )
             reply, reasoning = _extract_reasoning(reply)
@@ -431,9 +460,10 @@ def handle(gen, op, params, mind=None, tools=None):
                 result["reasoning"] = reasoning if reasoning is not None else ""
             return result
         content = gen.generate_text(
-            prompt,
+            prompt if prompt_ids is None else prompt_ids,
             max_new_tokens=max_new_tokens,
             image=image,
+            allowed_special=allowed_special,
             **_sampling(params),
         )
         content, reasoning = _extract_reasoning(content)
@@ -530,7 +560,7 @@ def handle(gen, op, params, mind=None, tools=None):
         return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
 
     if op == "document":
-        from .document import DocumentError, read_document
+        from .document import DOC_MARKERS, DocumentError, read_document
 
         try:
             document = read_document(
@@ -550,8 +580,11 @@ def handle(gen, op, params, mind=None, tools=None):
             "text": text,
         }
         if prompt:
+            doc_ids = gen.tokenizer.encode(
+                f"{text}\n\n", add_special=False, allowed_special=DOC_MARKERS
+            )
             result["content"] = gen.generate_text(
-                f"{text}\n\n{prompt}",
+                doc_ids + gen.tokenizer.encode(prompt, add_special=False),
                 max_new_tokens=params.get("max_new_tokens", 256),
                 **_sampling(params),
             )
