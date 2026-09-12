@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 
 
 @dataclass
@@ -124,10 +125,16 @@ def all_to_all_dispatch(tokens: torch.Tensor, counts: torch.Tensor, plan: Expert
     send_splits = counts.tolist()
     recv_splits = recv_counts.tolist()
     received = tokens.new_empty((sum(recv_splits), tokens.shape[-1]))
-    dist.all_to_all_single(
-        received, tokens, output_split_sizes=recv_splits,
-        input_split_sizes=send_splits, group=plan.group,
-    )
+    if tokens.is_floating_point():
+        received = dist_nn.all_to_all_single(
+            received, tokens, output_split_sizes=recv_splits,
+            input_split_sizes=send_splits, group=plan.group,
+        )
+    else:
+        dist.all_to_all_single(
+            received, tokens, output_split_sizes=recv_splits,
+            input_split_sizes=send_splits, group=plan.group,
+        )
     return received, recv_counts
 
 
@@ -140,10 +147,18 @@ def all_to_all_combine(
         return outputs
 
     combined = outputs.new_empty((int(send_counts.sum()), outputs.shape[-1]))
-    dist.all_to_all_single(
-        combined, outputs,
-        output_split_sizes=send_counts.tolist(),
-        input_split_sizes=recv_counts.tolist(),
-        group=plan.group,
-    )
+    if outputs.is_floating_point():
+        combined = dist_nn.all_to_all_single(
+            combined, outputs,
+            output_split_sizes=send_counts.tolist(),
+            input_split_sizes=recv_counts.tolist(),
+            group=plan.group,
+        )
+    else:
+        dist.all_to_all_single(
+            combined, outputs,
+            output_split_sizes=send_counts.tolist(),
+            input_split_sizes=recv_counts.tolist(),
+            group=plan.group,
+        )
     return combined
