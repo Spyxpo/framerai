@@ -644,6 +644,16 @@ function available() {
 }
 
 /**
+ * Whether the pool currently has a worker that is ready and idle, i.e. one
+ * that dispatch() could hand a request to right now without queueing it.
+ * Unlike available(), this says nothing about configuration - it is a
+ * capacity check, not the "real model vs placeholder" gate.
+ */
+function hasAvailableWorker() {
+  return Boolean(pool && pool.getAvailableWorker());
+}
+
+/**
  * What the running model told us about itself, or null when none is running.
  * Read from the first ready worker: the pool serves one model, so they agree.
  */
@@ -663,4 +673,4 @@ async function start() {
   }
 }
 
-module.exports = { request, available, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
+module.exports = { request, available, hasAvailableWorker, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
