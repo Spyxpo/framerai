@@ -155,6 +155,40 @@ class Worker {
             continue;
           }
 
+          if (msg.type === "stream") {
+            const currentReq = this.currentRequest;
+            if (
+              currentReq &&
+              currentReq.options &&
+              typeof currentReq.options.onStream === "function" &&
+              currentReq.requestId === this.currentRequestId
+            ) {
+              try {
+                currentReq.options.onStream(msg);
+              } catch (err) {
+                console.warn(`[model:worker-${this.id}] onStream failed: ${err.message}`);
+              }
+            }
+            if (msg.done) {
+              if (msg.id != null && this.pending.has(msg.id)) {
+                const { resolve: res, reject, timer } = this.pending.get(msg.id);
+                clearTimeout(timer);
+                this.pending.delete(msg.id);
+                this.busy = false;
+                this.currentRequest = null;
+                this.currentRequestId = null;
+                if (msg.ok !== false) {
+                  if (this.onSuccess) this.onSuccess(this);
+                  res(msg.result);
+                } else {
+                  reject(new Error(msg.error || "streaming inference failed"));
+                }
+                if (this.onAvailable) this.onAvailable(this);
+              }
+            }
+            continue;
+          }
+
           if (msg.id != null && this.pending.has(msg.id)) {
             const { resolve: res, reject, timer } = this.pending.get(msg.id);
             clearTimeout(timer);

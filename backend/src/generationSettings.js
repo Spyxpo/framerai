@@ -19,7 +19,7 @@ const ASPECT_RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9"
 const SIZE_TIERS = [256, 512, 768, 1024];
 
 const LIMITS = {
-  temperature: { min: 0.1, max: 2 },
+  temperature: { min: 0, max: 2 },
   top_p: { min: 0.1, max: 1 },
   top_k: { min: 0, max: 200 },
   max_new_tokens: { min: 16, max: 2048 },
@@ -30,6 +30,8 @@ const LIMITS = {
   aspect: ASPECT_RATIOS,
   tier: SIZE_TIERS,
   tools: ["web", "cli"],
+  repetition_penalty: { min: 0.0001, max: 10 },
+  seed: { min: 0, max: 2 ** 31 - 1 },
 };
 
 /**
@@ -54,7 +56,42 @@ function readSettings(parent) {
     aspect: v.oneOf("aspect", LIMITS.aspect),
     tier: v.oneOf("tier", LIMITS.tier),
     tools: readTools(v),
+    repetition_penalty: readRepetitionPenalty(v),
+    stop: readStop(v),
+    seed: v.integer("seed", LIMITS.seed),
   });
+}
+
+function readRepetitionPenalty(v) {
+  const raw = v.source.repetition_penalty;
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const val = v.number("repetition_penalty", LIMITS.repetition_penalty);
+  if (val !== undefined && val <= 0) {
+    v.fail("repetition_penalty", "must be greater than 0");
+    return undefined;
+  }
+  return val;
+}
+
+function readStop(v) {
+  const raw = v.source.stop;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    v.fail("stop", "must be an array");
+    return undefined;
+  }
+  if (raw.length > 16) {
+    v.fail("stop", "must contain at most 16 items");
+    return undefined;
+  }
+  let valid = true;
+  for (let i = 0; i < raw.length; i++) {
+    if (typeof raw[i] !== "string") {
+      v.fail(`stop[${i}]`, "must be a string");
+      valid = false;
+    }
+  }
+  return valid ? raw : undefined;
 }
 
 /**
