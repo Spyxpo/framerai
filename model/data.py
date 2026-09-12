@@ -637,17 +637,25 @@ class InterleavedSequenceBuilder:
     def audio_run(self, n_frames: int) -> list:
         return self._run("<audio>", self.audio_frame, "<audio_end>", n_frames)
 
-    def build(self, segments: list) -> dict:
+    def build(self, segments: list, allowed_special=None) -> dict:
         """Assemble a sequence from ``("text"|"image"|"audio", value)`` segments.
 
         ``value`` is a string for text and a token count for a modality.
         Returns the ids plus the number of slots reserved per placeholder, which
         is what the caller checks against the encoder's output.
+
+        The modality runs are emitted as ids here, so their markers never
+        depend on ``allowed_special``. It covers only the text segments, and
+        names the markers whoever built that text meant as control.
         """
         ids, counts = [], {self.image_patch: 0, self.audio_frame: 0}
         for kind, value in segments:
             if kind == "text":
-                ids.extend(self.tokenizer.encode(value, add_special=False))
+                ids.extend(
+                    self.tokenizer.encode(
+                        value, add_special=False, allowed_special=allowed_special
+                    )
+                )
             elif kind == "image":
                 ids.extend(self.image_run(value))
                 counts[self.image_patch] += value

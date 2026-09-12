@@ -30,6 +30,11 @@ DOC_TOKEN = "<doc>"
 DOC_END_TOKEN = "<doc_end>"
 PAGE_TOKEN = "<page>"
 
+# What ``to_text`` writes itself. A caller that feeds document text to
+# generation passes this as ``allowed_special``, so the page boundaries survive
+# encoding while anything the document merely contains stays literal.
+DOC_MARKERS = frozenset({DOC_TOKEN, DOC_END_TOKEN, PAGE_TOKEN})
+
 # A page whose text layer holds fewer characters than this is treated as a
 # scan: the glyphs are pixels, not text, and only a raster will read them.
 MIN_TEXT_LAYER_CHARS = 24
