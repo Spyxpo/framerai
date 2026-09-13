@@ -2123,6 +2123,10 @@ describe("Issue #278: Heartbeat liveness mechanism", () => {
       originalExistsSync = null;
     }
 
+    delete process.env.MODEL_HEARTBEAT_TIMEOUT_MS;
+    delete process.env.MODEL_HEARTBEAT_STARTUP_GRACE_MS;
+    delete process.env.MODEL_TIMEOUT_MS;
+
     mockSpawn = null;
     spawnedProcesses.length = 0;
     if (bridge && bridge._pool && bridge._pool()) {
@@ -2519,5 +2523,397 @@ describe("Issue #278: Heartbeat liveness mechanism", () => {
       !worker.killSignals.includes("SIGKILL"),
       "stale SIGKILL escalation fix is preserved - no SIGKILL to exited worker"
     );
+  });
+});
+
+// ============================================================================
+// Issue #239 regression tests:
+// [Bug]: Timed-out worker is never force-killed and the pool can drain to zero
+//
+// Verifies that:
+// A. Timed-out worker is actually terminated/removed and force-killed via SIGKILL.
+// B. The pool replaces the worker so configured capacity remains usable.
+// C. Repeated worker timeouts do not drain the pool to zero (exceeding MAX_RESTART_ATTEMPTS).
+// D. After repeated timeouts, a subsequent normal task successfully completes.
+// E. Process crash failures (non-timeout) still enforce MAX_RESTART_ATTEMPTS.
+// F. Race conditions between completion and timeout are handled consistently.
+// ============================================================================
+
+describe("Issue #239 regression: timed-out worker force-kill and pool capacity preservation", { concurrency: 1 }, () => {
+  let bridge = null;
+  let originalExistsSync = null;
+
+  class SigTermImmuneMockChildProcess extends MockChildProcess {
+    constructor(...args) {
+      super(...args);
+      this.killSignals = [];
+      this.exited = false;
+    }
+
+    kill(signal) {
+      this.killSignals.push(signal || "SIGTERM");
+      this.killed = true;
+      if (signal === "SIGKILL") {
+        this.exited = true;
+        this.signalCode = "SIGKILL";
+        this.emit("exit", 137);
+      }
+    }
+  }
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    process.env.MODEL_ENABLED = "true";
+    process.env.MODEL_PATH = "/fake/model.pt";
+    process.env.TOKENIZER_PATH = "/fake/tokenizer";
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "50";
+    delete process.env.MODEL_HEARTBEAT_TIMEOUT_MS;
+    delete process.env.MODEL_HEARTBEAT_STARTUP_GRACE_MS;
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (p) => {
+      if (p && p.includes("model.pt")) return true;
+      return originalExistsSync ? originalExistsSync(p) : false;
+    };
+
+    mockSpawn = (...args) => new MockChildProcess(...args);
+  });
+
+  afterEach(() => {
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    delete process.env.MODEL_TIMEOUT_MS;
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  it("TEST A: timed-out worker is forcefully terminated via SIGKILL and removed from pool bookkeeping", async () => {
+    bridge = require("../src/services/pythonBridge");
+    mockSpawn = () => new SigTermImmuneMockChildProcess();
+
+    let escalationFn = null;
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) {
+          escalationFn = fn;
+          return { escalationTimer: true };
+        }
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      (id) => {
+        if (id && (id.startupTimeout || id.escalationTimer)) return;
+        clearTimeout(id);
+      }
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+    const pool = bridge._pool();
+
+    const reqPromise = bridge.request("chat", { prompt: "will-timeout" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Wait for 50ms request timeout
+    await new Promise((r) => setTimeout(r, 100));
+    await reqPromise;
+
+    // Worker received SIGTERM
+    assert.ok(worker.killSignals.includes("SIGTERM"), "SIGTERM should have been sent on timeout");
+    assert.strictEqual(worker.exited, false, "SIGTERM-immune worker is still alive before SIGKILL");
+
+    // Timed-out worker should be removed from active pool immediately (bookkeeping)
+    assert.ok(!pool.workers.includes(worker), "timed-out worker must be removed from pool.workers");
+
+    // Fire SIGKILL escalation
+    assert.ok(escalationFn, "escalation timer must be registered");
+    escalationFn();
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(worker.killSignals.includes("SIGKILL"), "SIGKILL must be sent on escalation");
+    assert.strictEqual(worker.exited, true, "worker must be dead after SIGKILL");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+  });
+
+  it("TEST B: pool replaces timed-out worker so configured pool capacity remains usable", async () => {
+    process.env.MODEL_WORKERS = "2";
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true };
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+    await startPromise;
+
+    const pool = bridge._pool();
+    assert.strictEqual(pool.workers.length, 2, "initial pool size should be 2");
+
+    // Time out worker 0
+    const reqPromise = bridge.request("chat", { prompt: "timeout-worker-0" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 100));
+    await reqPromise;
+
+    // Give a tick for replacement to spawn
+    await new Promise((r) => setImmediate(r));
+    assert.ok(spawnedProcesses.length >= 3, "replacement worker should be spawned");
+
+    const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+    replacement.simulateReady(true);
+    await new Promise((r) => setImmediate(r));
+
+    // Configured pool capacity must remain at 2
+    const readyWorkers = pool.workers.filter((w) => w.ready);
+    assert.strictEqual(readyWorkers.length, 2, "pool must maintain configured capacity of 2 ready workers");
+    assert.strictEqual(bridge.available(), true, "bridge must be available");
+    assert.strictEqual(bridge.hasAvailableWorker(), true, "bridge must have available dispatchable worker");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+  });
+
+  it("TEST C: repeated worker timeouts do not drain the pool to zero (exceeding MAX_RESTART_ATTEMPTS)", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    // Fast backoff timers so 7 timeouts execute quickly
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true };
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const pool = bridge._pool();
+
+    // Trigger 7 consecutive timeouts (MAX_RESTART_ATTEMPTS is 5)
+    for (let i = 0; i < 7; i++) {
+      const currentWorker = spawnedProcesses[spawnedProcesses.length - 1];
+
+      const reqPromise = bridge.request("chat", { prompt: `timeout-run-${i}` }).catch((err) => {
+        if (!/timed out/.test(err.message)) throw err;
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Wait for 50ms request timeout
+      await new Promise((r) => setTimeout(r, 80));
+      await reqPromise;
+
+      // Replacement should have spawned
+      await new Promise((r) => setImmediate(r));
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      assert.notStrictEqual(replacement, currentWorker, `replacement should spawn for timeout ${i + 1}`);
+
+      // Make replacement ready
+      replacement.simulateReady(true);
+      await new Promise((r) => setImmediate(r));
+
+      // Capacity check after each timeout
+      assert.strictEqual(pool.workers.length, 1, `pool should retain 1 worker after timeout ${i + 1}`);
+      assert.strictEqual(bridge.available(), true, `pool should remain available after timeout ${i + 1}`);
+      assert.strictEqual(bridge.hasAvailableWorker(), true, `pool should have dispatchable worker after timeout ${i + 1}`);
+    }
+
+    // After 7 timeouts (exceeding 5-attempt cap), pool must NOT be drained
+    assert.strictEqual(pool.workers.length, 1, "pool must not drain to zero after 7 consecutive timeouts");
+    assert.strictEqual(bridge.available(), true, "pool must remain available after 7 timeouts");
+    assert.strictEqual(bridge.hasAvailableWorker(), true, "pool must have an available worker");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+  });
+
+  it("TEST D: after repeated worker timeouts, a subsequent normal task successfully completes", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true };
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // Trigger 6 consecutive timeouts
+    for (let i = 0; i < 6; i++) {
+      const req = bridge.request("chat", { prompt: `timeout-${i}` }).catch(() => {});
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setTimeout(r, 80));
+      await req;
+
+      await new Promise((r) => setImmediate(r));
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      replacement.simulateReady(true);
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // Now send a normal task
+    const normalPromise = bridge.request("chat", { prompt: "normal-task-after-recovery" });
+    await new Promise((r) => setImmediate(r));
+
+    const activeWorker = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.ok(activeWorker.lastWrite, "active worker should receive normal request");
+    const msg = JSON.parse(activeWorker.lastWrite);
+    assert.strictEqual(msg.params.prompt, "normal-task-after-recovery");
+
+    // Normal task succeeds
+    activeWorker.simulateResponse(msg.id, true, { content: "normal-task-success" });
+    const result = await normalPromise;
+
+    assert.strictEqual(result.content, "normal-task-success", "normal task must complete successfully after timeouts");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+  });
+
+  it("TEST E: non-timeout process crashes still respect MAX_RESTART_ATTEMPTS and disable the pool", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn) => {
+        fn();
+        return null;
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    // Crash the worker repeatedly on startup/exit (not a request timeout)
+    for (let i = 0; i < 5; i++) {
+      const current = spawnedProcesses[spawnedProcesses.length - 1];
+      current.simulateExit(1);
+      await new Promise((r) => setImmediate(r));
+      const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+      if (replacement !== current) {
+        replacement.simulateReady(false);
+        await new Promise((r) => setImmediate(r));
+      }
+    }
+
+    // One more crash to exhaust the cap
+    const last = spawnedProcesses[spawnedProcesses.length - 1];
+    last.simulateExit(1);
+    await new Promise((r) => setImmediate(r));
+
+    bridge._setTimerImpl(prev.set, prev.clear);
+
+    // Non-timeout crashes must still disable the pool after reaching the cap
+    assert.strictEqual(bridge.available(), false, "pool must be disabled after crash restart limit exceeded");
+  });
+
+  it("TEST F: race condition between worker completion and timeout detection is handled safely", async () => {
+    process.env.MODEL_WORKERS = "1";
+    process.env.MODEL_TIMEOUT_MS = "50";
+    bridge = require("../src/services/pythonBridge");
+
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 60000) return { startupTimeout: true };
+        if (ms >= 5000) return { escalationTimer: true };
+        if (ms >= 500 && ms <= 8000) {
+          fn();
+          return null;
+        }
+        return setTimeout(fn, ms);
+      },
+      () => {}
+    );
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[0].simulateReady(true));
+    await startPromise;
+
+    const worker = spawnedProcesses[0];
+
+    // Case 1: Response arrives before timeout -> timer is cleared, request resolves
+    const req1Promise = bridge.request("chat", { prompt: "fast-response" });
+    await new Promise((r) => setImmediate(r));
+    const msg1 = JSON.parse(worker.lastWrite);
+    worker.simulateResponse(msg1.id, true, { content: "fast-success" });
+    const result1 = await req1Promise;
+    assert.strictEqual(result1.content, "fast-success", "fast response completes normally");
+
+    // Case 2: Response arrives AFTER timeout -> rejected on timeout, late response is ignored without error
+    const req2Promise = bridge.request("chat", { prompt: "slow-then-late" }).catch((err) => {
+      if (!/timed out/.test(err.message)) throw err;
+      return "timed-out-ok";
+    });
+    await new Promise((r) => setImmediate(r));
+    const msg2 = JSON.parse(worker.lastWrite);
+
+    // Wait for timeout to fire
+    await new Promise((r) => setTimeout(r, 100));
+    const res2 = await req2Promise;
+    assert.strictEqual(res2, "timed-out-ok", "request timed out");
+
+    // Simulate late response from dead worker - should be ignored without throwing
+    assert.doesNotThrow(() => {
+      worker.simulateResponse(msg2.id, true, { content: "late-response-ignored" });
+    }, "late response for timed-out request must be ignored safely");
+
+    bridge._setTimerImpl(prev.set, prev.clear);
   });
 });
