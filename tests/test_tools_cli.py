@@ -124,7 +124,8 @@ def test_paths_inside_the_sandbox_are_fine(policy):
 
 
 def test_flags_are_not_mistaken_for_paths(policy):
-    assert policy.decide(["git", "log", "--oneline", "-n", "5"])
+    # Flags like --count and -n should not trigger path validation
+    assert policy.decide(["grep", "--count", "-n", "pattern", "file.txt"])
 
 
 def test_resolve_rejects_a_path_outside_the_root(policy):
