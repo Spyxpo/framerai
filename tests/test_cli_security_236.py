@@ -10,7 +10,7 @@ These tests document and verify fixes for four security vulnerabilities:
 
 import pytest
 
-from model.tools.cli import DEFAULT_ALLOWLIST, ListDirTool, ReadFileTool, ShellPolicy, ShellTool
+from model.tools.cli import ListDirTool, ReadFileTool, ShellPolicy, ShellTool
 
 
 @pytest.fixture
@@ -46,14 +46,39 @@ def test_list_dir_respects_cli_mode_off(sandbox):
 # --- Vulnerability 2: Allowlist permits arbitrary code execution --------------
 
 
+def test_python_not_in_default_allowlist(sandbox):
+    """PR #285 feedback: python removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # python should not be in DEFAULT_ALLOWLIST anymore
+    assert "python" not in policy.allowlist
+    assert "python3" not in policy.allowlist
+
+
 def test_python_c_flag_arbitrary_code_execution(sandbox):
     """Issue #236.2: python -c permits arbitrary code execution."""
-    policy = ShellPolicy(mode="allow", root=str(sandbox), allowlist=DEFAULT_ALLOWLIST + ("python.exe",))
-    # python -c can run arbitrary Python code, should be denied
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # python -c can run arbitrary Python code, should be denied since not in allowlist
     result = ShellTool(policy).run(command="python -c 'import os; os.system(\"echo pwned\")'")
-    # Should be refused by DENY_PATTERNS
+    # Should be refused - python not in DEFAULT_ALLOWLIST
     assert not result.ok
-    assert "refused" in result.content
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_python_m_flag_arbitrary_code_execution(sandbox):
+    """PR #285 feedback: python -m bypasses DENY_PATTERNS and can execute arbitrary code."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # python -m can run arbitrary modules, e.g., pip install malicious, http.server, etc.
+    result = ShellTool(policy).run(command="python -m http.server 8000")
+    # Should be refused - python not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_node_not_in_default_allowlist(sandbox):
+    """PR #285 feedback: node removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # node should not be in DEFAULT_ALLOWLIST anymore
+    assert "node" not in policy.allowlist
 
 
 def test_node_e_flag_arbitrary_code_execution(sandbox):
@@ -61,9 +86,60 @@ def test_node_e_flag_arbitrary_code_execution(sandbox):
     policy = ShellPolicy(mode="allow", root=str(sandbox))
     # node -e can run arbitrary JavaScript code
     result = ShellTool(policy).run(command="node -e 'require(\"child_process\").execSync(\"echo pwned\")'")
-    # Should be refused, not executed
+    # Should be refused - node not in DEFAULT_ALLOWLIST
     assert not result.ok
-    assert "refused" in result.content or "not allowed" in result.content
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_node_p_flag_arbitrary_code_execution(sandbox):
+    """PR #285 feedback: node -p bypasses DENY_PATTERNS and can execute arbitrary code."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # node -p evaluates and prints JavaScript, can execute arbitrary code
+    result = ShellTool(policy).run(command="node -p 'require(\"child_process\").execSync(\"echo pwned\")'")
+    # Should be refused - node not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_git_not_in_default_allowlist(sandbox):
+    """PR #285 feedback: git removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # git should not be in DEFAULT_ALLOWLIST anymore
+    assert "git" not in policy.allowlist
+
+
+def test_git_alias_arbitrary_command_execution(sandbox):
+    """PR #285 feedback: git -c alias can create shell aliases for arbitrary execution."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # git -c can set config including aliases that execute shell commands
+    result = ShellTool(policy).run(command="git -c alias.pwn='!sh -c \"echo pwned\"' pwn")
+    # Should be refused - git not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_awk_not_in_default_allowlist(sandbox):
+    """PR #285 feedback: awk removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # awk should not be in DEFAULT_ALLOWLIST anymore
+    assert "awk" not in policy.allowlist
+
+
+def test_awk_system_arbitrary_command_execution(sandbox):
+    """PR #285 feedback: awk system() can execute arbitrary shell commands."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # awk can call system() to execute arbitrary shell commands
+    result = ShellTool(policy).run(command="awk 'BEGIN{system(\"echo pwned\")}'")
+    # Should be refused - awk not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_find_not_in_default_allowlist(sandbox):
+    """Issue #236.2: find removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # find should not be in DEFAULT_ALLOWLIST anymore
+    assert "find" not in policy.allowlist
 
 
 def test_find_delete_flag_file_destruction(sandbox):
@@ -72,11 +148,18 @@ def test_find_delete_flag_file_destruction(sandbox):
     policy = ShellPolicy(mode="allow", root=str(sandbox))
     # find -delete can delete files
     result = ShellTool(policy).run(command="find . -name victim.txt -delete")
-    # Should be refused, not executed
+    # Should be refused - find not in DEFAULT_ALLOWLIST
     assert not result.ok
-    assert "refused" in result.content or "not allowed" in result.content
+    assert "not allowlisted" in result.content or "not found" in result.content
     # Verify file still exists (fix prevents execution)
     assert (sandbox / "victim.txt").exists()
+
+
+def test_sed_not_in_default_allowlist(sandbox):
+    """Issue #236.2: sed removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # sed should not be in DEFAULT_ALLOWLIST anymore
+    assert "sed" not in policy.allowlist
 
 
 def test_sed_i_flag_file_mutation(sandbox):
@@ -84,9 +167,26 @@ def test_sed_i_flag_file_mutation(sandbox):
     policy = ShellPolicy(mode="allow", root=str(sandbox))
     # sed -i can modify files in place
     result = ShellTool(policy).run(command="sed -i 's/safe/hacked/' safe.txt")
-    # Should be refused, not executed
+    # Should be refused - sed not in DEFAULT_ALLOWLIST
     assert not result.ok
-    assert "refused" in result.content or "not allowed" in result.content
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
+def test_npm_not_in_default_allowlist(sandbox):
+    """Issue #236.2: npm removed from DEFAULT_ALLOWLIST."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # npm should not be in DEFAULT_ALLOWLIST anymore
+    assert "npm" not in policy.allowlist
+
+
+def test_npm_arbitrary_code_execution(sandbox):
+    """Issue #236.2: npm can execute arbitrary code."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # npm exec can run arbitrary commands
+    result = ShellTool(policy).run(command="npm exec -- echo pwned")
+    # Should be refused - npm not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
 
 
 # --- Vulnerability 3: flag-embedded paths bypass sandbox checks ---------------
@@ -144,6 +244,7 @@ def test_absolute_path_in_flag_blocked(sandbox):
 
 def test_shell_timeout_respects_policy_maximum(sandbox):
     """Issue #236.4: Requested timeout should not exceed policy timeout."""
+    import platform
     import time
 
     policy = ShellPolicy(
@@ -169,6 +270,9 @@ def test_shell_timeout_respects_policy_maximum(sandbox):
 
     # Test 2: Verify actual timeout behavior using timing
     start_time = time.time()
+    # On Windows, killpg cleanup may take longer, so allow more margin
+    max_expected_time = 10.0 if platform.system() == "Windows" else 5.0
+
     try:
         result = tool.run(
             command="python sleeper.py",
@@ -178,7 +282,7 @@ def test_shell_timeout_respects_policy_maximum(sandbox):
 
         # Should timeout around 2.0s (policy limit), not 999.0s (requested)
         # Allow some margin for test execution overhead
-        assert elapsed < 5.0, f"Command should timeout quickly (~2s), took {elapsed:.1f}s"
+        assert elapsed < max_expected_time, f"Command should timeout quickly (~2s), took {elapsed:.1f}s"
         assert not result.ok, "Command should fail due to timeout"
 
         # Verify the timeout was enforced (not other error like "not found")
@@ -192,10 +296,9 @@ def test_shell_timeout_respects_policy_maximum(sandbox):
     except Exception as e:
         elapsed = time.time() - start_time
         # Even if cleanup fails (e.g., Windows killpg issue), timing should show timeout was enforced
-        assert elapsed < 5.0, f"Even with cleanup error, timeout should be enforced (~2s), took {elapsed:.1f}s"
+        assert elapsed < max_expected_time, f"Even with cleanup error, timeout should be enforced (~2s), took {elapsed:.1f}s"
 
         # If it's a known Windows issue, that's acceptable - the timeout was still enforced
-        import platform
         if platform.system() == "Windows" and ("killpg" in str(e) or "No attribute" in str(e)):
             # Timeout enforcement worked (based on timing), just cleanup failed
             pass

@@ -27,10 +27,9 @@ from .base import Tool, ToolError, ToolResult
 
 MODES = ("off", "ask", "allow")
 
-#: Programs that read, build, or test. Nothing here writes outside the sandbox
-#: on its own, and the deny list still applies to every one of them.
+#: Programs that read, build, or test. Interpreters and code-execution-capable
+#: tools are excluded for security. Use --cli-mode ask to enable them with approval.
 DEFAULT_ALLOWLIST = (
-    "awk",
     "basename",
     "cat",
     "cut",
@@ -39,21 +38,14 @@ DEFAULT_ALLOWLIST = (
     "dirname",
     "du",
     "echo",
-    "find",
-    "git",
     "grep",
     "head",
     "ls",
-    "node",
-    "npm",
     "printenv",
     "pwd",
-    "python",
-    "python3",
     "pytest",
     "rg",
     "ruff",
-    "sed",
     "sort",
     "stat",
     "tail",
@@ -78,13 +70,6 @@ DENY_PATTERNS = (
     (r":\(\)\s*\{.*\|.*&.*\}", "fork bomb"),
     (r"^(nc|ncat|netcat|telnet)\b", "raw network access; use the web tools"),
     (r"^(git)\b.*\bpush\b.*--force", "force push"),
-    # Prevent arbitrary code execution via interpreter flags
-    (r"^(python|python3)\b.*\s-c\b", "arbitrary Python code execution via -c flag"),
-    (r"^(node|nodejs)\b.*\s-e\b", "arbitrary JavaScript code execution via -e flag"),
-    (r"^npm\b.*\s(exec|run-script|explore)\b", "arbitrary code execution via npm"),
-    # Prevent destructive file operations
-    (r"^find\b.*\s-(delete|exec|execdir)\b", "destructive find operations"),
-    (r"^sed\b.*\s-i", "in-place file modification via sed"),
 )
 
 #: Operators that only mean something to a shell. Commands run with
