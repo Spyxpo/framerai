@@ -3,6 +3,22 @@ import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
+function isEditableTarget(target) {
+  if (!target || target.nodeType !== 1) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+    return true;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  const ce = target.getAttribute?.("contenteditable");
+  if (ce === "" || ce === "true" || ce === "plaintext-only") {
+    return true;
+  }
+  return Boolean(target.closest?.("[contenteditable]:not([contenteditable='false'])"));
+}
+
 export default function Chat({
   messages,
   loading,
@@ -73,6 +89,25 @@ export default function Chat({
     prevStreaming.current = streaming;
     prevLoading.current = loading;
   }, [streaming, loading]);
+
+  // Focus message input via "/" keyboard shortcut when not typing in an editable field
+  useEffect(() => {
+    const handleGlobalKeyDown = (e) => {
+      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) {
+        return;
+      }
+      if (isEditableTarget(e.target) || isEditableTarget(document.activeElement)) {
+        return;
+      }
+      if (textareaRef.current) {
+        e.preventDefault();
+        textareaRef.current.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleGlobalKeyDown);
+    return () => document.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
 
   // Suggestion buttons: ←→ between them, ↑↓ to input modes, ← at first → sidebar, ↑ → chat settings
   const handleSuggestionKeyDown = (e) => {
