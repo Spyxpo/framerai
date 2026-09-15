@@ -45,7 +45,6 @@ DEFAULT_ALLOWLIST = (
     "pwd",
     "pytest",
     "ruff",
-    "sort",
     "stat",
     "tail",
     "tr",

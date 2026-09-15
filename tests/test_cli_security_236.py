@@ -278,9 +278,9 @@ def test_short_flag_with_attached_relative_escape(sandbox):
 def test_legitimate_short_flags_not_blocked(sandbox):
     """Ensure legitimate short flags without paths are still accepted."""
     policy = ShellPolicy(mode="allow", root=str(sandbox))
-    # Short flags without paths should be fine
-    assert policy.decide(["sort", "-n", "-r"])  # numeric, reverse sort
+    # Short flags without paths should be fine (using grep which is in DEFAULT_ALLOWLIST)
     assert policy.decide(["grep", "-i", "-n", "pattern"])  # case-insensitive, line numbers
+    assert policy.decide(["grep", "-r", "-i", "pattern"])  # recursive, case-insensitive
 
 
 # --- Vulnerability 4: Caller timeout bypasses policy maximum -----------------
@@ -512,12 +512,18 @@ def test_sort_compress_program_short_form(sandbox):
     assert not decision, "sort --compress-program (space-separated) must be blocked"
 
 
-def test_legitimate_sort_usage_still_works(sandbox):
-    """Follow-up: Ensure normal sort usage without --compress-program still works."""
+def test_sort_compress_abbreviated_option_bypass(sandbox):
+    """Follow-up: sort --compress=sh bypasses --compress-program deny pattern.
+
+    GNU sort accepts abbreviated long options, so --compress is treated as
+    an abbreviation of --compress-program and can execute arbitrary commands.
+    The DENY_PATTERN only matches --compress-program literally, not abbreviations.
+    Removing sort from DEFAULT_ALLOWLIST is the safest fix.
+    """
     policy = ShellPolicy(mode="allow", root=str(sandbox))
 
-    # Normal sort usage should be fine
-    assert policy.decide(["sort", "file.txt"])
-    assert policy.decide(["sort", "-r", "file.txt"])  # reverse
-    assert policy.decide(["sort", "-n", "file.txt"])  # numeric
-    assert policy.decide(["sort", "-u", "file.txt"])  # unique
+    # sort --compress=sh is an abbreviation of --compress-program and bypasses the deny pattern
+    decision = policy.decide(["sort", "--compress=sh", "file.txt"])
+    assert not decision, "sort --compress=sh must be blocked"
+    # After removing sort from DEFAULT_ALLOWLIST, this should be "not allowlisted"
+    assert "not allowlisted" in decision.reason or "refused" in decision.reason
