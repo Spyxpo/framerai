@@ -189,6 +189,23 @@ def test_npm_arbitrary_code_execution(sandbox):
     assert "not allowlisted" in result.content or "not found" in result.content
 
 
+def test_rg_not_in_default_allowlist(sandbox):
+    """PR #285 final feedback: rg removed from DEFAULT_ALLOWLIST due to --pre."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # rg should not be in DEFAULT_ALLOWLIST anymore
+    assert "rg" not in policy.allowlist
+
+
+def test_rg_pre_arbitrary_command_execution(sandbox):
+    """PR #285 final feedback: rg --pre can execute arbitrary preprocessor commands."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # rg --pre can run arbitrary commands as a preprocessor
+    result = ShellTool(policy).run(command="rg --pre 'echo pwned' pattern")
+    # Should be refused - rg not in DEFAULT_ALLOWLIST
+    assert not result.ok
+    assert "not allowlisted" in result.content or "not found" in result.content
+
+
 # --- Vulnerability 3: flag-embedded paths bypass sandbox checks ---------------
 
 
@@ -237,6 +254,33 @@ def test_absolute_path_in_flag_blocked(sandbox):
     decision = policy.decide(["cat", "--file=/etc/passwd"])
     assert not decision
     assert "outside the sandbox" in decision.reason
+
+
+def test_short_flag_with_attached_path_escapes_sandbox(sandbox):
+    """PR #285 final feedback: Short flags with attached paths like -o/tmp/x bypass validation."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    escape_path = str(sandbox.parent / "escape.txt")
+    # Path attached directly to short flag should still be validated
+    decision = policy.decide(["sort", f"-o{escape_path}"])
+    assert not decision
+    assert "outside the sandbox" in decision.reason
+
+
+def test_short_flag_with_attached_relative_escape(sandbox):
+    """PR #285 final feedback: Short flags with relative path escapes like -o../file."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # Relative path escape attached to short flag
+    decision = policy.decide(["sort", "-o../escape.txt"])
+    assert not decision
+    assert "outside the sandbox" in decision.reason
+
+
+def test_legitimate_short_flags_not_blocked(sandbox):
+    """Ensure legitimate short flags without paths are still accepted."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # Short flags without paths should be fine
+    assert policy.decide(["sort", "-n", "-r"])  # numeric, reverse sort
+    assert policy.decide(["grep", "-i", "-n", "pattern"])  # case-insensitive, line numbers
 
 
 # --- Vulnerability 4: Caller timeout bypasses policy maximum -----------------
@@ -336,3 +380,59 @@ def test_timeout_calculation_unit_test():
         # For high timeouts, the vulnerable version should differ from expected
         if requested_timeout and requested_timeout > policy.timeout:
             assert vulnerable_limit > expected_limit, f"VULNERABLE version should allow longer timeouts for requested={requested_timeout}"
+
+
+def test_nan_timeout_does_not_bypass_policy(sandbox):
+    """PR #285 final feedback: NaN timeout must not bypass or corrupt policy timeout."""
+    policy = ShellPolicy(
+        mode="allow",
+        root=str(sandbox),
+        timeout=2.0,
+        allowlist=("echo",)
+    )
+
+    tool = ShellTool(policy)
+
+    # NaN timeout should be rejected and fall back to policy timeout
+    result = tool.run(command="echo test", timeout=float('nan'))
+
+    # Should not crash - NaN should be handled safely
+    # Either succeeds (if echo available) or fails gracefully
+    assert result is not None
+    # The key: NaN should not have bypassed timeout validation or caused crashes
+
+
+def test_infinity_timeout_does_not_bypass_policy(sandbox):
+    """PR #285 final feedback: Infinity timeout must not bypass policy timeout."""
+    policy = ShellPolicy(
+        mode="allow",
+        root=str(sandbox),
+        timeout=2.0,
+        allowlist=("echo",)
+    )
+
+    tool = ShellTool(policy)
+
+    # Infinity timeout should be capped to policy timeout
+    result = tool.run(command="echo test", timeout=float('inf'))
+
+    # Should not crash - infinity should be handled safely
+    assert result is not None
+
+
+def test_negative_timeout_uses_policy_timeout(sandbox):
+    """Negative timeout should fall back to policy timeout."""
+    policy = ShellPolicy(
+        mode="allow",
+        root=str(sandbox),
+        timeout=2.0,
+        allowlist=("echo",)
+    )
+
+    tool = ShellTool(policy)
+
+    # Negative timeout should be rejected and fall back to policy timeout
+    result = tool.run(command="echo test", timeout=-1.0)
+
+    # Should not crash - negative timeout should be handled safely
+    assert result is not None

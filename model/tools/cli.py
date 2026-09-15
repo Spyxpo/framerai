@@ -44,7 +44,6 @@ DEFAULT_ALLOWLIST = (
     "printenv",
     "pwd",
     "pytest",
-    "rg",
     "ruff",
     "sort",
     "stat",
@@ -187,6 +186,14 @@ class ShellPolicy:
                     _, value = argument.split("=", 1)
                     if value and (os.sep in value or "/" in value or value.startswith("~") or ".." in value or os.path.isabs(value)):
                         path_to_check = value
+                # Check for short flag with attached path: -o/path or -opath
+                # A path typically contains separators or starts with special chars
+                elif len(argument) > 2:  # At least -X followed by something
+                    # Extract potential path after the flag character(s)
+                    # Handle both -o/path and -opath patterns
+                    potential_path = argument[2:]  # Skip '-' and flag char
+                    if potential_path and (os.sep in potential_path or "/" in potential_path or potential_path.startswith("~") or ".." in potential_path or os.path.isabs(potential_path)):
+                        path_to_check = potential_path
                 # Skip other flags - they'll be caught if they have a separate value argument
                 else:
                     continue
@@ -257,7 +264,12 @@ class ShellTool(Tool):
 
     def _spawn(self, command: str, argv: list[str], timeout: float | None) -> ToolResult:
         # Policy timeout is a hard maximum, not just a default
-        limit = min(float(timeout or self.policy.timeout), self.policy.timeout)
+        # Validate timeout is finite to prevent NaN or infinity bypass
+        import math
+        requested = timeout if timeout is not None else self.policy.timeout
+        if not isinstance(requested, (int, float)) or not math.isfinite(requested) or requested < 0:
+            requested = self.policy.timeout
+        limit = min(float(requested), self.policy.timeout)
         try:
             process = subprocess.Popen(  # noqa: S603 - argv list, shell=False, scrubbed env
                 argv,
