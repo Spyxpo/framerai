@@ -27,10 +27,9 @@ from .base import Tool, ToolError, ToolResult
 
 MODES = ("off", "ask", "allow")
 
-#: Programs that read, build, or test. Nothing here writes outside the sandbox
-#: on its own, and the deny list still applies to every one of them.
+#: Programs that read, build, or test. Interpreters and code-execution-capable
+#: tools are excluded for security. Use --cli-mode ask to enable them with approval.
 DEFAULT_ALLOWLIST = (
-    "awk",
     "basename",
     "cat",
     "cut",
@@ -39,21 +38,13 @@ DEFAULT_ALLOWLIST = (
     "dirname",
     "du",
     "echo",
-    "find",
-    "git",
     "grep",
     "head",
     "ls",
-    "node",
-    "npm",
     "printenv",
     "pwd",
-    "python",
-    "python3",
     "pytest",
-    "rg",
     "ruff",
-    "sed",
     "sort",
     "stat",
     "tail",
@@ -185,14 +176,37 @@ class ShellPolicy:
     def _escaping_argument(self, argv: list[str]) -> str | None:
         """The first path-shaped argument that leaves the sandbox, if any."""
         for argument in argv[1:]:
+            # Check both standalone arguments and flag-embedded paths (--flag=path)
+            path_to_check = None
+
             if argument.startswith("-"):
+                # Check for --flag=value or --flag value patterns
+                if "=" in argument:
+                    # Extract path from --flag=path pattern
+                    _, value = argument.split("=", 1)
+                    if value and (os.sep in value or "/" in value or value.startswith("~") or ".." in value or os.path.isabs(value)):
+                        path_to_check = value
+                # Check for short flag with attached path: -o/path or -opath
+                # A path typically contains separators or starts with special chars
+                elif len(argument) > 2:  # At least -X followed by something
+                    # Extract potential path after the flag character(s)
+                    # Handle both -o/path and -opath patterns
+                    potential_path = argument[2:]  # Skip '-' and flag char
+                    if potential_path and (os.sep in potential_path or "/" in potential_path or potential_path.startswith("~") or ".." in potential_path or os.path.isabs(potential_path)):
+                        path_to_check = potential_path
+                # Skip other flags - they'll be caught if they have a separate value argument
+                else:
+                    continue
+            elif os.sep not in argument and "/" not in argument and not argument.startswith("~") and ".." not in argument and not os.path.isabs(argument):
                 continue
-            if os.sep not in argument and not argument.startswith("~") and ".." not in argument:
-                continue
-            try:
-                self.resolve(argument)
-            except ToolError:
-                return argument
+            else:
+                path_to_check = argument
+
+            if path_to_check:
+                try:
+                    self.resolve(path_to_check)
+                except ToolError:
+                    return argument  # Return the original argument for error message
         return None
 
     def record(self, reason: str) -> None:
@@ -249,7 +263,13 @@ class ShellTool(Tool):
         return self._spawn(command, argv, timeout)
 
     def _spawn(self, command: str, argv: list[str], timeout: float | None) -> ToolResult:
-        limit = float(timeout or self.policy.timeout)
+        # Policy timeout is a hard maximum, not just a default
+        # Validate timeout is finite to prevent NaN or infinity bypass
+        import math
+        requested = timeout if timeout is not None else self.policy.timeout
+        if not isinstance(requested, (int, float)) or not math.isfinite(requested) or requested < 0:
+            requested = self.policy.timeout
+        limit = min(float(requested), self.policy.timeout)
         try:
             process = subprocess.Popen(  # noqa: S603 - argv list, shell=False, scrubbed env
                 argv,
@@ -320,6 +340,8 @@ class ReadFileTool(Tool):
     ) -> ToolResult:
         if not path:
             return ToolResult.failure("read_file needs a path")
+        if self.policy.mode == "off":
+            return ToolResult.failure("the cli tool is off; start the worker with --tools cli")
         resolved = self.policy.resolve(path)
         if not os.path.isfile(resolved):
             return ToolResult.failure(f"{path!r} is not a file")
@@ -354,6 +376,8 @@ class ListDirTool(Tool):
         self.policy = policy or ShellPolicy()
 
     def run(self, path: str = ".", **_: Any) -> ToolResult:
+        if self.policy.mode == "off":
+            return ToolResult.failure("the cli tool is off; start the worker with --tools cli")
         resolved = self.policy.resolve(path or ".")
         if not os.path.isdir(resolved):
             return ToolResult.failure(f"{path!r} is not a directory")
