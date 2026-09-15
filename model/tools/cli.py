@@ -69,6 +69,7 @@ DENY_PATTERNS = (
     (r":\(\)\s*\{.*\|.*&.*\}", "fork bomb"),
     (r"^(nc|ncat|netcat|telnet)\b", "raw network access; use the web tools"),
     (r"^(git)\b.*\bpush\b.*--force", "force push"),
+    (r"^sort\b.*--compress-program", "sort --compress-program can execute external commands"),
 )
 
 #: Operators that only mean something to a shell. Commands run with
@@ -180,20 +181,54 @@ class ShellPolicy:
             path_to_check = None
 
             if argument.startswith("-"):
-                # Check for --flag=value or --flag value patterns
+                # Check for --flag=value or --flag value patterns, but also handle
+                # cases where '=' appears inside an attached path value like -o/tmp/x=y
                 if "=" in argument:
-                    # Extract path from --flag=path pattern
-                    _, value = argument.split("=", 1)
-                    if value and (os.sep in value or "/" in value or value.startswith("~") or ".." in value or os.path.isabs(value)):
-                        path_to_check = value
-                # Check for short flag with attached path: -o/path or -opath
+                    # Split on the FIRST '=' to get flag and value parts
+                    flag_part, value_part = argument.split("=", 1)
+
+                    # Check the value after '=' for path indicators
+                    if value_part and (os.sep in value_part or "/" in value_part or value_part.startswith("~") or ".." in value_part or os.path.isabs(value_part)):
+                        path_to_check = value_part
+
+                    # ALSO check the flag part before '=' for attached paths (e.g., -o/tmp/x=y)
+                    # The flag part might be like "-o/tmp/x" where the path is attached
+                    if flag_part and len(flag_part) > 2:
+                        # Scan the flag part for path indicators starting after '-'
+                        potential_path_in_flag = flag_part[1:]  # Remove leading '-'
+                        # Look for path separators or other path indicators within the flag part
+                        if os.sep in potential_path_in_flag or "/" in potential_path_in_flag or ".." in potential_path_in_flag or potential_path_in_flag.startswith("~"):
+                            # Find where the path starts by looking for the first path indicator
+                            for i, char in enumerate(potential_path_in_flag):
+                                # Path likely starts at first '/', '~', or when we see '..'
+                                if char == "/" or char == os.sep or potential_path_in_flag[i:i+2] == ".." or (i == 0 and char == "~"):
+                                    path_to_check = potential_path_in_flag[i:]
+                                    break
+
+                # Check for short flag with attached path: -o/path, -opath, or bundled like -ro/path
                 # A path typically contains separators or starts with special chars
                 elif len(argument) > 2:  # At least -X followed by something
-                    # Extract potential path after the flag character(s)
-                    # Handle both -o/path and -opath patterns
-                    potential_path = argument[2:]  # Skip '-' and flag char
-                    if potential_path and (os.sep in potential_path or "/" in potential_path or potential_path.startswith("~") or ".." in potential_path or os.path.isabs(potential_path)):
-                        path_to_check = potential_path
+                    # For bundled flags like -ro/tmp/x, we need to find where the path starts
+                    # Don't assume it starts at position 2
+                    attached_part = argument[1:]  # Everything after the '-'
+
+                    # Scan for path indicators within the attached part
+                    # Look for '/', '..', '~', or absolute path indicators
+                    found_path = False
+                    for i, char in enumerate(attached_part):
+                        # Check if we've found a path indicator
+                        if char == "/" or char == os.sep or (i + 1 < len(attached_part) and attached_part[i:i+2] == "..") or (i == 0 and char == "~"):
+                            # Extract from this point onward as the potential path
+                            potential_path = attached_part[i:]
+                            if potential_path and (os.sep in potential_path or "/" in potential_path or potential_path.startswith("~") or ".." in potential_path or os.path.isabs(potential_path)):
+                                path_to_check = potential_path
+                                found_path = True
+                                break
+
+                    # If no clear path separator found, check if the whole attached part is an absolute path
+                    if not found_path and os.path.isabs(attached_part):
+                        path_to_check = attached_part
+
                 # Skip other flags - they'll be caught if they have a separate value argument
                 else:
                     continue
