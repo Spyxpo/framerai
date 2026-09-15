@@ -278,9 +278,9 @@ def test_short_flag_with_attached_relative_escape(sandbox):
 def test_legitimate_short_flags_not_blocked(sandbox):
     """Ensure legitimate short flags without paths are still accepted."""
     policy = ShellPolicy(mode="allow", root=str(sandbox))
-    # Short flags without paths should be fine
-    assert policy.decide(["sort", "-n", "-r"])  # numeric, reverse sort
+    # Short flags without paths should be fine (using grep which is in DEFAULT_ALLOWLIST)
     assert policy.decide(["grep", "-i", "-n", "pattern"])  # case-insensitive, line numbers
+    assert policy.decide(["grep", "-r", "-i", "pattern"])  # recursive, case-insensitive
 
 
 # --- Vulnerability 4: Caller timeout bypasses policy maximum -----------------
@@ -436,3 +436,94 @@ def test_negative_timeout_uses_policy_timeout(sandbox):
 
     # Should not crash - negative timeout should be handled safely
     assert result is not None
+
+
+# --- Follow-up PR: Additional CLI sandbox bypasses identified by mentor -------
+
+
+def test_bundled_short_flags_with_attached_path_escape(sandbox):
+    """Follow-up: Bundled short flags like -ro/tmp/x can bypass path validation.
+
+    The current _escaping_argument() assumes single-char flags and extracts
+    argument[2:], but bundled flags like -ro mean -r and -o are both flags,
+    and the path starts after 'o', not at position 2.
+    """
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    escape_path = str(sandbox.parent / "escape.txt")
+
+    # Bundled flags -r and -o with path attached to -o
+    decision = policy.decide(["sort", f"-ro{escape_path}"])
+    assert not decision, "Bundled short flags with attached escaping path must be blocked"
+    assert "outside the sandbox" in decision.reason
+
+
+def test_bundled_short_flags_relative_escape(sandbox):
+    """Follow-up: Bundled short flags with relative path escape like -rf../x."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+
+    # Bundled flags with relative escape
+    decision = policy.decide(["sort", "-rf../escape.txt"])
+    assert not decision, "Bundled short flags with relative escape must be blocked"
+    assert "outside the sandbox" in decision.reason
+
+
+def test_short_flag_attached_path_with_equals_sign(sandbox):
+    """Follow-up: Attached path containing '=' like -o/tmp/x=y bypasses validation.
+
+    The current code checks for '=' first and splits on it, which extracts
+    only the part after '=', missing the actual path before it.
+    """
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+    # Path /tmp/x is before the '=', not after
+    decision = policy.decide(["sort", "-o/tmp/x=y"])
+    assert not decision, "Short flag with attached path containing '=' must be blocked"
+    assert "outside the sandbox" in decision.reason
+
+
+def test_short_flag_attached_relative_escape_with_equals(sandbox):
+    """Follow-up: Relative escape in attached path with '=' like -o../x=y."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+
+    decision = policy.decide(["sort", "-o../escape=value"])
+    assert not decision, "Short flag with relative escape and '=' must be blocked"
+    assert "outside the sandbox" in decision.reason
+
+
+def test_sort_compress_program_can_execute_commands(sandbox):
+    """Follow-up: sort --compress-program=sh can execute arbitrary external commands.
+
+    sort --compress-program allows specifying a compression program which
+    can be used to execute arbitrary commands.
+    """
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+
+    # sort with --compress-program can execute external programs
+    decision = policy.decide(["sort", "--compress-program=sh", "file.txt"])
+    assert not decision, "sort --compress-program must be blocked"
+    assert "refused" in decision.reason or "not allowlisted" in decision.reason
+
+
+def test_sort_compress_program_short_form(sandbox):
+    """Follow-up: Ensure short form variations of --compress-program are also blocked."""
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+
+    # Try space-separated form
+    decision = policy.decide(["sort", "--compress-program", "sh", "file.txt"])
+    assert not decision, "sort --compress-program (space-separated) must be blocked"
+
+
+def test_sort_compress_abbreviated_option_bypass(sandbox):
+    """Follow-up: sort --compress=sh bypasses --compress-program deny pattern.
+
+    GNU sort accepts abbreviated long options, so --compress is treated as
+    an abbreviation of --compress-program and can execute arbitrary commands.
+    The DENY_PATTERN only matches --compress-program literally, not abbreviations.
+    Removing sort from DEFAULT_ALLOWLIST is the safest fix.
+    """
+    policy = ShellPolicy(mode="allow", root=str(sandbox))
+
+    # sort --compress=sh is an abbreviation of --compress-program and bypasses the deny pattern
+    decision = policy.decide(["sort", "--compress=sh", "file.txt"])
+    assert not decision, "sort --compress=sh must be blocked"
+    # After removing sort from DEFAULT_ALLOWLIST, this should be "not allowlisted"
+    assert "not allowlisted" in decision.reason or "refused" in decision.reason
