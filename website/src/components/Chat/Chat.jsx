@@ -99,10 +99,17 @@ export default function Chat({
       if (isEditableTarget(e.target) || isEditableTarget(document.activeElement)) {
         return;
       }
-      if (textareaRef.current) {
-        e.preventDefault();
-        textareaRef.current.focus();
+      const el = textareaRef.current;
+      if (!el || el.disabled) {
+        return;
       }
+      // Don't pull focus out of an open modal dialog (e.g. the settings panel)
+      const modal = document.querySelector('[aria-modal="true"]');
+      if (modal && !modal.contains(el)) {
+        return;
+      }
+      e.preventDefault();
+      el.focus();
     };
 
     document.addEventListener("keydown", handleGlobalKeyDown);

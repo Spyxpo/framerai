@@ -781,6 +781,42 @@ describe("Chat — send flow", () => {
       });
     });
 
+    it("does not steal focus out of an open modal dialog", () => {
+      render(
+        <div>
+          <Chat {...chatProps()} />
+          <div role="dialog" aria-modal="true">
+            <button data-testid="dialog-btn">Close settings</button>
+          </div>
+        </div>
+      );
+      const dialogBtn = screen.getByTestId("dialog-btn");
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      dialogBtn.focus();
+      expect(document.activeElement).toBe(dialogBtn);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      dialogBtn.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(dialogBtn);
+      expect(document.activeElement).not.toBe(textarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not swallow the keystroke while the chat input is disabled", () => {
+      render(<Chat {...chatProps({ loading: true })} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      expect(textarea.disabled).toBe(true);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      document.dispatchEvent(event);
+
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+      expect(document.activeElement).not.toBe(textarea);
+    });
+
     it("cleans up keydown listener on unmount", () => {
       const { unmount } = render(<Chat {...chatProps()} />);
       unmount();
