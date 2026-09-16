@@ -691,6 +691,16 @@ export default function Chat({
             aria-multiline="true"
           />
 
+          {!input && (
+            <span
+              className="chat-shortcut-hint"
+              onClick={() => textareaRef.current?.focus()}
+              title="Press / to focus"
+            >
+              Press <kbd>/</kbd> to focus
+            </span>
+          )}
+
           <button
             type="submit"
             ref={sendBtnRef}
