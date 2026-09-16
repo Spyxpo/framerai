@@ -91,6 +91,7 @@ class Worker {
     // it is busy. Request duration alone is NOT proof of a stuck worker.
     this.lastHeartbeat = null;
     this._livenessTimer = null;
+    this.timedOut = false;
   }
 
   spawn() {
@@ -409,8 +410,10 @@ class Worker {
         const workerLog = createLogger({ route: `worker-${this.id}` });
         workerLog.warn("request timed out, terminating worker", { requestId: id });
 
-        this.pending.delete(id);
+        this.timedOut = true;
+        this.ready = false;
         this.busy = false;
+        this.pending.delete(id);
         this.currentRequest = null;
         this.currentRequestId = null;
 
@@ -425,9 +428,12 @@ class Worker {
         // native GPU kernel may not respond to SIGTERM, which would leave
         // this slot permanently dead and drain the pool to zero (Issue #238).
         if (this.child) {
-          this.ready = false;
           const dyingChild = this.child;
-          dyingChild.kill(); // SIGTERM — ask nicely
+          try {
+            dyingChild.kill(); // SIGTERM — ask nicely
+          } catch {
+            // Process may have already exited
+          }
 
           // Escalate to SIGKILL if the process is still alive after the grace
           // period. Track the exit ourselves: child.killed only reports that a
@@ -610,10 +616,11 @@ class WorkerPool {
     this.workers.splice(idx, 1);
     deadWorker.cleanup();
 
-    const attempts = (this._restartCounts.get(workerId) || 0) + 1;
+    const isTimeout = Boolean(deadWorker && deadWorker.timedOut);
+    const attempts = isTimeout ? 0 : (this._restartCounts.get(workerId) || 0) + 1;
 
-    // Hard cap: abandon this worker slot after too many consecutive failures
-    if (attempts > MAX_RESTART_ATTEMPTS) {
+    // Hard cap: abandon this worker slot after too many consecutive failure crashes
+    if (!isTimeout && attempts > MAX_RESTART_ATTEMPTS) {
       this.poolLog.warn("worker restart limit exceeded", { workerId, maxAttempts: MAX_RESTART_ATTEMPTS });
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
@@ -621,14 +628,18 @@ class WorkerPool {
       return;
     }
 
-    this._restartCounts.set(workerId, attempts);
+    if (!isTimeout) {
+      this._restartCounts.set(workerId, attempts);
+    }
 
-    // Exponential backoff, capped at RESTART_BACKOFF_MAX_MS
-    const delay = Math.min(
-      RESTART_BACKOFF_BASE_MS * Math.pow(2, attempts - 1),
-      RESTART_BACKOFF_MAX_MS
-    );
-    this.poolLog.info("worker restart scheduled", { workerId, attempt: attempts, maxAttempts: MAX_RESTART_ATTEMPTS, delayMs: delay });
+    // Exponential backoff for crash failures, base backoff for timeouts
+    const delay = isTimeout
+      ? RESTART_BACKOFF_BASE_MS
+      : Math.min(
+          RESTART_BACKOFF_BASE_MS * Math.pow(2, attempts - 1),
+          RESTART_BACKOFF_MAX_MS
+        );
+    this.poolLog.info("worker restart scheduled", { workerId, attempt: attempts, maxAttempts: MAX_RESTART_ATTEMPTS, delayMs: delay, isTimeout });
 
     // Wait out the backoff (interruptible by shutdown)
     await new Promise((resolve) => {
