@@ -631,4 +631,198 @@ describe("Chat — send flow", () => {
       expect(onDenyCommand).toHaveBeenCalledWith("test-app-1", true);
     });
   });
+
+  describe("Keyboard shortcut: / to focus chat input", () => {
+    it("focuses the chat input when '/' is pressed outside editable elements", () => {
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      expect(document.activeElement).not.toBe(textarea);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      document.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(textarea);
+      expect(preventDefaultSpy).toHaveBeenCalled();
+    });
+
+    it("does not trigger shortcut when typing inside an input element", () => {
+      render(
+        <div>
+          <input data-testid="external-input" type="text" />
+          <Chat {...chatProps()} />
+        </div>
+      );
+      const input = screen.getByTestId("external-input");
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      input.focus();
+      expect(document.activeElement).toBe(input);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      input.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(input);
+      expect(document.activeElement).not.toBe(textarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not trigger shortcut when typing inside another textarea element", () => {
+      render(
+        <div>
+          <textarea data-testid="external-textarea" />
+          <Chat {...chatProps()} />
+        </div>
+      );
+      const extTextarea = screen.getByTestId("external-textarea");
+      const chatTextarea = screen.getByRole("textbox", { name: /message input/i });
+      extTextarea.focus();
+      expect(document.activeElement).toBe(extTextarea);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      extTextarea.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(extTextarea);
+      expect(document.activeElement).not.toBe(chatTextarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not prevent default or re-focus when typing '/' inside the chat input itself", () => {
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      textarea.focus();
+      expect(document.activeElement).toBe(textarea);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      textarea.dispatchEvent(event);
+
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not trigger shortcut when focused on a select element", () => {
+      render(
+        <div>
+          <select data-testid="external-select">
+            <option value="1">1</option>
+          </select>
+          <Chat {...chatProps()} />
+        </div>
+      );
+      const select = screen.getByTestId("external-select");
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      select.focus();
+      expect(document.activeElement).toBe(select);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      select.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(select);
+      expect(document.activeElement).not.toBe(textarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not trigger shortcut when focused inside a contenteditable element", () => {
+      render(
+        <div>
+          <div data-testid="editable-div" contentEditable="true" suppressContentEditableWarning={true}>
+            <span data-testid="editable-child">text</span>
+          </div>
+          <Chat {...chatProps()} />
+        </div>
+      );
+      const editableDiv = screen.getByTestId("editable-div");
+      const editableChild = screen.getByTestId("editable-child");
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+
+      editableDiv.focus();
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      editableChild.dispatchEvent(event);
+
+      expect(document.activeElement).not.toBe(textarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not trigger shortcut with modifier keys like Ctrl, Cmd, or Alt", () => {
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+
+      ["ctrlKey", "metaKey", "altKey"].forEach((mod) => {
+        document.body.focus();
+        const event = new KeyboardEvent("keydown", {
+          key: "/",
+          [mod]: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+        document.dispatchEvent(event);
+
+        expect(document.activeElement).not.toBe(textarea);
+        expect(preventDefaultSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("does not trigger shortcut on other keys", () => {
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+
+      ["a", "Enter", "Escape", "Tab", "ArrowDown"].forEach((key) => {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+        document.dispatchEvent(event);
+
+        expect(document.activeElement).not.toBe(textarea);
+        expect(preventDefaultSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("does not steal focus out of an open modal dialog", () => {
+      render(
+        <div>
+          <Chat {...chatProps()} />
+          <div role="dialog" aria-modal="true">
+            <button data-testid="dialog-btn">Close settings</button>
+          </div>
+        </div>
+      );
+      const dialogBtn = screen.getByTestId("dialog-btn");
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      dialogBtn.focus();
+      expect(document.activeElement).toBe(dialogBtn);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      dialogBtn.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(dialogBtn);
+      expect(document.activeElement).not.toBe(textarea);
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not swallow the keystroke while the chat input is disabled", () => {
+      render(<Chat {...chatProps({ loading: true })} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      expect(textarea.disabled).toBe(true);
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      document.dispatchEvent(event);
+
+      expect(preventDefaultSpy).not.toHaveBeenCalled();
+      expect(document.activeElement).not.toBe(textarea);
+    });
+
+    it("cleans up keydown listener on unmount", () => {
+      const { unmount } = render(<Chat {...chatProps()} />);
+      unmount();
+
+      const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+      expect(() => document.dispatchEvent(event)).not.toThrow();
+    });
+  });
 });
