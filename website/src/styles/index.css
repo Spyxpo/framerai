@@ -830,6 +830,41 @@ body {
   color: var(--text-muted);
 }
 
+.chat-shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+  white-space: nowrap;
+  padding: 0 4px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.chat-shortcut-hint:hover {
+  color: var(--text-secondary);
+}
+
+.chat-shortcut-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
 .send-btn {
   display: flex;
   align-items: center;
@@ -922,6 +957,10 @@ body {
 
   .input-container {
     padding: 12px 16px;
+  }
+
+  .chat-shortcut-hint {
+    display: none;
   }
 }
 
