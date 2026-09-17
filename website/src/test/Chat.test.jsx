@@ -824,5 +824,33 @@ describe("Chat — send flow", () => {
       const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
       expect(() => document.dispatchEvent(event)).not.toThrow();
     });
+
+    it("renders the keyboard shortcut hint near the chat input when empty", () => {
+      render(<Chat {...chatProps()} />);
+      const hint = screen.getByTitle("Press / to focus");
+      expect(hint).toBeInTheDocument();
+      expect(hint).toHaveTextContent(/press\s*\/\s*to focus/i);
+    });
+
+    it("focuses the chat input when clicking the shortcut hint", async () => {
+      const user = userEvent.setup();
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      const hint = screen.getByTitle("Press / to focus");
+
+      expect(document.activeElement).not.toBe(textarea);
+      await user.click(hint);
+      expect(document.activeElement).toBe(textarea);
+    });
+
+    it("hides the shortcut hint when text is typed into the input", async () => {
+      const user = userEvent.setup();
+      render(<Chat {...chatProps()} />);
+      const textarea = screen.getByRole("textbox", { name: /message input/i });
+      expect(screen.getByTitle("Press / to focus")).toBeInTheDocument();
+
+      await user.type(textarea, "Hello");
+      expect(screen.queryByTitle("Press / to focus")).not.toBeInTheDocument();
+    });
   });
 });
