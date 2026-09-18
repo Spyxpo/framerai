@@ -329,6 +329,8 @@ class FramerGenerator:
         end to end, such as the one :meth:`transcribe` sends; anything
         carrying user text should be encoded and passed as ids instead.
         """
+        if temperature < 0:
+            raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
@@ -445,6 +447,8 @@ class FramerGenerator:
         allowed_special=None,
     ):
         """Yield text deltas incrementally as generation progresses."""
+        if temperature < 0:
+            raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
