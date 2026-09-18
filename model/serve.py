@@ -390,6 +390,8 @@ def handle(gen, op, params, mind=None, tools=None):
         is_stream = bool(params.get("stream", False))
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
+        if max_new_tokens < 0:
+            raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
         return_reasoning = bool(params.get("reasoning", False))
 
         messages = params.get("messages")
