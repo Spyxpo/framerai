@@ -392,6 +392,9 @@ def handle(gen, op, params, mind=None, tools=None):
         max_new_tokens = params.get("max_new_tokens", 256)
         if max_new_tokens < 0:
             raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
+        if "temperature" in params and params["temperature"] is not None:
+            if float(params["temperature"]) < 0:
+                raise ValueError(f"temperature must be non-negative, got {params['temperature']}")
         return_reasoning = bool(params.get("reasoning", False))
 
         messages = params.get("messages")

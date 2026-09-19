@@ -323,13 +323,6 @@ def test_temperature_zero_no_overflow_with_large_logits():
     assert next_tok == 0
 
 
-def test_temperature_negative_also_uses_greedy():
-    """temperature < 0 also triggers greedy argmax decoding."""
-    gen = _make_generator()
-    a = gen.generate_text("hello", max_new_tokens=8, temperature=-0.5)
-    b = gen.generate_text("hello", max_new_tokens=8, temperature=0.0)
-    assert a == b
-
 
 # ===========================================================================
 # E. Streaming Tests (generate_stream)
@@ -493,7 +486,45 @@ def test_serve_handles_monkeypatched_string_generator(monkeypatch):
 
 
 # ===========================================================================
-# G. Max Token Validation Tests (Issue #301)
+# G. Temperature Validation Tests (Issue #303)
+# ===========================================================================
+
+def test_generate_text_rejects_negative_temperature():
+    """Negative temperature in generate_text raises ValueError."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match="temperature must be non-negative"):
+        gen.generate_text("hello", temperature=-0.5)
+
+
+def test_generate_stream_rejects_negative_temperature():
+    """Negative temperature in generate_stream raises ValueError on iteration."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match="temperature must be non-negative"):
+        list(gen.generate_stream("hello", temperature=-0.5))
+
+
+def test_serve_handle_rejects_negative_temperature():
+    """handle() rejects negative temperature for standard and streaming calls."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match="temperature must be non-negative"):
+        handle(gen, "chat", {"prompt": "hi", "temperature": -0.5})
+    with pytest.raises(ValueError, match="temperature must be non-negative"):
+        handle(gen, "chat", {"prompt": "hi", "temperature": -0.5, "stream": True})
+
+
+def test_temperature_zero_and_positive_valid():
+    """temperature=0 retains existing greedy behavior and positive values remain valid."""
+    gen = _make_generator()
+    out_zero = gen.generate_text("hello", max_new_tokens=5, temperature=0)
+    assert isinstance(out_zero, str)
+
+    out_pos = gen.generate_text("hello", max_new_tokens=5, temperature=0.7)
+    assert isinstance(out_pos, str)
+    assert len(out_pos) > 0
+
+
+# ===========================================================================
+# H. Max Token Validation Tests (Issue #301)
 # ===========================================================================
 
 def test_generate_text_rejects_negative_max_new_tokens():

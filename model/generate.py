@@ -331,6 +331,8 @@ class FramerGenerator:
         """
         if max_new_tokens < 0:
             raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
+        if temperature < 0:
+            raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
@@ -449,6 +451,8 @@ class FramerGenerator:
         """Yield text deltas incrementally as generation progresses."""
         if max_new_tokens < 0:
             raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
+        if temperature < 0:
+            raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
