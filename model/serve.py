@@ -390,6 +390,9 @@ def handle(gen, op, params, mind=None, tools=None):
         is_stream = bool(params.get("stream", False))
         active = _select_tools(tools, params.get("tools"))
         max_new_tokens = params.get("max_new_tokens", 256)
+        if "temperature" in params and params["temperature"] is not None:
+            if float(params["temperature"]) < 0:
+                raise ValueError(f"temperature must be non-negative, got {params['temperature']}")
         return_reasoning = bool(params.get("reasoning", False))
 
         messages = params.get("messages")
