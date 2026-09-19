@@ -329,6 +329,8 @@ class FramerGenerator:
         end to end, such as the one :meth:`transcribe` sends; anything
         carrying user text should be encoded and passed as ids instead.
         """
+        if max_new_tokens < 0:
+            raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
         if temperature < 0:
             raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
@@ -447,6 +449,8 @@ class FramerGenerator:
         allowed_special=None,
     ):
         """Yield text deltas incrementally as generation progresses."""
+        if max_new_tokens < 0:
+            raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
         if temperature < 0:
             raise ValueError(f"temperature must be non-negative, got {temperature}")
         image_embeds = audio_embeds = None
