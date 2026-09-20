@@ -471,10 +471,17 @@ async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOption
   if (bridge.available()) {
     try {
       const result = await bridge.request("image", payload, opts.options);
+      const files = Array.isArray(result.files) && result.files.length > 0
+        ? result.files
+        : (result.file ? [result.file] : []);
       return {
         id: randomUUID(),
         prompt,
-        images: [{ id: randomUUID(), url: `${GENERATED_URL}/${result.file}`, placeholder: false }],
+        images: files.map((file) => ({
+          id: randomUUID(),
+          url: `${GENERATED_URL}/${file}`,
+          placeholder: false,
+        })),
         metadata: {
           width: result.width,
           height: result.height,
