@@ -11,6 +11,13 @@ import os
 import sys
 import uuid
 
+# The 2-rank tests below spawn fresh interpreters, which re-import this module to
+# unpickle their worker functions. Those children run without pytest, so
+# `conftest` resolves against sys.path alone and finds the root conftest.py
+# instead of the one beside this file. Putting the tests directory first keeps
+# the parent and the spawned children on tests/conftest.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -649,19 +656,26 @@ def test_distributed_checkpoint_save_collective_all_ranks(tmp_path):
     out_dir = str(tmp_path / "save_out")
     os.makedirs(out_dir, exist_ok=True)
 
-    mp.spawn(
-        _distributed_save_worker,
-        args=(2, init_file, out_dir),
-        nprocs=2,
-        join=True,
-    )
+    try:
+        mp.spawn(
+            _distributed_save_worker,
+            args=(2, init_file, out_dir),
+            nprocs=2,
+            join=True,
+        )
 
-    ckpt_path = os.path.join(out_dir, "checkpoint_1.pt")
-    assert os.path.exists(ckpt_path), "Rank 0 must write the gathered checkpoint to disk"
-    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    assert payload["step"] == 1
-    assert "model_state_dict" in payload
-    assert "optimizer_state_dict" in payload
+        ckpt_path = os.path.join(out_dir, "checkpoint_1.pt")
+        assert os.path.exists(ckpt_path), "Rank 0 must write the gathered checkpoint to disk"
+        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        assert payload["step"] == 1
+        assert "model_state_dict" in payload
+        assert "optimizer_state_dict" in payload
+    finally:
+        if os.path.exists(init_file):
+            try:
+                os.remove(init_file)
+            except OSError:
+                pass
 
 
 def test_training_loops_invoke_save_on_worker_ranks(tmp_path):
