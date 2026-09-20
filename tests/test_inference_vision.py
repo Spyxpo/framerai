@@ -228,3 +228,118 @@ def test_a_text_only_model_still_refuses_images():
     gen = _generator(tiny_config(text_only=True))
     with pytest.raises(RuntimeError, match="text_only"):
         gen.model.forward_vision(torch.randn(1, 3, 32, 32))
+
+
+# ── Interleaved marker ordering ───────────────────────────────────────────
+
+def test_audio_before_image_preserves_marker_order():
+    """Markers must be processed in the order they appear, not hardcoded.
+
+    The bug: when both <audio> and <img> were present, the implementation
+    processed <img> first (hardcoded loop order), which consumed the prompt
+    up to <img> and left <audio> as literal text. Audio was then prepended,
+    placing it before image regardless of the original order.
+
+    Fixed by finding all markers, sorting by position, and processing in order.
+    """
+    config = mm_config(mm_token_placement="interleaved")
+    gen = _generator(config)
+    image_embeds = torch.randn(1, 3, config.d_model)
+    audio_embeds = torch.randn(1, 2, config.d_model)
+
+    tokens, _ = gen._interleaved_prompt(
+        "Hear <audio> and look at <img>",
+        image_embeds=image_embeds,
+        audio_embeds=audio_embeds
+    )
+
+    audio_marker = gen.tokenizer.special_tokens["<audio>"]
+    img_marker = gen.tokenizer.special_tokens["<img>"]
+
+    audio_pos = tokens.index(audio_marker)
+    img_pos = tokens.index(img_marker)
+
+    # Audio should appear before image, preserving the original order
+    assert audio_pos < img_pos, f"Audio at {audio_pos} should be before image at {img_pos}"
+
+    # More importantly: audio should NOT be at the very beginning (after SOS)
+    # The text "Hear " should come first
+    # With the bug, audio is at position 1 (right after SOS), when it should be after "Hear "
+    sos_id = gen.tokenizer.sos_id
+    assert tokens[0] == sos_id
+    # Position 1 should be text, not the audio marker
+    assert tokens[1] != audio_marker, "Audio marker should not immediately follow SOS; text should come first"
+
+
+def test_image_before_audio_preserves_marker_order():
+    """Reverse ordering: image should appear before audio when that's the prompt order."""
+    config = mm_config(mm_token_placement="interleaved")
+    gen = _generator(config)
+    image_embeds = torch.randn(1, 3, config.d_model)
+    audio_embeds = torch.randn(1, 2, config.d_model)
+
+    tokens, _ = gen._interleaved_prompt(
+        "Look at <img> and hear <audio>",
+        image_embeds=image_embeds,
+        audio_embeds=audio_embeds
+    )
+
+    audio_marker = gen.tokenizer.special_tokens["<audio>"]
+    img_marker = gen.tokenizer.special_tokens["<img>"]
+
+    audio_pos = tokens.index(audio_marker)
+    img_pos = tokens.index(img_marker)
+
+    # Image should appear before audio, preserving the original order
+    assert img_pos < audio_pos, f"Image at {img_pos} should be before audio at {audio_pos}"
+
+    # Image marker should NOT be at the very beginning (after SOS)
+    # The text "Look at " should come first
+    sos_id = gen.tokenizer.sos_id
+    assert tokens[0] == sos_id
+    # Position 1 should be text, not a marker
+    assert tokens[1] != img_marker, "Image marker should not immediately follow SOS; text should come first"
+    assert tokens[1] != audio_marker, "Audio marker should not immediately follow SOS; text should come first"
+
+
+def test_text_segments_are_preserved_between_markers():
+    """Text before, between, and after markers must be preserved correctly."""
+    config = mm_config(mm_token_placement="interleaved")
+    gen = _generator(config)
+    image_embeds = torch.randn(1, 2, config.d_model)
+    audio_embeds = torch.randn(1, 2, config.d_model)
+
+    tokens, _ = gen._interleaved_prompt(
+        "Start <audio> middle <img> end",
+        image_embeds=image_embeds,
+        audio_embeds=audio_embeds
+    )
+
+    # Extract text tokens (byte-range tokens < 256)
+    text_tokens = [t for t in tokens if t < 256]
+    decoded = gen.tokenizer.decode(text_tokens)
+
+    # The word boundaries should be preserved
+    assert "Start" in decoded or "tart" in decoded  # 'S' might be capitalized or not
+    assert "middle" in decoded
+    assert "end" in decoded
+
+
+def test_audio_marker_without_embeddings_is_not_placed():
+    """Only markers with corresponding embeddings should be processed."""
+    config = mm_config(mm_token_placement="interleaved")
+    gen = _generator(config)
+    image_embeds = torch.randn(1, 3, config.d_model)
+
+    # No audio_embeds provided, so <audio> should remain as literal text
+    tokens, _ = gen._interleaved_prompt(
+        "Text with <audio> marker",
+        image_embeds=image_embeds,
+        audio_embeds=None
+    )
+
+    audio_marker = gen.tokenizer.special_tokens["<audio>"]
+    # The <audio> special token should not be in the sequence
+    # (it would only be there if we processed the marker and had embeddings)
+    # Instead, the literal text "<audio>" gets encoded as bytes
+    assert audio_marker not in tokens
