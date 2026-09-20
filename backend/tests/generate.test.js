@@ -69,6 +69,18 @@ test("image generation forwards an explicit width and height", async () => {
   assert.deepEqual(sizeArg(lastCall("generateImage")), { width: 1024, height: 768 });
 });
 
+test("image generation returns all requested images when num_images > 1", async () => {
+  const res = await request(app)
+    .post("/api/generate/image")
+    .send({ prompt: "a cat", num_images: 3 });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.images.length, 3);
+  assert.equal(res.body.images[0].placeholder, false);
+  assert.equal(res.body.images[1].placeholder, false);
+  assert.equal(res.body.images[2].placeholder, false);
+});
+
 test("image generation forwards an aspect ratio and size tier", async () => {
   const res = await request(app)
     .post("/api/generate/image")

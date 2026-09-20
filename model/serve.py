@@ -100,10 +100,22 @@ def make_stdio_approver(root: str, timeout_sec: float = 30.0):
     return approve
 
 
+def _save_images(images, out_dir):
+    """Save all generated images to out_dir and return their filenames."""
+    if not images:
+        return []
+    names = []
+    for img in images:
+        name = f"{uuid.uuid4()}.png"
+        img.save(os.path.join(out_dir, name))
+        names.append(name)
+    return names
+
+
 def _save_image(images, out_dir):
-    name = f"{uuid.uuid4()}.png"
-    images[0].save(os.path.join(out_dir, name))
-    return name
+    """Save images to out_dir and return the first filename for backward compatibility."""
+    names = _save_images(images, out_dir)
+    return names[0] if names else ""
 
 
 DEFAULT_VIDEO_FPS = 24
@@ -617,7 +629,8 @@ def handle(gen, op, params, mind=None, tools=None):
         )
         # The resolved size comes back so the caller can tell what was
         # understood, especially when it was read out of the prompt.
-        return {"file": _save_image(images, out_dir), **request.to_dict()}
+        files = _save_images(images, out_dir)
+        return {"file": files[0] if files else "", "files": files, **request.to_dict()}
 
     if op == "video":
         frames, request = gen.generate_video(
