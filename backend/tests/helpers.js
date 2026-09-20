@@ -75,11 +75,15 @@ function mockModel(overrides = {}) {
       metadata: { model: "test-model" },
       options,
     })),
-    generateImage: record("generateImage", (prompt, numImages, resolution) => ({
+    generateImage: record("generateImage", (prompt, numImages = 1, size = {}) => ({
       id: "img-1",
       prompt,
-      images: [{ id: "img-1", url: "/uploads/generated/img.png", placeholder: false }],
-      metadata: { resolution, numImages, model: "test-model" },
+      images: Array.from({ length: numImages || 1 }, (_, i) => ({
+        id: `img-${i + 1}`,
+        url: `/uploads/generated/img${i > 0 ? `-${i + 1}` : ""}.png`,
+        placeholder: false,
+      })),
+      metadata: { ...size, numImages, model: "test-model" },
     })),
     // Mirrors the real signature: the route passes size as its own object, and
     // the service echoes back the size the worker resolved, so the mock echoes
