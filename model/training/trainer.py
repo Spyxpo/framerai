@@ -131,12 +131,13 @@ def train_language_model(
                 f"| lr {lr:.2e} | {step / max(elapsed, 1e-9):.1f} it/s")
             running = 0.0
 
-        if step % save_interval == 0 and is_main_process():
+        if step % save_interval == 0:
             _save(model, optimizer, scheduler, config, step, output_dir, f"checkpoint_{step}.pt")
-            log(f"Checkpoint saved at step {step}")
+            if is_main_process():
+                log(f"Checkpoint saved at step {step}")
 
+    _save(model, optimizer, scheduler, config, step, output_dir, "model_final.pt")
     if is_main_process():
-        _save(model, optimizer, scheduler, config, step, output_dir, "model_final.pt")
         log(f"Training complete. Final model saved ({step} steps).")
     return step
 

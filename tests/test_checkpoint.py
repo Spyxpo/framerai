@@ -8,9 +8,13 @@ whole model fits in one file.
 """
 
 import os
+import sys
+import uuid
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from conftest import tiny_config
 from model.configs import FramerConfig
@@ -609,3 +613,138 @@ def test_sharded_load_without_scheduler_succeeds(tmp_path, gloo_distributed):
     save_sharded(model, optimizer, ckpt_no_sch, step=5, config=config, scheduler=None)
     step = load_sharded(FramerModel(config), None, ckpt_no_sch, scheduler=None)
     assert step == 5
+
+
+# --------------------------------------------------------------------------
+# Issue #231: Distributed checkpoint collective gathering and worker-rank save
+# --------------------------------------------------------------------------
+
+
+def _distributed_save_worker(rank: int, world_size: int, init_file: str, tmp_dir: str):
+    """Worker function for 2-rank Gloo collective checkpoint saving."""
+    if "GLOO_SOCKET_IFNAME" not in os.environ:
+        os.environ["GLOO_SOCKET_IFNAME"] = "lo0" if sys.platform == "darwin" else "lo"
+    torch.set_num_threads(1)
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        from model.training.trainer import _save
+
+        config = tiny_config()
+        model = FramerModel(config)
+        optimizer = build_optimizer(model, config)
+        _save(model, optimizer, None, config, step=1, output_dir=tmp_dir, filename="checkpoint_1.pt")
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def test_distributed_checkpoint_save_collective_all_ranks(tmp_path):
+    """Under distributed FSDP, all ranks must call _save so gather_full_state_dict completes."""
+    init_file = os.path.abspath(str(tmp_path / f"dist_init_save_{uuid.uuid4().hex}"))
+    out_dir = str(tmp_path / "save_out")
+    os.makedirs(out_dir, exist_ok=True)
+
+    mp.spawn(
+        _distributed_save_worker,
+        args=(2, init_file, out_dir),
+        nprocs=2,
+        join=True,
+    )
+
+    ckpt_path = os.path.join(out_dir, "checkpoint_1.pt")
+    assert os.path.exists(ckpt_path), "Rank 0 must write the gathered checkpoint to disk"
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert payload["step"] == 1
+    assert "model_state_dict" in payload
+    assert "optimizer_state_dict" in payload
+
+
+def test_training_loops_invoke_save_on_worker_ranks(tmp_path):
+    """Regression test for Issue #231: worker ranks (is_main_process=False) must invoke _save.
+
+    Previously, `if is_main_process():` prevented non-main ranks from calling `_save()`,
+    causing rank 0 to deadlock inside the `gather_full_state_dict` collective.
+    """
+    from unittest.mock import patch
+
+    from model.modules.flow import FlowDistiller
+    from model.training.distill import train_distill
+    from model.training.dpo import train_dpo
+    from model.training.trainer import train_language_model
+
+    config = tiny_config(max_steps=2)
+    model = FramerModel(config)
+    dataloader = [
+        {"input_ids": torch.zeros((1, 4), dtype=torch.long), "labels": torch.zeros((1, 4), dtype=torch.long)}
+    ]
+
+    # 1. trainer.train_language_model on worker rank
+    with patch("model.training.trainer.is_main_process", return_value=False):
+        with patch("model.training.trainer._save") as mock_save:
+            train_language_model(config, model, dataloader, torch.device("cpu"), str(tmp_path), save_interval=1)
+            # Step 1, Step 2 (save_interval=1) + final model save = 3 calls
+            assert mock_save.call_count == 3, (
+                f"Worker rank must call _save at save intervals and completion, got {mock_save.call_count}"
+            )
+            filenames = [call.args[6] for call in mock_save.call_args_list]
+            assert filenames == ["checkpoint_1.pt", "checkpoint_2.pt", "model_final.pt"]
+
+    # 2. distill.train_distill on worker rank
+    from test_distill_training import tiny_distill_config
+
+    distill_cfg = tiny_distill_config()
+    distill_cfg.max_steps = 2
+    teacher = FramerModel(distill_cfg)
+    student_cfg = FramerConfig(**{**distill_cfg.__dict__, "flow_distilled": True}).validate()
+    student = FramerModel(student_cfg)
+    distiller = FlowDistiller(teacher_substeps=distill_cfg.flow_distilled_steps)
+    distill_loader = [
+        {"target_images": torch.zeros((1, 3, 32, 32)), "input_ids": torch.zeros((1, 16), dtype=torch.long)}
+    ]
+    with patch("model.training.distill.is_main_process", return_value=False):
+        with patch("model.training.distill._save") as mock_save:
+            train_distill(
+                student_cfg, teacher, student, distill_loader, torch.device("cpu"), str(tmp_path),
+                distiller, save_interval=1,
+            )
+            assert mock_save.call_count == 3, (
+                f"Worker rank in distill must call _save at save intervals and completion, got {mock_save.call_count}"
+            )
+            filenames = [call.args[6] for call in mock_save.call_args_list]
+            assert filenames == ["checkpoint_distill_1.pt", "checkpoint_distill_2.pt", "model_distill_final.pt"]
+
+    # 3. dpo.train_dpo on worker rank
+    dpo_cfg = FramerConfig.from_preset("framer-tiny")
+    dpo_cfg.max_steps = 2
+    dpo_cfg.batch_size = 1
+    policy = FramerModel(dpo_cfg)
+    reference = FramerModel(dpo_cfg)
+    reference.eval()
+    for p in reference.parameters():
+        p.requires_grad = False
+    dpo_loader = [
+        {
+            "chosen_input_ids": torch.zeros((1, 8), dtype=torch.long),
+            "rejected_input_ids": torch.zeros((1, 8), dtype=torch.long),
+            "chosen_labels": torch.zeros((1, 8), dtype=torch.long),
+            "rejected_labels": torch.zeros((1, 8), dtype=torch.long),
+            "chosen_attention_mask": torch.ones((1, 8), dtype=torch.long),
+            "rejected_attention_mask": torch.ones((1, 8), dtype=torch.long),
+        }
+    ]
+    with patch("model.training.dpo.is_main_process", return_value=False):
+        with patch("model.training.trainer._save") as mock_save:
+            train_dpo(
+                dpo_cfg, policy, reference, dpo_loader, torch.device("cpu"), str(tmp_path),
+                save_interval=1,
+            )
+            assert mock_save.call_count == 3, (
+                f"Worker rank in DPO must call _save at save intervals and completion, got {mock_save.call_count}"
+            )
+            filenames = [call.args[6] for call in mock_save.call_args_list]
+            assert filenames == ["checkpoint_dpo_1.pt", "checkpoint_dpo_2.pt", "model_dpo_final.pt"]

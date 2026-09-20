@@ -185,14 +185,15 @@ def train_dpo(
                 f"| lr {lr:.2e} | {step / max(elapsed, 1e-9):.1f} it/s")
             running_loss = 0.0
 
-        if step % save_interval == 0 and is_main_process():
+        if step % save_interval == 0:
             from .trainer import _save
             _save(policy_model, optimizer, scheduler, config, step, output_dir, f"checkpoint_dpo_{step}.pt")
-            log(f"DPO Checkpoint saved at step {step}")
+            if is_main_process():
+                log(f"DPO Checkpoint saved at step {step}")
 
+    from .trainer import _save
+    _save(policy_model, optimizer, scheduler, config, step, output_dir, "model_dpo_final.pt")
     if is_main_process():
-        from .trainer import _save
-        _save(policy_model, optimizer, scheduler, config, step, output_dir, "model_dpo_final.pt")
         log(f"DPO Training complete. Final model saved ({step} steps).")
 
     return step
