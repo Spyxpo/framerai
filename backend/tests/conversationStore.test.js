@@ -235,3 +235,36 @@ test("create / get / append / messages / has / list all work after the fix", () 
 
   tearDown();
 });
+
+// ---------------------------------------------------------------------------
+// Bookkeeping stays internal
+// ---------------------------------------------------------------------------
+
+test("LRU bookkeeping does not leak into a serialised conversation", () => {
+  setUp({ max: 10, ttl: Infinity });
+
+  // GET /chat/conversations/:id responds with the stored object as-is, so
+  // anything enumerable on it reaches the client and drifts from the
+  // documented OpenAPI Conversation schema.
+  const conv = store.create(makeConv("serialised"));
+  store.get("serialised");
+  store.append("serialised", { role: "user", content: "hi" });
+
+  assert.deepEqual(
+    Object.keys(conv),
+    ["id", "title", "messages", "createdAt"],
+    "internal LRU/TTL fields must not be enumerable"
+  );
+  assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(conv))), [
+    "id",
+    "title",
+    "messages",
+    "createdAt",
+  ]);
+
+  // Still readable internally — hiding them must not break eviction.
+  assert.equal(typeof conv._lruSeq, "number");
+  assert.equal(typeof conv._accessedAtMs, "number");
+
+  tearDown();
+});

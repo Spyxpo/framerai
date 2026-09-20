@@ -32,8 +32,23 @@ let _seq = 0; // monotonic counter — strictly increasing across every access
 
 const conversations = new Map();
 
+/**
+ * Stamp the bookkeeping a conversation needs to be ordered and expired.
+ *
+ * The fields are defined non-enumerable because GET /chat/conversations/:id
+ * serialises the stored object as-is. Plain assignment would put _lruSeq and
+ * _accessedAtMs in that response, where they are neither documented by the
+ * OpenAPI Conversation schema nor of any use to a client. Hiding them here
+ * keeps the fix in one place rather than asking every consumer of the store
+ * to remember to strip them.
+ */
 function _touch(conv) {
-  conv._lruSeq = ++_seq;          // LRU ordering (monotonic, no ties)
+  if (!Object.prototype.hasOwnProperty.call(conv, "_lruSeq")) {
+    const hidden = { value: 0, writable: true, enumerable: false, configurable: true };
+    Object.defineProperty(conv, "_lruSeq", hidden);
+    Object.defineProperty(conv, "_accessedAtMs", hidden);
+  }
+  conv._lruSeq = ++_seq;           // LRU ordering (monotonic, no ties)
   conv._accessedAtMs = Date.now(); // TTL expiry (wall-clock)
 }
 
