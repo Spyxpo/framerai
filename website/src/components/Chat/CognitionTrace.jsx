@@ -1,5 +1,25 @@
-import { useState } from "react";
+import { Component, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+
+/**
+ * Error boundary that prevents a CognitionTrace rendering failure from
+ * crashing the surrounding message tree.
+ */
+export class CognitionTraceErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) return null;
+    return this.props.children;
+  }
+}
 
 /**
  * Collapsible cognition-trace inspector.
@@ -14,7 +34,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
  *   sampling:   Record<string, number>
  *   tools:      [{ name, input, output }]
  */
-export default function CognitionTrace({ trace }) {
+function CognitionTraceInner({ trace }) {
   const [open, setOpen] = useState(false);
 
   if (!trace || typeof trace !== "object") return null;
@@ -129,5 +149,13 @@ export default function CognitionTrace({ trace }) {
         </div>
       )}
     </div>
+  );
+}
+
+export default function CognitionTrace(props) {
+  return (
+    <CognitionTraceErrorBoundary>
+      <CognitionTraceInner {...props} />
+    </CognitionTraceErrorBoundary>
   );
 }
