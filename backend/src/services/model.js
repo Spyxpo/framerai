@@ -196,8 +196,23 @@ function validateTrace(trace) {
   }
 
   if (Array.isArray(trace.tools) && trace.tools.length > 0) {
-    cleaned.tools = trace.tools;
-    hasContent = true;
+    const validTools = trace.tools
+      .filter((t) => t && typeof t === "object")
+      .map((t) => {
+        const entry = { name: typeof t.name === "string" ? t.name : "" };
+        if (t.input !== undefined) {
+          try { entry.input = JSON.parse(JSON.stringify(t.input)); } catch { /* non-JSON-safe input dropped */ }
+        }
+        if (t.output !== undefined) {
+          try { entry.output = JSON.parse(JSON.stringify(t.output)); } catch { /* non-JSON-safe output dropped */ }
+        }
+        return entry;
+      })
+      .filter((t) => t.name !== "");
+    if (validTools.length > 0) {
+      cleaned.tools = validTools;
+      hasContent = true;
+    }
   }
 
   // Return null if trace is empty (no meaningful content)
