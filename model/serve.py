@@ -395,6 +395,10 @@ def handle(gen, op, params, mind=None, tools=None):
         if "temperature" in params and params["temperature"] is not None:
             if float(params["temperature"]) < 0:
                 raise ValueError(f"temperature must be non-negative, got {params['temperature']}")
+        if "top_p" in params and params["top_p"] is not None:
+            top_p = float(params["top_p"])
+            if top_p < 0.0 or top_p > 1.0:
+                raise ValueError(f"top_p must be in [0.0, 1.0], got {params['top_p']}")
         return_reasoning = bool(params.get("reasoning", False))
 
         messages = params.get("messages")
