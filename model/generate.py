@@ -265,21 +265,40 @@ class FramerGenerator:
         from .data import InterleavedSequenceBuilder
 
         builder = InterleavedSequenceBuilder(self.tokenizer)
-        segments, remaining = [], prompt
+        segments = []
+
+        # Find all markers with their positions to process them in order
+        markers_info = []
         for marker, embeds, kind in (
             ("<img>", image_embeds, "image"),
             ("<audio>", audio_embeds, "audio"),
         ):
-            if embeds is None:
-                continue
-            count = embeds.shape[1]
-            if marker in remaining:
-                before, remaining = remaining.split(marker, 1)
-                if before:
-                    segments.append(("text", before))
-                segments.append((kind, count))
-            else:
+            if embeds is not None and marker in prompt:
+                pos = prompt.find(marker)
+                count = embeds.shape[1]
+                markers_info.append((pos, marker, kind, count))
+
+        # Sort by position to preserve order
+        markers_info.sort(key=lambda x: x[0])
+
+        # Build segments by processing markers in order
+        remaining = prompt
+        for _, marker, kind, count in markers_info:
+            before, remaining = remaining.split(marker, 1)
+            if before:
+                segments.append(("text", before))
+            segments.append((kind, count))
+
+        # Add any remaining modalities that weren't mentioned (old behavior)
+        for marker, embeds, kind in (
+            ("<img>", image_embeds, "image"),
+            ("<audio>", audio_embeds, "audio"),
+        ):
+            if embeds is not None and marker not in prompt:
+                count = embeds.shape[1]
                 segments.insert(0, (kind, count))
+
+        # Add remaining text
         if remaining:
             segments.append(("text", remaining))
 
