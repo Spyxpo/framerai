@@ -352,6 +352,8 @@ class FramerGenerator:
             raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
         if temperature < 0:
             raise ValueError(f"temperature must be non-negative, got {temperature}")
+        if top_p < 0.0 or top_p > 1.0:
+            raise ValueError(f"top_p must be in [0.0, 1.0], got {top_p}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
@@ -472,6 +474,8 @@ class FramerGenerator:
             raise ValueError(f"max_new_tokens must be non-negative, got {max_new_tokens}")
         if temperature < 0:
             raise ValueError(f"temperature must be non-negative, got {temperature}")
+        if top_p < 0.0 or top_p > 1.0:
+            raise ValueError(f"top_p must be in [0.0, 1.0], got {top_p}")
         image_embeds = audio_embeds = None
         if image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))

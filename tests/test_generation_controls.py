@@ -559,3 +559,59 @@ def test_max_new_tokens_zero_and_positive_valid():
     out_pos = gen.generate_text("hello", max_new_tokens=5)
     assert isinstance(out_pos, str)
     assert len(out_pos) > 0
+
+
+# ===========================================================================
+# I. Top-p Validation Tests (Issue #307)
+# ===========================================================================
+
+def test_generate_text_rejects_negative_top_p():
+    """Negative top_p in generate_text raises ValueError."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+        gen.generate_text("hello", top_p=-0.1)
+
+
+def test_generate_text_rejects_top_p_greater_than_one():
+    """top_p > 1.0 in generate_text raises ValueError."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+        gen.generate_text("hello", top_p=1.5)
+
+
+def test_generate_stream_rejects_negative_top_p():
+    """Negative top_p in generate_stream raises ValueError on iteration."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+        list(gen.generate_stream("hello", top_p=-0.1))
+
+
+def test_generate_stream_rejects_top_p_greater_than_one():
+    """top_p > 1.0 in generate_stream raises ValueError on iteration."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+        list(gen.generate_stream("hello", top_p=1.5))
+
+
+def test_serve_handle_rejects_invalid_top_p():
+    """handle() rejects top_p < 0 and top_p > 1 for standard and streaming calls."""
+    gen = _make_generator()
+    for invalid in (-0.1, 1.5):
+        with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+            handle(gen, "chat", {"prompt": "hi", "top_p": invalid})
+        with pytest.raises(ValueError, match=r"top_p must be in \[0\.0, 1\.0\]"):
+            handle(gen, "chat", {"prompt": "hi", "top_p": invalid, "stream": True})
+
+
+def test_top_p_boundary_and_valid_values():
+    """top_p=0.0, top_p=1.0, and normal values like top_p=0.5 are accepted."""
+    gen = _make_generator()
+    for valid in (0, 0.0, 1, 1.0, 0.5):
+        out = gen.generate_text("hello", max_new_tokens=5, top_p=valid)
+        assert isinstance(out, str)
+
+        stream_out = list(gen.generate_stream("hello", max_new_tokens=5, top_p=valid))
+        assert isinstance(stream_out, list)
+
+        res = handle(gen, "chat", {"prompt": "hi", "top_p": valid, "max_new_tokens": 5})
+        assert "content" in res
