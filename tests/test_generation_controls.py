@@ -561,6 +561,31 @@ def test_max_new_tokens_zero_and_positive_valid():
     assert len(out_pos) > 0
 
 
+def test_max_new_tokens_error_message_identifies_invalid_value():
+    """ValueError message identifies max_new_tokens, the constraint, and the invalid value."""
+    gen = _make_generator()
+    for invalid in (-1, -10, -100):
+        with pytest.raises(ValueError) as exc_info:
+            gen.generate_text("hello", max_new_tokens=invalid)
+        msg = str(exc_info.value)
+        assert "max_new_tokens" in msg
+        assert "must be non-negative" in msg
+        assert f"got {invalid}" in msg
+
+
+def test_uncovered_entry_points_reject_negative_max_new_tokens():
+    """Uncovered entry points (generate_code, handle text/code ops) reject negative max_new_tokens."""
+    gen = _make_generator()
+    with pytest.raises(ValueError, match=r"max_new_tokens must be non-negative, got -1"):
+        gen.generate_code("def add(a, b):", max_new_tokens=-1)
+
+    with pytest.raises(ValueError, match=r"max_new_tokens must be non-negative, got -7"):
+        handle(gen, "text", {"prompt": "hi", "max_new_tokens": -7})
+
+    with pytest.raises(ValueError, match=r"max_new_tokens must be non-negative, got -3"):
+        handle(gen, "code", {"prompt": "def add(a, b):", "max_new_tokens": -3})
+
+
 # ===========================================================================
 # I. Top-p Validation Tests (Issue #307)
 # ===========================================================================
