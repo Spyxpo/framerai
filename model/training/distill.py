@@ -223,12 +223,13 @@ def train_distill(
                 f"| lr {lr:.2e} | {step / max(elapsed, 1e-9):.1f} it/s")
             running_loss = 0.0
 
-        if step % save_interval == 0 and is_main_process():
+        if step % save_interval == 0:
             _save(student_model, optimizer, scheduler, config, step, output_dir, f"checkpoint_distill_{step}.pt")
-            log(f"Distillation checkpoint saved at step {step}")
+            if is_main_process():
+                log(f"Distillation checkpoint saved at step {step}")
 
+    _save(student_model, optimizer, scheduler, config, step, output_dir, "model_distill_final.pt")
     if is_main_process():
-        _save(student_model, optimizer, scheduler, config, step, output_dir, "model_distill_final.pt")
         log(f"Distillation complete. Final student model saved ({step} steps).")
 
     return step
