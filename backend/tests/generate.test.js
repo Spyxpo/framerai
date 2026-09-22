@@ -277,3 +277,77 @@ test("understand accepts an image upload", async () => {
   assert.equal(lastCall("understandImage").args[1], "what is this");
   uploaded.push(res.body.imagePath);
 });
+
+test("audio generation forwards the prompt and returns audio payload", async () => {
+  const res = await request(app).post("/api/generate/audio").send({ prompt: "a soothing melody" });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.prompt, "a soothing melody");
+  assert.equal(res.body.id, "aud-1");
+  assert.equal(res.body.audio.url, "/uploads/generated/aud.wav");
+  const call = lastCall("generateAudio");
+  assert.deepEqual([call.args[0], call.args[1]], ["a soothing melody", {}]);
+});
+
+test("prompts exceeding the maximum length are rejected", async () => {
+  const res = await request(app)
+    .post("/api/generate/image")
+    .send({ prompt: "x".repeat(4001) });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, "VALIDATION_ERROR");
+  assert.deepEqual(res.body.details, [
+    { field: "prompt", message: "must be at most 4000 characters" },
+  ]);
+});
+
+test("attachment upload stores an image file and returns metadata", async () => {
+  const res = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("image content"), { filename: "sample.png", contentType: "image/png" });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.kind, "image");
+  assert.equal(res.body.name, "sample.png");
+  assert.equal(res.body.mimetype, "image/png");
+  assert.match(res.body.path, /^\/uploads\/images\//);
+  uploaded.push(res.body.path);
+});
+
+test("attachment upload stores a document and returns document kind", async () => {
+  const res = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("document text"), { filename: "sample.txt", contentType: "text/plain" });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.kind, "document");
+  assert.equal(res.body.name, "sample.txt");
+  assert.equal(res.body.mimetype, "text/plain");
+  assert.match(res.body.path, /^\/uploads\/documents\//);
+  uploaded.push(res.body.path);
+});
+
+test("attachment upload rejects missing file or disallowed file types", async () => {
+  const missing = await request(app).post("/api/generate/upload");
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.code, "VALIDATION_ERROR");
+  assert.deepEqual(missing.body.details, [{ field: "file", message: "is required" }]);
+
+  const badType = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("zip data"), { filename: "archive.zip", contentType: "application/zip" });
+  assert.equal(badType.status, 400);
+  assert.match(badType.body.error, /Cannot attach application\/zip/);
+});
+
+test("understand and document reject missing file uploads", async () => {
+  const understandRes = await request(app).post("/api/generate/understand").field("prompt", "describe");
+  assert.equal(understandRes.status, 400);
+  assert.equal(understandRes.body.code, "VALIDATION_ERROR");
+  assert.deepEqual(understandRes.body.details, [{ field: "image", message: "is required" }]);
+
+  const docRes = await request(app).post("/api/generate/document").field("prompt", "read");
+  assert.equal(docRes.status, 400);
+  assert.equal(docRes.body.code, "VALIDATION_ERROR");
+  assert.deepEqual(docRes.body.details, [{ field: "document", message: "is required" }]);
+});
