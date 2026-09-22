@@ -62,6 +62,55 @@ test("readSettings validates stop sequences", () => {
   assert.ok(tooMany.errors.some((e) => e.field === "settings.stop" && /16 items/.test(e.message)));
 });
 
+test("readSettings enforces per-token length limit on stop strings", () => {
+  const limit = 256;
+
+  // Exactly at the limit — accepted
+  const atLimit = parse({ stop: ["A".repeat(limit)] });
+  assert.equal(atLimit.errors.length, 0);
+  assert.deepEqual(atLimit.result.stop, ["A".repeat(limit)]);
+
+  // One character over the limit — rejected
+  const overLimit = parse({ stop: ["A".repeat(limit + 1)] });
+  assert.ok(
+    overLimit.errors.some(
+      (e) => e.field === "settings.stop[0]" && /256 characters/.test(e.message)
+    )
+  );
+  assert.equal(overLimit.result.stop, undefined);
+
+  // Mixed array: one valid, one too long — whole setting is rejected
+  const mixed = parse({ stop: ["END", "A".repeat(limit + 1)] });
+  assert.ok(
+    mixed.errors.some(
+      (e) => e.field === "settings.stop[1]" && /256 characters/.test(e.message)
+    )
+  );
+  assert.equal(mixed.result.stop, undefined);
+
+  // Multiple short strings all within the limit — accepted
+  const multipleValid = parse({ stop: ["END", "\n\n", "###"] });
+  assert.equal(multipleValid.errors.length, 0);
+  assert.deepEqual(multipleValid.result.stop, ["END", "\n\n", "###"]);
+
+  // 16 strings each at the limit — maximum valid input accepted
+  const maxValid = parse({ stop: Array(16).fill("A".repeat(limit)) });
+  assert.equal(maxValid.errors.length, 0);
+  assert.equal(maxValid.result.stop.length, 16);
+
+  // Existing 16-item cap still enforced
+  const tooManyLong = parse({ stop: Array(17).fill("A".repeat(limit)) });
+  assert.ok(
+    tooManyLong.errors.some((e) => e.field === "settings.stop" && /16 items/.test(e.message))
+  );
+
+  // Non-string values still rejected (type check takes precedence)
+  const nonString = parse({ stop: [42] });
+  assert.ok(
+    nonString.errors.some((e) => e.field === "settings.stop[0]" && /string/.test(e.message))
+  );
+});
+
 test("readSettings validates per-request seed", () => {
   const valid = parse({ seed: 42 });
   assert.equal(valid.errors.length, 0);
