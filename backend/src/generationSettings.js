@@ -32,6 +32,7 @@ const LIMITS = {
   tools: ["web", "cli"],
   repetition_penalty: { min: 0.0001, max: 10 },
   seed: { min: 0, max: 2 ** 31 - 1 },
+  stop_token_max_length: 256,
 };
 
 /**
@@ -88,6 +89,9 @@ function readStop(v) {
   for (let i = 0; i < raw.length; i++) {
     if (typeof raw[i] !== "string") {
       v.fail(`stop[${i}]`, "must be a string");
+      valid = false;
+    } else if (raw[i].length > LIMITS.stop_token_max_length) {
+      v.fail(`stop[${i}]`, `must be at most ${LIMITS.stop_token_max_length} characters`);
       valid = false;
     }
   }
