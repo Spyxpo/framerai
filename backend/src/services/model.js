@@ -169,26 +169,33 @@ function validateTrace(trace) {
   const cleaned = {};
   let hasContent = false;
 
+  // Normalise any numeric value to a finite float. NaN and ±Infinity are
+  // clamped to 0 so they cannot reach the rendering layer (#337).
+  const toFiniteOrZero = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
   if (Array.isArray(trace.memories) && trace.memories.length > 0) {
     cleaned.memories = trace.memories.map((m) => ({
       text: String(m?.text ?? ""),
-      score: Number(m?.score) || 0,
+      score: toFiniteOrZero(m?.score),
     }));
     hasContent = true;
   }
 
   if (Array.isArray(trace.affect) && trace.affect.length > 0) {
-    cleaned.affect = trace.affect.map((v) => Number(v) || 0);
+    cleaned.affect = trace.affect.map(toFiniteOrZero);
     hasContent = true;
   }
 
-  if (trace.affect_adj != null && !isNaN(Number(trace.affect_adj))) {
+  if (trace.affect_adj != null && Number.isFinite(Number(trace.affect_adj))) {
     cleaned.affect_adj = Number(trace.affect_adj);
     hasContent = true;
   }
 
   if (trace.sampling && typeof trace.sampling === "object" && !Array.isArray(trace.sampling)) {
-    const samplingEntries = Object.entries(trace.sampling).map(([k, v]) => [k, Number(v) || 0]);
+    const samplingEntries = Object.entries(trace.sampling).map(([k, v]) => [k, toFiniteOrZero(v)]);
     if (samplingEntries.length > 0) {
       cleaned.sampling = Object.fromEntries(samplingEntries);
       hasContent = true;
