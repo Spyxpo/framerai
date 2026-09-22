@@ -1,5 +1,5 @@
 /**
- * Regression tests for validateTrace() — trace.tools validation (Issue #XXX).
+ * Regression tests for validateTrace() — trace.tools validation (#337).
  *
  * Root cause: the original implementation forwarded trace.tools as-is.
  * A tool entry with a non-string name or a non-JSON-safe input/output could
@@ -150,6 +150,73 @@ test("validateTrace handles tools alongside other valid fields", () => {
   assert.equal(result.memories.length, 1);
   assert.equal(result.tools.length, 1, "only valid tool should remain");
   assert.equal(result.tools[0].name, "tool_a");
+});
+
+// ---------------------------------------------------------------------------
+// #337: non-finite numeric values must not reach the rendering layer
+// ---------------------------------------------------------------------------
+
+test("#337: validateTrace clamps non-finite memories.score to 0", () => {
+  const t = (score) => validateTrace({ memories: [{ text: "m", score }] });
+
+  // Non-finite — must be clamped to 0
+  assert.equal(t(Infinity).memories[0].score, 0,  "Infinity → 0");
+  assert.equal(t(-Infinity).memories[0].score, 0, "-Infinity → 0");
+  assert.equal(t(NaN).memories[0].score, 0,       "NaN → 0");
+
+  // Valid finite values — must pass through unchanged
+  assert.equal(t(0.85).memories[0].score, 0.85,   "0.85 preserved");
+  assert.equal(t(0).memories[0].score, 0,          "0 preserved");
+  assert.equal(t(-1).memories[0].score, -1,        "-1 preserved");
+
+  // Numeric string — converted to number, then checked
+  assert.equal(t("0.7").memories[0].score, 0.7,   "numeric string '0.7' converted");
+  assert.equal(t("Infinity").memories[0].score, 0,"string 'Infinity' clamped to 0");
+});
+
+test("#337: validateTrace clamps non-finite affect elements to 0", () => {
+  const result = validateTrace({ affect: [0.5, Infinity, -Infinity, NaN, -0.3] });
+
+  assert.ok(result, "trace should not be null");
+  assert.deepEqual(result.affect, [0.5, 0, 0, 0, -0.3]);
+});
+
+test("#337: validateTrace excludes affect_adj when non-finite", () => {
+  // Infinity
+  const r1 = validateTrace({ affect_adj: Infinity, memories: [{ text: "m", score: 0 }] });
+  assert.ok(r1, "trace not null — memories still present");
+  assert.equal(r1.affect_adj, undefined, "Infinity affect_adj must be excluded");
+
+  // -Infinity
+  const r2 = validateTrace({ affect_adj: -Infinity, memories: [{ text: "m", score: 0 }] });
+  assert.equal(r2.affect_adj, undefined, "-Infinity affect_adj must be excluded");
+
+  // NaN
+  const r3 = validateTrace({ affect_adj: NaN, memories: [{ text: "m", score: 0 }] });
+  assert.equal(r3.affect_adj, undefined, "NaN affect_adj must be excluded");
+
+  // Valid finite values — must be included
+  const r4 = validateTrace({ affect_adj: 1.5 });
+  assert.ok(r4, "trace with valid affect_adj not null");
+  assert.equal(r4.affect_adj, 1.5, "finite affect_adj preserved");
+
+  // 0 is a valid finite value
+  const r5 = validateTrace({ affect_adj: 0 });
+  assert.ok(r5);
+  assert.equal(r5.affect_adj, 0, "zero affect_adj preserved");
+});
+
+test("#337: validateTrace clamps non-finite sampling values to 0", () => {
+  const result = validateTrace({
+    sampling: { top_k: 40, top_p: Infinity, temperature: -Infinity, seed: NaN, penalty: 1.1 },
+  });
+
+  assert.ok(result, "trace should not be null");
+  assert.equal(result.sampling.top_k, 40,  "top_k preserved");
+  assert.equal(result.sampling.top_p, 0,   "Infinity top_p → 0");
+  assert.equal(result.sampling.temperature, 0, "-Infinity temperature → 0");
+  assert.equal(result.sampling.seed, 0,    "NaN seed → 0");
+  assert.equal(result.sampling.penalty, 1.1, "penalty preserved");
 });
 
 test("validateTrace does not mutate the original trace object", () => {
