@@ -371,8 +371,42 @@ export function useChat(settings) {
     // Any conversation whose stream was in flight will never receive a done/error
     // frame, so we must drain those IDs from the Set now — otherwise the
     // composer stays disabled until the page is reloaded.
+    // Additionally, any empty assistant placeholder must be converted to an
+    // error state so the user knows the request did not complete (#332).
     ws.on("close", () => {
-      for (const convId of streamingConversationIdsRef.current) {
+      const orphaned = [...streamingConversationIdsRef.current];
+      for (const convId of orphaned) {
+        if (convId === activeConversationRef.current) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last?.role === "assistant" && !last.content) {
+              updated[updated.length - 1] = {
+                ...last,
+                content: "Connection lost. Please retry.",
+                type: "error",
+              };
+            }
+            return updated;
+          });
+        } else {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== convId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const last = updated[updated.length - 1];
+              if (last?.role === "assistant" && !last.content) {
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: "Connection lost. Please retry.",
+                  type: "error",
+                };
+              }
+              return { ...c, messages: updated };
+            })
+          );
+        }
         markStreamingEnd(convId);
       }
     });
