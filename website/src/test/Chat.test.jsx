@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -852,5 +853,564 @@ describe("Chat — send flow", () => {
       await user.type(textarea, "Hello");
       expect(screen.queryByTitle("Press / to focus")).not.toBeInTheDocument();
     });
+  });
+});
+
+// ── Chat — interface layout and header ─────────────────────────────────────
+
+describe("Chat — interface layout and header", () => {
+  it("renders the chat header with title and subtitle", () => {
+    render(<Chat {...chatProps()} />);
+    expect(screen.getByRole("heading", { level: 1, name: "FramerAI" })).toBeInTheDocument();
+    expect(screen.getByText("Text, code, image, video, and audio")).toBeInTheDocument();
+  });
+
+  it("renders sidebar toggle button and applies full-width class when sidebar is closed", async () => {
+    const user = userEvent.setup();
+    const onToggleSidebar = vi.fn();
+    render(<Chat {...chatProps({ sidebarOpen: false, onToggleSidebar })} />);
+
+    const main = screen.getByRole("main", { name: "Chat" });
+    expect(main).toHaveClass("full-width");
+
+    const toggleBtn = screen.getByRole("button", { name: /open sidebar/i });
+    expect(toggleBtn).toBeInTheDocument();
+    await user.click(toggleBtn);
+    expect(onToggleSidebar).toHaveBeenCalledOnce();
+  });
+
+  it("does not render sidebar toggle button or full-width class when sidebar is open", () => {
+    render(<Chat {...chatProps({ sidebarOpen: true })} />);
+    const main = screen.getByRole("main", { name: "Chat" });
+    expect(main).not.toHaveClass("full-width");
+    expect(screen.queryByRole("button", { name: /open sidebar/i })).not.toBeInTheDocument();
+  });
+
+  it("renders generation settings button in header and invokes onOpenSettings on click", async () => {
+    const user = userEvent.setup();
+    const onOpenSettings = vi.fn();
+    render(<Chat {...chatProps({ onOpenSettings })} />);
+    const settingsBtn = screen.getByRole("button", { name: /generation settings/i });
+    await user.click(settingsBtn);
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("calls scrollIntoView on the messages end marker when messages update", () => {
+    const scrollSpy = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollSpy;
+
+    const { rerender } = render(<Chat {...chatProps({ messages: [] })} />);
+    expect(scrollSpy).toHaveBeenCalled();
+
+    scrollSpy.mockClear();
+    rerender(<Chat {...chatProps({ messages: [makeMessage({ content: "New update" })] })} />);
+    expect(scrollSpy).toHaveBeenCalled();
+  });
+});
+
+// ── Chat — empty state and prompt suggestions ──────────────────────────────
+
+describe("Chat — empty state and prompt suggestions", () => {
+  it("renders welcome screen with description and prompt suggestions when messages is empty", () => {
+    render(<Chat {...chatProps({ messages: [] })} />);
+    expect(screen.getByRole("status", { name: /welcome to framerai/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(/a multimodal ai that can generate text, code, images, video, and audio/i)
+    ).toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: /what can you do/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /write a fibonacci function/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /generate a sunset image/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /generate a voice clip/i })).toBeInTheDocument();
+  });
+
+  it("does not render welcome screen when conversation has messages", () => {
+    render(<Chat {...chatProps({ messages: [makeMessage({ role: "user", content: "Hello" })] })} />);
+    expect(screen.queryByRole("status", { name: /welcome to framerai/i })).not.toBeInTheDocument();
+  });
+
+  it("sends expected prompt text when each suggestion button is clicked", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    render(<Chat {...chatProps({ onSend })} />);
+
+    await user.click(screen.getByRole("button", { name: /write a fibonacci function/i }));
+    expect(onSend).toHaveBeenCalledWith("Write a fibonacci function in Python");
+
+    await user.click(screen.getByRole("button", { name: /generate a sunset image/i }));
+    expect(onSend).toHaveBeenCalledWith("Generate an image of a sunset over mountains");
+
+    await user.click(screen.getByRole("button", { name: /generate a voice clip/i }));
+    expect(onSend).toHaveBeenCalledWith("Generate audio that says hello and welcome");
+  });
+});
+
+// ── Chat — message composition and input validation ────────────────────────
+
+describe("Chat — message composition and input validation", () => {
+  it("prevents submission when input contains only whitespace", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    render(<Chat {...chatProps({ onSend })} />);
+
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+
+    await user.type(textarea, "   \n   \t  ");
+    expect(sendBtn).toBeDisabled();
+
+    await user.type(textarea, "{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("adjusts textarea height style during typing", async () => {
+    const user = userEvent.setup();
+    render(<Chat {...chatProps()} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+
+    await user.type(textarea, "Hello world line");
+    expect(textarea.style.height).toBeDefined();
+  });
+});
+
+// ── Chat — mode selection and submission resets ────────────────────────────
+
+describe("Chat — mode selection and submission resets", () => {
+  it("defaults to text mode and toggles aria-pressed when selecting modes", async () => {
+    const user = userEvent.setup();
+    render(<Chat {...chatProps()} />);
+
+    const textBtn = screen.getByRole("button", { name: "Text mode" });
+    const codeBtn = screen.getByRole("button", { name: "Code mode" });
+    const imgBtn = screen.getByRole("button", { name: "Image generation mode" });
+    const videoBtn = screen.getByRole("button", { name: "Video generation mode" });
+    const audioBtn = screen.getByRole("button", { name: "Audio generation mode" });
+
+    expect(textBtn).toHaveAttribute("aria-pressed", "true");
+    expect(codeBtn).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(codeBtn);
+    expect(codeBtn).toHaveAttribute("aria-pressed", "true");
+    expect(textBtn).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(videoBtn);
+    expect(videoBtn).toHaveAttribute("aria-pressed", "true");
+    expect(codeBtn).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(audioBtn);
+    expect(audioBtn).toHaveAttribute("aria-pressed", "true");
+    expect(videoBtn).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(imgBtn);
+    expect(imgBtn).toHaveAttribute("aria-pressed", "true");
+    expect(audioBtn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("resets message type back to text after sending a message in another mode", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    render(<Chat {...chatProps({ onSend })} />);
+
+    const codeBtn = screen.getByRole("button", { name: "Code mode" });
+    const textBtn = screen.getByRole("button", { name: "Text mode" });
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+
+    // Switch to code mode and send
+    await user.click(codeBtn);
+    await user.type(textarea, "def add(a, b): return a + b");
+    await user.click(sendBtn);
+
+    expect(onSend).toHaveBeenCalledWith("def add(a, b): return a + b", "code", []);
+
+    // Mode button state should revert to text mode
+    expect(textBtn).toHaveAttribute("aria-pressed", "true");
+    expect(codeBtn).toHaveAttribute("aria-pressed", "false");
+
+    // Subsequent send should send as text mode
+    await user.type(textarea, "How does this look?");
+    await user.click(sendBtn);
+    expect(onSend).toHaveBeenCalledWith("How does this look?", "text", []);
+  });
+});
+
+// ── Chat — loading, busy, and skeleton states ──────────────────────────────
+
+describe("Chat — loading, busy, and skeleton states", () => {
+  it("renders spinning loader and busy class when loading or streaming", () => {
+    const { container, rerender } = render(<Chat {...chatProps({ loading: true })} />);
+
+    const inputWrapper = container.querySelector(".input-wrapper");
+    expect(inputWrapper).toHaveClass("busy");
+
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+    expect(sendBtn).toBeDisabled();
+    expect(sendBtn.querySelector(".spin")).toBeInTheDocument();
+
+    rerender(<Chat {...chatProps({ streaming: true })} />);
+    expect(inputWrapper).toHaveClass("busy");
+    expect(sendBtn.querySelector(".spin")).toBeInTheDocument();
+  });
+
+  it("renders typing indicator while loading or streaming when last message is not assistant", () => {
+    const messages = [makeMessage({ role: "user", content: "Tell me a joke" })];
+    const { rerender } = render(<Chat {...chatProps({ messages, loading: true })} />);
+
+    expect(screen.getByRole("status", { name: /framerai is typing/i })).toBeInTheDocument();
+
+    // When an assistant message is added, typing indicator in chat container is removed
+    rerender(
+      <Chat
+        {...chatProps({
+          messages: [
+            ...messages,
+            makeMessage({ id: "asst-1", role: "assistant", content: "Why did the chicken..." }),
+          ],
+          loading: true,
+        })}
+      />
+    );
+    expect(screen.queryByRole("status", { name: /framerai is typing/i })).not.toBeInTheDocument();
+  });
+
+  it("renders message skeletons and disables composer when loadingMessages is true", () => {
+    render(<Chat {...chatProps({ loadingMessages: true, messages: [] })} />);
+
+    const skeletonContainer = screen.getByLabelText("Loading messages");
+    expect(skeletonContainer).toHaveAttribute("aria-busy", "true");
+    expect(document.querySelector(".messages-loading")).toBeInTheDocument();
+
+    // Welcome screen must not be displayed while loading conversation messages
+    expect(screen.queryByRole("status", { name: /welcome to framerai/i })).not.toBeInTheDocument();
+
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    expect(textarea).toBeDisabled();
+    expect(textarea).toHaveAttribute("placeholder", "Loading conversation…");
+    expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
+  });
+
+  it("auto-focuses textarea when loading or streaming finishes", () => {
+    const { rerender } = render(<Chat {...chatProps({ loading: true })} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    expect(document.activeElement).not.toBe(textarea);
+
+    rerender(<Chat {...chatProps({ loading: false, streaming: false })} />);
+    expect(document.activeElement).toBe(textarea);
+
+    const settingsBtn = screen.getByRole("button", { name: /generation settings/i });
+    settingsBtn.focus();
+    expect(document.activeElement).toBe(settingsBtn);
+
+    rerender(<Chat {...chatProps({ streaming: true })} />);
+    rerender(<Chat {...chatProps({ streaming: false })} />);
+    expect(document.activeElement).toBe(textarea);
+  });
+});
+
+// ── Chat — error handling and retry flow ───────────────────────────────────
+
+describe("Chat — error handling and retry flow", () => {
+  it("renders retry button on trailing error message and calls onSend on click", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    const messages = [
+      makeMessage({ id: "user-1", role: "user", content: "Generate speech", type: "audio" }),
+      makeMessage({ id: "err-1", role: "assistant", type: "error", content: "Model unavailable" }),
+    ];
+
+    render(<Chat {...chatProps({ messages, onSend })} />);
+
+    const retryBtn = screen.getByRole("button", { name: /retry/i });
+    expect(retryBtn).toBeInTheDocument();
+
+    await user.click(retryBtn);
+    expect(onSend).toHaveBeenCalledWith("Generate speech", "audio");
+  });
+
+  it("does not render retry button if the error message is not the last message", () => {
+    const messages = [
+      makeMessage({ id: "user-1", role: "user", content: "First" }),
+      makeMessage({ id: "err-1", role: "assistant", type: "error", content: "Failed" }),
+      makeMessage({ id: "user-2", role: "user", content: "Second" }),
+    ];
+    render(<Chat {...chatProps({ messages })} />);
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+
+  it("does not render retry button if there is no preceding user message", () => {
+    const messages = [
+      makeMessage({ id: "err-1", role: "assistant", type: "error", content: "Failed to connect" }),
+    ];
+    render(<Chat {...chatProps({ messages })} />);
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+});
+
+// ── Chat — audio input and transcription flow ──────────────────────────────
+
+describe("Chat — audio input and transcription flow", () => {
+  it("transcribes uploaded audio file and inserts text into the input", async () => {
+    const user = userEvent.setup();
+    const { api } = await import("../services/api");
+    const transcribeSpy = vi.spyOn(api, "transcribe").mockResolvedValue({ text: "transcribed speech text" });
+
+    const { container } = render(<Chat {...chatProps()} />);
+    const audioInput = container.querySelector('input[type="file"][accept="audio/*"]');
+    const file = new File(["fake-audio"], "speech.mp3", { type: "audio/mp3" });
+
+    await user.upload(audioInput, file);
+
+    expect(transcribeSpy).toHaveBeenCalledWith(file);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    expect(textarea).toHaveValue("transcribed speech text");
+    expect(document.activeElement).toBe(textarea);
+
+    transcribeSpy.mockRestore();
+  });
+
+  it("appends transcribed text with a space when input already has content", async () => {
+    const user = userEvent.setup();
+    const { api } = await import("../services/api");
+    const transcribeSpy = vi.spyOn(api, "transcribe").mockResolvedValue({ text: "additional voice" });
+
+    const { container } = render(<Chat {...chatProps()} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    await user.type(textarea, "Initial text");
+
+    const audioInput = container.querySelector('input[type="file"][accept="audio/*"]');
+    await user.upload(audioInput, new File(["fake-audio"], "voice.wav", { type: "audio/wav" }));
+
+    expect(textarea).toHaveValue("Initial text additional voice");
+    transcribeSpy.mockRestore();
+  });
+
+  it("shows error banner when transcription returns empty text", async () => {
+    const user = userEvent.setup();
+    const { api } = await import("../services/api");
+    const transcribeSpy = vi.spyOn(api, "transcribe").mockResolvedValue({ text: "" });
+
+    const { container } = render(<Chat {...chatProps()} />);
+    const audioInput = container.querySelector('input[type="file"][accept="audio/*"]');
+    await user.upload(audioInput, new File(["fake-audio"], "empty.wav", { type: "audio/wav" }));
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/transcription returned empty text/i);
+
+    // Dismissing error removes the banner
+    await user.click(screen.getByRole("button", { name: /dismiss error/i }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    transcribeSpy.mockRestore();
+  });
+
+  it("shows error banner when audio transcription request fails", async () => {
+    const user = userEvent.setup();
+    const { api } = await import("../services/api");
+    const transcribeSpy = vi.spyOn(api, "transcribe").mockRejectedValue(new Error("Network timeout"));
+
+    const { container } = render(<Chat {...chatProps()} />);
+    const audioInput = container.querySelector('input[type="file"][accept="audio/*"]');
+    await user.upload(audioInput, new File(["fake-audio"], "voice.wav", { type: "audio/wav" }));
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/transcription failed: network timeout/i);
+
+    transcribeSpy.mockRestore();
+  });
+
+  it("handles microphone permission errors gracefully", async () => {
+    const user = userEvent.setup();
+    const originalMediaDevices = navigator.mediaDevices;
+
+    // Simulate missing getUserMedia
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+
+    render(<Chat {...chatProps()} />);
+    const micBtn = screen.getByRole("button", { name: /record from mic/i });
+    await user.click(micBtn);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/microphone access is not supported/i);
+
+    // Simulate Permission Denied
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: {
+        getUserMedia: vi.fn().mockRejectedValue(new DOMException("Denied", "NotAllowedError")),
+      },
+      configurable: true,
+      writable: true,
+    });
+
+    await user.click(micBtn);
+    expect(screen.getByRole("alert")).toHaveTextContent(/microphone permission denied/i);
+
+    // Simulate Not Found
+    navigator.mediaDevices.getUserMedia.mockRejectedValue(new DOMException("NotFound", "NotFoundError"));
+    await user.click(micBtn);
+    expect(screen.getByRole("alert")).toHaveTextContent(/no microphone found/i);
+
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: originalMediaDevices,
+      configurable: true,
+      writable: true,
+    });
+  });
+});
+
+// ── Chat — focus refs ──────────────────────────────────────────────────────
+
+describe("Chat — focus refs", () => {
+  it("focuses the first suggestion via focusRef when welcome screen is displayed", () => {
+    const focusRef = { current: null };
+    render(<Chat {...chatProps({ focusRef, messages: [] })} />);
+
+    expect(typeof focusRef.current).toBe("function");
+    focusRef.current();
+
+    const firstSuggestion = screen.getByRole("button", { name: /what can you do/i });
+    expect(document.activeElement).toBe(firstSuggestion);
+  });
+
+  it("focuses textarea via focusRef when suggestions are not shown", () => {
+    const focusRef = { current: null };
+    render(<Chat {...chatProps({ focusRef, messages: [makeMessage()] })} />);
+
+    focusRef.current();
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it("focuses textarea via textareaFocusRef and settings button via chatSettingsFocusRef", () => {
+    const textareaFocusRef = { current: null };
+    const chatSettingsFocusRef = { current: null };
+    render(<Chat {...chatProps({ textareaFocusRef, chatSettingsFocusRef })} />);
+
+    textareaFocusRef.current();
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: /message input/i }));
+
+    chatSettingsFocusRef.current();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: /generation settings/i }));
+  });
+});
+
+// ── Chat — full user chat flow integration ─────────────────────────────────
+
+describe("Chat — full user chat flow integration", () => {
+  function StatefulChatFlow({ onSendHandler }) {
+    const [messages, setMessages] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    const handleSend = async (content, type, attachments) => {
+      const userMsg = makeMessage({
+        id: `user-${Date.now()}-${Math.random()}`,
+        role: "user",
+        content,
+        type,
+      });
+      setMessages((prev) => [...prev, userMsg]);
+      setLoading(true);
+
+      try {
+        const response = await onSendHandler(content, type, attachments);
+        setMessages((prev) => [
+          ...prev,
+          makeMessage({
+            id: `asst-${Date.now()}-${Math.random()}`,
+            role: "assistant",
+            content: response.content,
+            type: response.type || "text",
+          }),
+        ]);
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          makeMessage({
+            id: `err-${Date.now()}-${Math.random()}`,
+            role: "assistant",
+            content: err.message || "Failed",
+            type: "error",
+          }),
+        ]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    return (
+      <Chat
+        {...chatProps({
+          messages,
+          loading,
+          onSend: handleSend,
+        })}
+      />
+    );
+  }
+
+  it("completes full chat cycle: welcome screen -> enter message -> submit -> receive response", async () => {
+    const user = userEvent.setup();
+    const onSendHandler = vi.fn().mockResolvedValue({
+      content: "Here is your detailed answer.",
+      type: "text",
+    });
+
+    render(<StatefulChatFlow onSendHandler={onSendHandler} />);
+
+    // 1. Initial state: Welcome screen is visible
+    expect(screen.getByText(/welcome to framerai/i)).toBeInTheDocument();
+
+    // 2. Compose message
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    await user.type(textarea, "What is machine learning?");
+
+    // 3. Send message
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    // User message should be visible and welcome screen removed
+    expect(await screen.findByText("What is machine learning?")).toBeInTheDocument();
+    expect(screen.queryByText(/welcome to framerai/i)).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("");
+
+    // 4. Response arrives from assistant
+    expect(await screen.findByText("Here is your detailed answer.")).toBeInTheDocument();
+
+    // 5. Send button is re-enabled once response arrives and user can send follow-up
+    await user.type(textarea, "Follow up question");
+    expect(screen.getByRole("button", { name: /send/i })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(await screen.findByText("Follow up question")).toBeInTheDocument();
+  });
+
+  it("handles error response in full chat flow and allows successful retry", async () => {
+    const user = userEvent.setup();
+    const onSendHandler = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Inference service overloaded"))
+      .mockResolvedValueOnce({ content: "Recovered response on retry", type: "text" });
+
+    render(<StatefulChatFlow onSendHandler={onSendHandler} />);
+
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    await user.type(textarea, "Calculate pi");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    // Error message appears in assistant bubble
+    const errorBubble = await screen.findByText("Inference service overloaded");
+    expect(errorBubble).toBeInTheDocument();
+
+    // Retry button is available
+    const retryBtn = screen.getByRole("button", { name: /retry/i });
+    expect(retryBtn).toBeInTheDocument();
+
+    // Click retry -> second call resolves successfully
+    await user.click(retryBtn);
+
+    expect(await screen.findByText("Recovered response on retry")).toBeInTheDocument();
+    // After retry succeeds, the trailing message is no longer an error so no retry button
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
   });
 });
