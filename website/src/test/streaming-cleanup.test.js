@@ -174,6 +174,59 @@ describe("Streaming cleanup on disconnect / deletion", () => {
     expect(result.current.conversations.find((c) => c.id === convId)).toBeUndefined();
   });
 
+  // ─── #332: close converts empty placeholder to connection-lost error ────────
+  it("#332: disconnect with empty assistant placeholder fills it with a connection-lost error", async () => {
+    const { result, act, waitFor, typing, close } = await setupHook();
+
+    await act(async () => { await result.current.createConversation(); });
+    const convId = result.current.activeConversation;
+    await act(async () => { result.current.sendMessage("Hello", "text", []); });
+    await waitFor(() => expect(result.current.messages).toHaveLength(2));
+
+    // Placeholder starts empty
+    expect(result.current.messages[1].role).toBe("assistant");
+    expect(result.current.messages[1].content).toBe("");
+
+    await act(async () => { typing()({ conversationId: convId }); });
+    expect(result.current.streaming).toBe(true);
+
+    // Socket closes before any done/error frame arrives
+    await act(async () => { close()(); });
+
+    expect(result.current.streaming).toBe(false);
+    const lastMsg = result.current.messages[result.current.messages.length - 1];
+    expect(lastMsg.role).toBe("assistant");
+    expect(lastMsg.content).toBe("Connection lost. Please retry.");
+    expect(lastMsg.type).toBe("error");
+  });
+
+  // ─── #332: close does not overwrite a placeholder that already has content ─
+  it("#332: disconnect does not overwrite a placeholder that already received content", async () => {
+    const { result, act, waitFor, stream, typing, close } = await setupHook();
+
+    await act(async () => { await result.current.createConversation(); });
+    const convId = result.current.activeConversation;
+    await act(async () => { result.current.sendMessage("Hello", "text", []); });
+    await waitFor(() => expect(result.current.messages).toHaveLength(2));
+
+    await act(async () => { typing()({ conversationId: convId }); });
+
+    // A stream token arrives — placeholder now has content
+    await act(async () => {
+      stream()({ conversationId: convId, content: "Partial answer", done: false, responseType: "text" });
+    });
+    await waitFor(() => expect(result.current.messages[1].content).toBe("Partial answer"));
+
+    // Socket closes mid-stream
+    await act(async () => { close()(); });
+
+    expect(result.current.streaming).toBe(false);
+    // Existing content must be preserved — the `!last.content` guard protects it
+    const lastMsg = result.current.messages[result.current.messages.length - 1];
+    expect(lastMsg.content).toBe("Partial answer");
+    expect(lastMsg.type).not.toBe("error");
+  });
+
   // ─── 4. Deleting one streaming conv does not affect another ───────────────
   it("deleting one streaming conversation must not affect another active stream", async () => {
     const { result, act, waitFor, stream, typing } = await setupHook();
