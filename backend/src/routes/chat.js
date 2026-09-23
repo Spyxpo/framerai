@@ -90,7 +90,7 @@ router.post(
       attachments,
       timestamp: new Date().toISOString(),
     };
-    conv.messages.push(userMessage);
+    conversations.append(conv.id, userMessage);
 
     // Update title from first message
     if (conv.messages.length === 1) {
@@ -121,7 +121,7 @@ router.post(
       metadata: response.metadata || {},
       timestamp: new Date().toISOString(),
     };
-    conv.messages.push(assistantMessage);
+    conversations.append(conv.id, assistantMessage);
     res.json(assistantMessage);
   })
 );

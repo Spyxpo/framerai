@@ -18,6 +18,10 @@
  *  2. If the store is still at or above the cap, the least-recently-accessed
  *     conversation is evicted to make room.
  *
+ * Within each conversation, messages are capped at _maxMessages. When a new
+ * message would exceed the cap, the oldest messages are trimmed from the front
+ * so that the newest _maxMessages messages are retained in order.
+ *
  * LRU order uses a monotonic sequence number (_accessSeq) so entries accessed
  * within the same millisecond still have a strict, deterministic ordering.
  * TTL checks use Date.now() (wall-clock milliseconds).
@@ -28,6 +32,7 @@
 
 let _max = Number(process.env.FRAMER_MAX_CONVERSATIONS) || 1000;
 let _ttl = Number(process.env.FRAMER_CONVERSATION_TTL_MS) || 24 * 60 * 60 * 1000;
+let _maxMessages = Number(process.env.FRAMER_MAX_MESSAGES_PER_CONVERSATION) || 1000;
 let _seq = 0; // monotonic counter — strictly increasing across every access
 
 const conversations = new Map();
@@ -123,6 +128,9 @@ function append(id, message) {
   if (!conv) return false;
   _touch(conv);
   conv.messages.push(message);
+  if (conv.messages.length > _maxMessages) {
+    conv.messages.splice(0, conv.messages.length - _maxMessages);
+  }
   return true;
 }
 
@@ -134,9 +142,10 @@ function clear() {
  * Override growth limits. Pass no arguments to restore production defaults.
  * For tests only — not part of the public API.
  */
-function _resetLimits({ max, ttl } = {}) {
+function _resetLimits({ max, ttl, maxMessages } = {}) {
   _max = max !== undefined ? max : (Number(process.env.FRAMER_MAX_CONVERSATIONS) || 1000);
   _ttl = ttl !== undefined ? ttl : (Number(process.env.FRAMER_CONVERSATION_TTL_MS) || 24 * 60 * 60 * 1000);
+  _maxMessages = maxMessages !== undefined ? maxMessages : (Number(process.env.FRAMER_MAX_MESSAGES_PER_CONVERSATION) || 1000);
 }
 
 module.exports = {
@@ -144,4 +153,5 @@ module.exports = {
   _map: conversations,
   _evict,
   _resetLimits,
+  get _maxMessages() { return _maxMessages; },
 };
