@@ -237,6 +237,96 @@ test("create / get / append / messages / has / list all work after the fix", () 
 });
 
 // ---------------------------------------------------------------------------
+// Per-conversation message cap (issue #338)
+// ---------------------------------------------------------------------------
+
+test("messages per conversation never exceed the configured cap", () => {
+  setUp({ max: 100, ttl: Infinity, maxMessages: 5 });
+
+  store.create(makeConv("msg-cap"));
+  for (let i = 0; i < 8; i++) {
+    store.append("msg-cap", { role: "user", content: `message ${i}` });
+  }
+
+  const msgs = store.messages("msg-cap");
+  assert.equal(
+    msgs.length,
+    5,
+    `Expected at most 5 messages, got ${msgs.length}. ` +
+      "The per-conversation message cap is not being enforced."
+  );
+
+  tearDown();
+});
+
+test("oldest messages are evicted when the cap is hit", () => {
+  setUp({ max: 100, ttl: Infinity, maxMessages: 3 });
+
+  store.create(makeConv("evict-order"));
+  store.append("evict-order", { role: "user", content: "first" });
+  store.append("evict-order", { role: "user", content: "second" });
+  store.append("evict-order", { role: "user", content: "third" });
+  // Fourth message — "first" should be evicted
+  store.append("evict-order", { role: "user", content: "fourth" });
+
+  const msgs = store.messages("evict-order");
+  assert.equal(msgs.length, 3, "Should have exactly 3 messages");
+  assert.equal(msgs[0].content, "second", "Oldest (first) message must be evicted");
+  assert.equal(msgs[1].content, "third");
+  assert.equal(msgs[2].content, "fourth", "Newest message must be retained");
+
+  tearDown();
+});
+
+test("newest messages are retained in original order after eviction", () => {
+  setUp({ max: 100, ttl: Infinity, maxMessages: 4 });
+
+  store.create(makeConv("order-check"));
+  const contents = ["a", "b", "c", "d", "e", "f"];
+  for (const c of contents) {
+    store.append("order-check", { role: "user", content: c });
+  }
+
+  const msgs = store.messages("order-check");
+  assert.equal(msgs.length, 4);
+  // Newest 4 of ["a","b","c","d","e","f"] are ["c","d","e","f"]
+  assert.deepEqual(
+    msgs.map((m) => m.content),
+    ["c", "d", "e", "f"],
+    "Messages must be the newest N in original ascending order"
+  );
+
+  tearDown();
+});
+
+test("conversations below the message cap are unaffected", () => {
+  setUp({ max: 100, ttl: Infinity, maxMessages: 10 });
+
+  store.create(makeConv("below-cap"));
+  store.append("below-cap", { role: "user", content: "one" });
+  store.append("below-cap", { role: "assistant", content: "two" });
+
+  const msgs = store.messages("below-cap");
+  assert.equal(msgs.length, 2, "Under-cap conversations must not lose any messages");
+  assert.equal(msgs[0].content, "one");
+  assert.equal(msgs[1].content, "two");
+
+  tearDown();
+});
+
+test("_resetLimits restores default maxMessages", () => {
+  setUp({ max: 100, ttl: Infinity, maxMessages: 2 });
+  assert.equal(store._maxMessages, 2, "Override should take effect");
+
+  tearDown(); // restores production defaults
+  assert.equal(
+    store._maxMessages,
+    Number(process.env.FRAMER_MAX_MESSAGES_PER_CONVERSATION) || 1000,
+    "Default should be restored"
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Bookkeeping stays internal
 // ---------------------------------------------------------------------------
 
