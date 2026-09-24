@@ -7,6 +7,17 @@ const { mockModel, startServer } = require("./helpers");
 // Default mock for most tests
 mockModel();
 
+// Conversation ids are validated at the WebSocket boundary (#352), so frames
+// carry well-formed UUIDs. These stand in for the placeholder strings the
+// frames used to send; the ids are still distinct per test.
+const CONV = {
+  main: "11111111-1111-4111-8111-111111111111",
+  text: "22222222-2222-4222-8222-222222222222",
+  clientA: "33333333-3333-4333-8333-333333333333",
+  disconnect: "44444444-4444-4444-8444-444444444444",
+  deny: "55555555-5555-4555-8555-555555555555",
+};
+
 /**
  * Open a connection, send one frame, and collect every reply until the stream
  * finishes, an error arrives, or the wait times out.
@@ -41,7 +52,7 @@ test("a chat frame is acknowledged and streamed to completion", async (t) => {
   const messages = await exchange(server.wsUrl, {
     type: "chat",
     content: "hello there",
-    conversationId: "abc",
+    conversationId: CONV.main,
   });
 
   const types = messages.map((m) => m.type);
@@ -68,7 +79,7 @@ test("chunks arrive in order and each extends the previous one", async (t) => {
   const messages = await exchange(server.wsUrl, {
     type: "chat",
     content: "one two three four",
-    conversationId: "abc",
+    conversationId: CONV.main,
   });
 
   const streamed = messages.filter((m) => m.type === "stream");
@@ -84,7 +95,7 @@ test("a frame with no content is answered with an error, not a stream", async (t
   const server = await startServer();
   t.after(() => server.stop());
 
-  const [message] = await exchange(server.wsUrl, { type: "chat", conversationId: "abc" });
+  const [message] = await exchange(server.wsUrl, { type: "chat", conversationId: CONV.main });
 
   assert.equal(message.type, "error");
   assert.match(message.message, /content is required/);
@@ -160,7 +171,7 @@ test("existing text streaming still works after audio changes", async (t) => {
   const messages = await exchange(server.wsUrl, {
     type: "chat",
     content: "hello there",
-    conversationId: "text-test",
+    conversationId: CONV.text,
   });
 
   const types = messages.map((m) => m.type);
@@ -211,7 +222,7 @@ test("WebSocket approval request round trip and session isolation", async (t) =>
   clientA.on("message", (data) => messagesA.push(JSON.parse(data)));
   clientB.on("message", (data) => messagesB.push(JSON.parse(data)));
 
-  clientA.send(JSON.stringify({ type: "chat", content: "run ls", conversationId: "conv-A" }));
+  clientA.send(JSON.stringify({ type: "chat", content: "run ls", conversationId: CONV.clientA }));
 
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(triggerApproval, "triggerApproval callback should be passed");
@@ -269,7 +280,7 @@ test("WebSocket disconnect fails closed pending approvals", async (t) => {
   const ws = new WebSocket(server.wsUrl);
   await new Promise((r) => ws.on("open", r));
 
-  ws.send(JSON.stringify({ type: "chat", content: "run task", conversationId: "conv-disc" }));
+  ws.send(JSON.stringify({ type: "chat", content: "run task", conversationId: CONV.disconnect }));
   await new Promise((r) => setTimeout(r, 50));
 
   let approvalResult = null;
@@ -308,7 +319,7 @@ test("WebSocket denyEverything mode automatically denies future requests", async
   const ws = new WebSocket(server.wsUrl);
   await new Promise((r) => ws.on("open", r));
 
-  ws.send(JSON.stringify({ type: "chat", content: "cmd 1", conversationId: "c1" }));
+  ws.send(JSON.stringify({ type: "chat", content: "cmd 1", conversationId: CONV.deny }));
   await new Promise((r) => setTimeout(r, 50));
 
   let firstApproved = null;
