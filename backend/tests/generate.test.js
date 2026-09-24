@@ -351,3 +351,71 @@ test("understand and document reject missing file uploads", async () => {
   assert.equal(docRes.body.code, "VALIDATION_ERROR");
   assert.deepEqual(docRes.body.details, [{ field: "document", message: "is required" }]);
 });
+
+// ---------------------------------------------------------------------------
+// #342: stored extension must come from the validated MIME type, never from
+//       file.originalname — prevents stored XSS via extension mismatch
+// ---------------------------------------------------------------------------
+
+test("#342: /upload — image/jpeg with .html filename is stored as .jpg, not .html", async () => {
+  const res = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("fake jpeg"), { filename: "payload.html", contentType: "image/jpeg" });
+
+  assert.equal(res.status, 201);
+  assert.match(res.body.path, /\.jpg$/, "stored extension must be .jpg, not .html");
+  uploaded.push(res.body.path);
+});
+
+test("#342: /upload — image/png with .js filename is stored as .png, not .js", async () => {
+  const res = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("fake png"), { filename: "payload.js", contentType: "image/png" });
+
+  assert.equal(res.status, 201);
+  assert.match(res.body.path, /\.png$/, "stored extension must be .png, not .js");
+  uploaded.push(res.body.path);
+});
+
+test("#342: /transcribe — audio/wav with .html filename is stored as .wav, not .html", async () => {
+  const res = await request(app)
+    .post("/api/generate/transcribe")
+    .attach("audio", Buffer.from("fake wav"), { filename: "payload.html", contentType: "audio/wav" });
+
+  assert.equal(res.status, 200);
+  assert.match(res.body.audioPath, /\.wav$/, "stored extension must be .wav, not .html");
+  uploaded.push(res.body.audioPath);
+});
+
+test("#342: /document — application/pdf with .html filename is stored as .pdf, not .html", async () => {
+  const res = await request(app)
+    .post("/api/generate/document")
+    .attach("document", Buffer.from("%PDF-1.4 fake"), { filename: "payload.html", contentType: "application/pdf" })
+    .field("prompt", "summarize");
+
+  assert.equal(res.status, 200);
+  assert.match(res.body.documentPath, /\.pdf$/, "stored extension must be .pdf, not .html");
+  uploaded.push(res.body.documentPath);
+});
+
+test("#342: /understand — image/png with .html filename is stored as .png, not .html", async () => {
+  const res = await request(app)
+    .post("/api/generate/understand")
+    .attach("image", Buffer.from("fake image"), { filename: "payload.html", contentType: "image/png" })
+    .field("prompt", "describe");
+
+  assert.equal(res.status, 200);
+  assert.match(res.body.imagePath, /\.png$/, "stored extension must be .png, not .html");
+  uploaded.push(res.body.imagePath);
+});
+
+test("#342: original filename is preserved in the name field but does not control the stored path", async () => {
+  const res = await request(app)
+    .post("/api/generate/upload")
+    .attach("file", Buffer.from("fake jpeg"), { filename: "my-photo.html", contentType: "image/jpeg" });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.name, "my-photo.html", "original filename must be preserved as metadata");
+  assert.match(res.body.path, /\.jpg$/, "stored path must use MIME-derived extension, not .html");
+  uploaded.push(res.body.path);
+});
