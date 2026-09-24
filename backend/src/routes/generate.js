@@ -63,6 +63,46 @@ function bucketForMime(mimetype = "") {
   return "images";
 }
 
+// Server-side MIME → extension map. The stored extension is derived exclusively
+// from the validated MIME type, never from the client-supplied filename, so an
+// upload that passes the MIME filter cannot be stored with an executable
+// extension such as .html or .js (Issue #342).
+const MIME_EXTENSIONS = {
+  // images
+  "image/jpeg":    ".jpg",
+  "image/jpg":     ".jpg",
+  "image/png":     ".png",
+  "image/gif":     ".gif",
+  "image/webp":    ".webp",
+  "image/svg+xml": ".svg",
+  "image/bmp":     ".bmp",
+  "image/tiff":    ".tiff",
+  "image/avif":    ".avif",
+  "image/heic":    ".heic",
+  "image/heif":    ".heif",
+  "image/x-icon":  ".ico",
+  // audio
+  "audio/wav":     ".wav",
+  "audio/wave":    ".wav",
+  "audio/x-wav":   ".wav",
+  "audio/mpeg":    ".mp3",
+  "audio/mp3":     ".mp3",
+  "audio/ogg":     ".ogg",
+  "audio/flac":    ".flac",
+  "audio/aac":     ".aac",
+  "audio/mp4":     ".m4a",
+  "audio/x-m4a":   ".m4a",
+  "audio/webm":    ".webm",
+  // documents — exact allowlist from DOCUMENT_MIME_TYPES
+  "application/pdf": ".pdf",
+  "text/plain":      ".txt",
+  "text/markdown":   ".md",
+};
+
+function safeExtension(mimetype) {
+  return MIME_EXTENSIONS[mimetype] || ".bin";
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const sub = UPLOAD_SUBDIRS[file.fieldname] || bucketForMime(file.mimetype);
@@ -71,7 +111,7 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    cb(null, `${randomUUID()}${path.extname(file.originalname)}`);
+    cb(null, `${randomUUID()}${safeExtension(file.mimetype)}`);
   },
 });
 
