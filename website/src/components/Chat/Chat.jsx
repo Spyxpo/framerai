@@ -48,6 +48,8 @@ export default function Chat({
   const [attachments, setAttachments] = useState([]);
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const audioInputRef = useRef(null);
@@ -319,20 +321,39 @@ export default function Chat({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!input.trim() || loading || streaming || loadingMessages) return;
-    onSend(input, messageType, attachments.map((a) => a.path));
+  const isBusy = loading || streaming || loadingMessages || submitting;
+
+  const handleSubmit = async (e) => {
+    e?.preventDefault?.();
+    if (!input.trim() || isBusy || isSubmittingRef.current) return;
+
+    isSubmittingRef.current = true;
+    setSubmitting(true);
+
+    const content = input;
+    const type = messageType;
+    const attachmentPaths = attachments.map((a) => a.path);
+
     setInput("");
     setMessageType("text");
     setAttachments([]);
     setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+    try {
+      await onSend?.(content, type, attachmentPaths);
+    } catch {
+      // Errors in onSend are handled by onSend or parent component
+    } finally {
+      isSubmittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (isBusy || isSubmittingRef.current) return;
       handleSubmit(e);
       return;
     }
@@ -362,10 +383,34 @@ export default function Chat({
   // Find the last user message so we can offer retry on the error below it
   const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
   const handleRetry = lastUserMessage
-    ? () => onSend(lastUserMessage.content, lastUserMessage.type || "text")
+    ? async () => {
+        if (isBusy || isSubmittingRef.current) return;
+        isSubmittingRef.current = true;
+        setSubmitting(true);
+        try {
+          await onSend?.(lastUserMessage.content, lastUserMessage.type || "text");
+        } catch {
+          // Handled by onSend
+        } finally {
+          isSubmittingRef.current = false;
+          setSubmitting(false);
+        }
+      }
     : undefined;
 
-  const isBusy = loading || streaming || loadingMessages;
+  const handleSuggestionClick = async (prompt) => {
+    if (isBusy || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onSend?.(prompt);
+    } catch {
+      // Handled by onSend
+    } finally {
+      isSubmittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
 
   return (
     <main className={`chat-container ${sidebarOpen ? "" : "full-width"}`} aria-label="Chat">
@@ -521,16 +566,16 @@ export default function Chat({
                   aria-label="Suggested prompts"
                   onKeyDown={handleSuggestionKeyDown}
                 >
-                  <button className="suggestion" onClick={() => onSend("Hello! What can you do?")}>
+                  <button className="suggestion" disabled={isBusy} onClick={() => handleSuggestionClick("Hello! What can you do?")}>
                     What can you do?
                   </button>
-                  <button className="suggestion" onClick={() => onSend("Write a fibonacci function in Python")}>
+                  <button className="suggestion" disabled={isBusy} onClick={() => handleSuggestionClick("Write a fibonacci function in Python")}>
                     Write a fibonacci function
                   </button>
-                  <button className="suggestion" onClick={() => onSend("Generate an image of a sunset over mountains")}>
+                  <button className="suggestion" disabled={isBusy} onClick={() => handleSuggestionClick("Generate an image of a sunset over mountains")}>
                     Generate a sunset image
                   </button>
-                  <button className="suggestion" onClick={() => onSend("Generate audio that says hello and welcome")}>
+                  <button className="suggestion" disabled={isBusy} onClick={() => handleSuggestionClick("Generate audio that says hello and welcome")}>
                     Generate a voice clip
                   </button>
                 </nav>
@@ -717,7 +762,7 @@ export default function Chat({
               }
             }}
           >
-            {loading || streaming
+            {loading || streaming || submitting
               ? <Loader2 size={20} className="spin" aria-hidden="true" />
               : <Send size={20} aria-hidden="true" />
             }
