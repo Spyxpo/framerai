@@ -17,6 +17,8 @@ export function useChat(settings) {
   // Track ALL currently-streaming conversation IDs. setStreaming(false) only fires
   // when the Set becomes empty — fixes concurrent-streaming bug (#253).
   const streamingConversationIdsRef = useRef(new Set());
+  // Track ALL in-flight REST generation IDs (#354).
+  const loadingConversationIdsRef = useRef(new Set());
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
@@ -26,23 +28,39 @@ export function useChat(settings) {
 
   // Add a conversation to the active-streaming set; flip global streaming on when first one starts.
   const markStreamingStart = (convId) => {
-    streamingConversationIdsRef.current.add(convId);
+    if (convId) streamingConversationIdsRef.current.add(convId);
     setStreaming(true);
   };
 
   // Remove a conversation from the active-streaming set; flip global streaming off only when empty.
   const markStreamingEnd = (convId) => {
-    streamingConversationIdsRef.current.delete(convId);
+    if (convId) streamingConversationIdsRef.current.delete(convId);
     if (streamingConversationIdsRef.current.size === 0) {
       setStreaming(false);
     }
   };
 
-  // Track active conversation in a ref so WebSocket handlers see current value
+  const markLoadingStart = (convId) => {
+    if (convId) loadingConversationIdsRef.current.add(convId);
+    setLoading(true);
+  };
+
+  const markLoadingEnd = (convId) => {
+    if (convId) loadingConversationIdsRef.current.delete(convId);
+    if (loadingConversationIdsRef.current.size === 0) {
+      setLoading(false);
+    }
+  };
+
+  // Track active conversation and conversations in refs so async handlers see current values
   const activeConversationRef = useRef(activeConversation);
+  activeConversationRef.current = activeConversation;
   useEffect(() => {
     activeConversationRef.current = activeConversation;
   }, [activeConversation]);
+
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
 
   // Read through a ref so sendMessage always sees the current settings without
   // being rebuilt every time a slider moves.
@@ -96,16 +114,19 @@ export function useChat(settings) {
     });
 
     ws.on("stream", (data) => {
-      // ISSUE #241 FIX: Route stream frames to the correct conversation.
+      // ISSUE #241 & #354 FIX: Route stream frames to the originating conversation.
       // Update the target conversation's state even if it's not currently active.
-      const targetConvId = data.conversationId;
-      const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
+      const inFlightConvId = streamingConversationIdsRef.current.size === 1
+        ? Array.from(streamingConversationIdsRef.current)[0]
+        : null;
+      const targetConvId = data.conversationId || inFlightConvId || activeConversationRef.current;
+      const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
         // Update the correct conversation's messages
         if (isActiveConv) {
-          markStreamingEnd(targetConvId || activeConversationRef.current);
+          markStreamingEnd(targetConvId);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -148,7 +169,7 @@ export function useChat(settings) {
       if (data.responseType === "audio") {
         if (data.done) {
           if (isActiveConv) {
-            markStreamingEnd(activeConversationRef.current);
+            markStreamingEnd(targetConvId);
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -248,7 +269,7 @@ export function useChat(settings) {
 
       if (data.done) {
         if (isActiveConv) {
-          markStreamingEnd(activeConversationRef.current);
+          markStreamingEnd(targetConvId);
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -326,11 +347,14 @@ export function useChat(settings) {
     // Server-side error frame, for example a rate limit rejection. Without
     // this the placeholder bubble would sit there empty with no explanation.
     ws.on("error", (data) => {
-      const targetConvId = data?.conversationId;
-      const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
+      const inFlightConvId = streamingConversationIdsRef.current.size === 1
+        ? Array.from(streamingConversationIdsRef.current)[0]
+        : null;
+      const targetConvId = data?.conversationId || inFlightConvId || activeConversationRef.current;
+      const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
 
       if (isActiveConv) {
-        markStreamingEnd(targetConvId || activeConversationRef.current);
+        markStreamingEnd(targetConvId);
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
@@ -344,7 +368,7 @@ export function useChat(settings) {
           }
           return updated;
         });
-      } else {
+      } else if (targetConvId) {
         setConversations((prev) =>
           prev.map((c) => {
             if (c.id !== targetConvId) return c;
@@ -445,6 +469,7 @@ export function useChat(settings) {
     try {
       const conv = await api.createConversation();
       const newConv = { ...conv, messages: conv.messages || [] };
+      activeConversationRef.current = newConv.id;
       setConversations((prev) => [newConv, ...prev]);
       setActiveConversation(newConv.id);
       setMessages([]);
@@ -452,6 +477,7 @@ export function useChat(settings) {
       // Offline fallback — create locally and let the user keep working
       const id = crypto.randomUUID();
       const conv = { id, title: "New Chat", messages: [], updatedAt: new Date().toISOString() };
+      activeConversationRef.current = id;
       setConversations((prev) => [conv, ...prev]);
       setActiveConversation(id);
       setMessages([]);
@@ -459,6 +485,7 @@ export function useChat(settings) {
   }, []);
 
   const selectConversation = useCallback(async (id) => {
+    activeConversationRef.current = id;
     setActiveConversation(id);
     setError(null);
 
@@ -475,21 +502,27 @@ export function useChat(settings) {
     try {
       const conv = await api.getConversation(id);
       if (conv && Array.isArray(conv.messages)) {
-        setMessages(conv.messages);
+        if (activeConversationRef.current === id) {
+          setMessages(conv.messages);
+        }
         setConversations((prev) =>
           prev.map((c) => (c.id === id ? { ...c, messages: conv.messages, title: conv.title || c.title } : c))
         );
       }
     } catch (err) {
-      setConversations((prev) => {
-        const found = prev.find((c) => c.id === id);
-        if (!found || !found.messages || found.messages.length === 0) {
-          setError(`Could not load conversation: ${err.message}`);
-        }
-        return prev;
-      });
+      if (activeConversationRef.current === id) {
+        setConversations((prev) => {
+          const f = prev.find((c) => c.id === id);
+          if (!f || !f.messages || f.messages.length === 0) {
+            setError(`Could not load conversation: ${err.message}`);
+          }
+          return prev;
+        });
+      }
     } finally {
-      setLoadingMessages(false);
+      if (activeConversationRef.current === id) {
+        setLoadingMessages(false);
+      }
     }
   }, []);
 
@@ -501,29 +534,35 @@ export function useChat(settings) {
       } catch {
         // Continue anyway — remove from local list regardless
       }
-      // If this conversation was actively streaming, remove it from the Set so
-      // the composer for the remaining conversations is re-enabled correctly.
+      // If this conversation was actively streaming or loading, remove it from the Sets
       markStreamingEnd(id);
+      markLoadingEnd(id);
       setConversations((prev) => {
         const remaining = prev.filter((c) => c.id !== id);
-        if (activeConversation === id) {
+        if (activeConversationRef.current === id) {
           const nextConv = remaining[0] || null;
           const nextId = nextConv ? nextConv.id : null;
           const nextMsgs = nextConv ? nextConv.messages || [] : [];
+          activeConversationRef.current = nextId;
           setActiveConversation(nextId);
           setMessages(nextMsgs);
           saveConversationsToStorage(remaining, nextId);
         } else {
-          saveConversationsToStorage(remaining, activeConversation);
+          saveConversationsToStorage(remaining, activeConversationRef.current);
         }
         return remaining;
       });
     },
-    [activeConversation]
+    []
   );
 
   const clearAllConversations = useCallback(() => {
     setError(null);
+    streamingConversationIdsRef.current.clear();
+    setStreaming(false);
+    loadingConversationIdsRef.current.clear();
+    setLoading(false);
+    activeConversationRef.current = null;
     setConversations([]);
     setActiveConversation(null);
     setMessages([]);
@@ -537,17 +576,19 @@ export function useChat(settings) {
       if (!content.trim()) return;
       setError(null);
 
-      let convId = activeConversation;
+      let convId = activeConversationRef.current || activeConversation;
       if (!convId) {
         try {
           const conv = await api.createConversation();
           convId = conv.id;
           const newConv = { ...conv, messages: conv.messages || [] };
+          activeConversationRef.current = convId;
           setConversations((prev) => [newConv, ...prev]);
           setActiveConversation(convId);
         } catch {
           convId = crypto.randomUUID();
           const conv = { id: convId, title: content.slice(0, 30) || "New Chat", messages: [] };
+          activeConversationRef.current = convId;
           setConversations((prev) => [conv, ...prev]);
           setActiveConversation(convId);
         }
@@ -594,33 +635,86 @@ export function useChat(settings) {
         return;
       }
 
-      // Fallback to REST API
-      setLoading(true);
+      markLoadingStart(convId);
       try {
         const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current);
-        setMessages((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            ...assistantMsg,
-            content: response.content,
-            type: response.type,
-            metadata: response.metadata,
-          };
-          return updated;
-        });
+        const isActiveConv = convId === activeConversationRef.current;
+        if (isActiveConv) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantMsg.id);
+            const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
+            if (targetIdx >= 0) {
+              updated[targetIdx] = {
+                ...updated[targetIdx],
+                ...assistantMsg,
+                content: response.content,
+                type: response.type,
+                metadata: response.metadata,
+              };
+            }
+            return updated;
+          });
+        } else {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== convId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const idx = updated.findIndex((m) => m.id === assistantMsg.id);
+              const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
+              if (targetIdx >= 0) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx],
+                  ...assistantMsg,
+                  content: response.content,
+                  type: response.type,
+                  metadata: response.metadata,
+                };
+              }
+              return { ...c, messages: updated, updatedAt: new Date().toISOString() };
+            })
+          );
+        }
       } catch (err) {
-        // Write the error into the assistant message bubble so context is preserved
-        setMessages((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            ...assistantMsg,
-            content: err.message || "Something went wrong. Please try again.",
-            type: "error",
-          };
-          return updated;
-        });
+        const isActiveConv = convId === activeConversationRef.current;
+        if (isActiveConv) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantMsg.id);
+            const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
+            if (targetIdx >= 0) {
+              updated[targetIdx] = {
+                ...updated[targetIdx],
+                ...assistantMsg,
+                content: err.message || "Something went wrong. Please try again.",
+                type: "error",
+              };
+            }
+            return updated;
+          });
+        } else {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== convId) return c;
+              const msgs = c.messages || [];
+              const updated = [...msgs];
+              const idx = updated.findIndex((m) => m.id === assistantMsg.id);
+              const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
+              if (targetIdx >= 0) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx],
+                  ...assistantMsg,
+                  content: err.message || "Something went wrong. Please try again.",
+                  type: "error",
+                };
+              }
+              return { ...c, messages: updated };
+            })
+          );
+        }
       } finally {
-        setLoading(false);
+        markLoadingEnd(convId);
       }
     },
     [activeConversation]
