@@ -42,6 +42,16 @@ function parseChatFrame(message) {
   // Same bounds as the REST routes. Out-of-range values are reported rather
   // than quietly clamped, so a client cannot think a setting took effect.
   const v = validator(message);
+
+  // The id is handed straight to conversationStore and decides which stored
+  // history this turn joins, so it gets the same shape check the REST route
+  // makes with v.uuid("id") rather than a second, looser rule. Omitting it is
+  // still a single-turn chat — long-standing behaviour — but an id that is sent
+  // at all has to be well formed, the empty string included (Issue #352).
+  if (message.conversationId !== undefined && message.conversationId !== null) {
+    v.uuid("conversationId");
+  }
+
   const settings = readSettings(v);
   if (v.errors.length) {
     const [first] = v.errors;

@@ -13,6 +13,9 @@ const path = require("node:path");
 
 const { mockModel, startServer, createTestWav } = require("./helpers");
 
+// Conversation ids are validated at the WebSocket boundary (#352).
+const AUDIO_CONV_ID = "77777777-7777-4777-8777-777777777777";
+
 // Mock processMessage to return audio responses
 mockModel({
   processMessage: (messages, type = "text") => {
@@ -76,7 +79,7 @@ test("audio streams PCM chunks with metadata over existing WebSocket protocol", 
     type: "chat",
     content: "generate audio",
     messageType: "audio",
-    conversationId: "audio-test",
+    conversationId: AUDIO_CONV_ID,
   });
 
   // Verify stream messages
@@ -94,7 +97,7 @@ test("audio streams PCM chunks with metadata over existing WebSocket protocol", 
   // Verify chunk structure
   for (let i = 0; i < streams.length; i++) {
     const msg = streams[i];
-    assert.equal(msg.conversationId, "audio-test");
+    assert.equal(msg.conversationId, AUDIO_CONV_ID);
     assert.equal(typeof msg.metadata.chunk, "number", "should include chunk index");
     assert.equal(typeof msg.metadata.totalChunks, "number", "should include total chunks");
     assert.equal(typeof msg.metadata.chunkData, "string", "should include base64 PCM data");

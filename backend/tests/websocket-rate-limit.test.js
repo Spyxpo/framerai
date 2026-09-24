@@ -61,7 +61,7 @@ function wsChat(wsUrl, extraHeaders = {}) {
 
     ws.on("error", reject);
     ws.on("open", () =>
-      ws.send(JSON.stringify({ type: "chat", content: "hi", conversationId: "c1" }))
+      ws.send(JSON.stringify({ type: "chat", content: "hi", conversationId: "66666666-6666-4666-8666-666666666666" }))
     );
     ws.on("message", (data) => {
       const msg = JSON.parse(data);
