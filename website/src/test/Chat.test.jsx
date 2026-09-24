@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Chat from "../components/Chat/Chat";
 import MessageBubble from "../components/Chat/MessageBubble";
@@ -1412,5 +1412,163 @@ describe("Chat — full user chat flow integration", () => {
     expect(await screen.findByText("Recovered response on retry")).toBeInTheDocument();
     // After retry succeeds, the trailing message is no longer an error so no retry button
     expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+  });
+});
+
+// ── Duplicate Submission Prevention (Issue #345) ──────────────────────────
+
+describe("Chat — duplicate submission prevention (Issue #345)", () => {
+  let user;
+  beforeEach(() => {
+    user = userEvent.setup();
+  });
+
+  it("prevents duplicate submissions via Send button while generation is in progress and re-enables afterward", async () => {
+    let resolveGeneration;
+    const onSend = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<Chat {...chatProps({ onSend })} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+
+    // Type first message and submit
+    await user.type(textarea, "First message");
+    await user.click(sendBtn);
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("First message", "text", []);
+
+    // While generation is in progress: textarea and send button should be disabled, and any submission attempt ignored
+    expect(sendBtn).toBeDisabled();
+    expect(textarea).toBeDisabled();
+    await user.click(sendBtn);
+    fireEvent.submit(sendBtn.closest("form"));
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    // Complete the first generation
+    await act(async () => {
+      resolveGeneration();
+    });
+
+    // After generation completes: can submit a new message
+    await user.type(textarea, "Second message");
+    expect(sendBtn).toBeEnabled();
+    await user.click(sendBtn);
+
+    expect(onSend).toHaveBeenCalledTimes(2);
+    expect(onSend).toHaveBeenLastCalledWith("Second message", "text", []);
+  });
+
+  it("prevents duplicate submissions via Enter key while generation is in progress", async () => {
+    let resolveGeneration;
+    const onSend = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<Chat {...chatProps({ onSend })} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+
+    // Type and press Enter
+    await user.type(textarea, "Message via Enter");
+    await user.keyboard("{Enter}");
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("Message via Enter", "text", []);
+
+    // Attempt rapid or repeated Enter key while in progress
+    await user.keyboard("{Enter}");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    // Complete first generation
+    await act(async () => {
+      resolveGeneration();
+    });
+
+    // Verify submission allowed afterward via Enter
+    await user.type(textarea, "Follow-up via Enter");
+    await user.keyboard("{Enter}");
+
+    expect(onSend).toHaveBeenCalledTimes(2);
+    expect(onSend).toHaveBeenLastCalledWith("Follow-up via Enter", "text", []);
+  });
+
+  it("prevents rapid repeated submissions in the same render tick", async () => {
+    let resolveGeneration;
+    const onSend = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<Chat {...chatProps({ onSend })} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+
+    await user.type(textarea, "Rapid fire");
+
+    // Fire multiple submit / keydown events in rapid succession
+    fireEvent.submit(sendBtn.closest("form"));
+    fireEvent.submit(sendBtn.closest("form"));
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveGeneration?.();
+    });
+  });
+
+  it("prevents submission attempts when loading or streaming prop is true", async () => {
+    const onSend = vi.fn();
+    const { rerender } = render(<Chat {...chatProps({ loading: true, onSend })} />);
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+
+    fireEvent.submit(sendBtn.closest("form"));
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(onSend).not.toHaveBeenCalled();
+
+    rerender(<Chat {...chatProps({ streaming: true, onSend })} />);
+    fireEvent.submit(sendBtn.closest("form"));
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("guards suggestion clicks during active generation", async () => {
+    let resolveGeneration;
+    const onSend = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<Chat {...chatProps({ onSend })} />);
+    const suggestionBtn = screen.getByRole("button", { name: /^what can you do\?$/i });
+
+    await user.click(suggestionBtn);
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    // Repeated clicks while generation is active
+    expect(suggestionBtn).toBeDisabled();
+    await user.click(suggestionBtn);
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveGeneration();
+    });
   });
 });
