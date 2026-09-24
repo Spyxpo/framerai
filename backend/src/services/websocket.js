@@ -3,7 +3,7 @@
  */
 
 const { randomUUID } = require("node:crypto");
-const fs = require("node:fs");
+const fsp = require("node:fs/promises");
 const path = require("node:path");
 const model = require("./model");
 const { generationCounter } = require("../middleware/limiters");
@@ -59,9 +59,14 @@ function parseChatFrame(message) {
  *
  * Iterates RIFF sub-chunks to locate fmt  and data, so files that carry extra
  * metadata chunks (JUNK, LIST, …) between fmt  and data are handled correctly.
+ *
+ * The read is asynchronous: a synchronous read stalls the single event loop for
+ * its whole duration, so one large or slow WAV delayed every other request the
+ * process was serving (Issue #347). Parsing stays synchronous once the bytes
+ * are in memory — it is pure buffer arithmetic and never touches the disk.
  */
-function parseWavFile(filePath) {
-  const buffer = fs.readFileSync(filePath);
+async function parseWavFile(filePath) {
+  const buffer = await fsp.readFile(filePath);
 
   // Minimum: RIFF/WAVE header (12 bytes) + at least one chunk header (8 bytes)
   if (buffer.length < 20) {
@@ -161,11 +166,13 @@ async function streamAudio(ws, response, conversationId, wsLog) {
     // Resolve file path from URL
     const filePath = path.join(__dirname, "..", "..", audioUrl.replace(/^\//, ""));
 
-    if (!fs.existsSync(filePath)) {
+    try {
+      await fsp.access(filePath);
+    } catch {
       throw new Error("Generated audio file not found");
     }
 
-    const { channels, sampleRate, bitsPerSample, pcmData, durationSec } = parseWavFile(filePath);
+    const { channels, sampleRate, bitsPerSample, pcmData, durationSec } = await parseWavFile(filePath);
 
     // Calculate chunk size in bytes
     const bytesPerSample = bitsPerSample / 8;
