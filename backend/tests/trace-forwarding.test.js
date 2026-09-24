@@ -12,6 +12,9 @@ const WebSocket = require("ws");
 
 const { mockModel, loadApp, newConversation, startServer } = require("./helpers");
 
+// Conversation ids are validated at the WebSocket boundary (#352).
+const TRACE_CONV_ID = "88888888-8888-4888-8888-888888888888";
+
 // Cache paths for clearing between tests
 const APP_PATH = require.resolve("../src/app");
 const MODEL_PATH = require.resolve("../src/services/model");
@@ -280,7 +283,7 @@ test("WebSocket: trace in final chunk when operator context set", async (t) => {
       ws.send(JSON.stringify({
         type: "chat",
         content: "test trace",
-        conversationId: "test-conv",
+        conversationId: TRACE_CONV_ID,
       }));
     });
     ws.on("message", (data) => {
@@ -330,7 +333,7 @@ test("WebSocket: trace omitted when operator context not set", async (t) => {
       ws.send(JSON.stringify({
         type: "chat",
         content: "test",
-        conversationId: "test-conv",
+        conversationId: TRACE_CONV_ID,
       }));
     });
     ws.on("message", (data) => {
@@ -381,7 +384,7 @@ test("WebSocket: operator header is ignored when no proxy is trusted", async (t)
     const received = [];
     ws.on("error", reject);
     ws.on("open", () => {
-      ws.send(JSON.stringify({ type: "chat", content: "test", conversationId: "test-conv" }));
+      ws.send(JSON.stringify({ type: "chat", content: "test", conversationId: TRACE_CONV_ID }));
     });
     ws.on("message", (data) => {
       const msg = JSON.parse(data);
