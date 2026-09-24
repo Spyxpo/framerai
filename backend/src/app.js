@@ -32,7 +32,23 @@ function createApp() {
   app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
   app.use(express.json({ limit: config.jsonBodyLimit }));
   app.use(requestIdMiddleware);
-  app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
+  // Uploads are user-controlled bytes served from the app's own origin, and an
+  // SVG can carry a <script> that runs on direct navigation — #342 stopped the
+  // client choosing the stored extension, but image/svg+xml is still legitimately
+  // stored as .svg. Serving every upload as a download with sniffing off removes
+  // the whole class rather than guessing which types are active content, and it
+  // costs nothing: Content-Disposition only binds top-level navigations, so
+  // <img>/<audio>/<video> subresource loads still render inline (Issue #350).
+  // Server-side readers open these files from disk and never come through here.
+  app.use(
+    "/uploads",
+    express.static(path.join(__dirname, "..", "uploads"), {
+      setHeaders(res) {
+        res.setHeader("Content-Disposition", "attachment");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+      },
+    })
+  );
 
   // A broad ceiling for the whole API, then a much tighter one for the routes
   // that actually run the model.
