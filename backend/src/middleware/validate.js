@@ -28,8 +28,8 @@ class Validator {
     const raw = this.source[field];
     const options = { prefix: `${this.prefix}${field}.`, errors: this.errors };
 
-    if (raw === undefined || raw === null) return new Validator({}, options);
-    if (typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw === undefined) return new Validator({}, options);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
       this.fail(field, "must be an object");
       return new Validator({}, options);
     }
@@ -42,7 +42,7 @@ class Validator {
   string(field, { required = false, min = 1, max = 8000, fallback = undefined } = {}) {
     const raw = this.source[field];
 
-    if (raw === undefined || raw === null || raw === "") {
+    if (raw === undefined || raw === "") {
       if (required) this.fail(field, "is required");
       return fallback;
     }
@@ -70,12 +70,12 @@ class Validator {
   integer(field, { required = false, min, max, fallback = undefined } = {}) {
     const raw = this.source[field];
 
-    if (raw === undefined || raw === null || raw === "") {
+    if (raw === undefined || raw === "") {
       if (required) this.fail(field, "is required");
       return fallback;
     }
 
-    const value = typeof raw === "string" ? Number(raw) : raw;
+    const value = typeof raw === "string" ? (raw.trim() === "" ? NaN : Number(raw)) : raw;
     if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
       this.fail(field, "must be an integer");
       return fallback;
@@ -98,12 +98,12 @@ class Validator {
   number(field, { required = false, min, max, fallback = undefined } = {}) {
     const raw = this.source[field];
 
-    if (raw === undefined || raw === null || raw === "") {
+    if (raw === undefined || raw === "") {
       if (required) this.fail(field, "is required");
       return fallback;
     }
 
-    const value = typeof raw === "string" ? Number(raw) : raw;
+    const value = typeof raw === "string" ? (raw.trim() === "" ? NaN : Number(raw)) : raw;
     if (typeof value !== "number" || !Number.isFinite(value)) {
       this.fail(field, "must be a number");
       return fallback;
@@ -125,7 +125,7 @@ class Validator {
   oneOf(field, values, { required = false, fallback = undefined } = {}) {
     const raw = this.source[field];
 
-    if (raw === undefined || raw === null || raw === "") {
+    if (raw === undefined || raw === "") {
       if (required) this.fail(field, "is required");
       return fallback;
     }
@@ -142,7 +142,7 @@ class Validator {
   array(field, { max = 20, fallback = [] } = {}) {
     const raw = this.source[field];
 
-    if (raw === undefined || raw === null) return fallback;
+    if (raw === undefined) return fallback;
     if (!Array.isArray(raw)) {
       this.fail(field, "must be an array");
       return fallback;
