@@ -268,6 +268,13 @@ function setupWebSocket(wss) {
     };
 
     ws.on("message", async (data) => {
+      // Declared per message and outside the try so the catch-all below can
+      // name the conversation a failed turn belonged to. It stays undefined
+      // until parseChatFrame has validated an id, so a frame that fails
+      // validation reports no id rather than echoing an unvalidated one
+      // (Issue #358).
+      let conversationId;
+
       try {
         const message = JSON.parse(data);
 
@@ -284,7 +291,11 @@ function setupWebSocket(wss) {
         }
 
         if (message.type === "chat") {
-          const { content, conversationId, messageType, settings, attachments } = parseChatFrame(message);
+          const frame = parseChatFrame(message);
+          // Known from here on, so a throw anywhere later in the turn still
+          // reports which conversation it belonged to.
+          conversationId = frame.conversationId;
+          const { content, messageType, settings, attachments } = frame;
 
           // Shares buckets with the REST generation routes, so the limit
           // cannot be sidestepped by switching transport.
@@ -449,7 +460,10 @@ function setupWebSocket(wss) {
           safeSend(ws, { type: "pong" });
         }
       } catch (err) {
-        safeSend(ws, { type: "error", message: err.message });
+        // conversationId is undefined when the frame failed before one was
+        // validated. JSON.stringify drops undefined values, so that case sends
+        // exactly the frame it always did rather than a fabricated id.
+        safeSend(ws, { type: "error", conversationId, message: err.message });
       }
     });
 
