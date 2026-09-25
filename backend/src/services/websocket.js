@@ -114,6 +114,16 @@ async function parseWavFile(filePath) {
       channels = buffer.readUInt16LE(offset + 10);     // audioFormat(2) + channels(2)
       sampleRate = buffer.readUInt32LE(offset + 12);   // + sampleRate(4)
       bitsPerSample = buffer.readUInt16LE(offset + 22); // + byteRate(4) + blockAlign(2) + bitsPerSample(2)
+      // None of these may be zero: durationSec below divides by their product,
+      // and a consumer sizes its chunks from them, so a zero yields a
+      // non-finite duration and chunk count rather than a playable stream
+      // (Issue #362).
+      if (channels <= 0 || sampleRate <= 0 || bitsPerSample <= 0) {
+        throw new Error(
+          "WAV fmt chunk declares unusable values: " +
+            `channels=${channels}, sampleRate=${sampleRate}, bitsPerSample=${bitsPerSample}`
+        );
+      }
     } else if (chunkId === "data") {
       if (channels === null) {
         throw new Error("WAV data chunk found before fmt chunk");
@@ -188,6 +198,14 @@ async function streamAudio(ws, response, conversationId, wsLog) {
     const bytesPerSample = bitsPerSample / 8;
     const samplesPerChunk = Math.floor(sampleRate * AUDIO_CHUNK_DURATION_SEC);
     const bytesPerChunk = samplesPerChunk * channels * bytesPerSample;
+    // parseWavFile rejects zero fmt fields, but a sample rate below
+    // 1 / AUDIO_CHUNK_DURATION_SEC still floors samplesPerChunk to zero. A zero
+    // chunk size makes totalChunks non-finite and the loop below never reaches
+    // its last chunk, so it would emit empty frames forever without ever
+    // sending done. Fail into the terminal fallback frame instead (Issue #362).
+    if (!(bytesPerChunk > 0)) {
+      throw new Error(`Unusable audio chunk size (sampleRate=${sampleRate}, channels=${channels}, bitsPerSample=${bitsPerSample})`);
+    }
 
     const totalChunks = Math.ceil(pcmData.length / bytesPerChunk);
 
