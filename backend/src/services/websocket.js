@@ -372,6 +372,17 @@ function setupWebSocket(wss) {
             operatorCtx
           );
 
+          // modelChat hands the worker's result.content through verbatim, so it
+          // is not guaranteed to be a string. Normalise it before the turn is
+          // recorded: the stored message and both streaming paths below all
+          // expect a string, and recording first meant a malformed reply was
+          // persisted and only then failed on .split(). Falling back to what
+          // already streamed keeps a partially streamed reply; when nothing
+          // streamed, accumulated is "" (Issue #356).
+          if (typeof response.content !== "string") {
+            response.content = accumulated;
+          }
+
           // The reply joins the conversation too. Recording only the user's
           // half would give the next turn a history of questions with no
           // answers, which reads worse than no history at all.
