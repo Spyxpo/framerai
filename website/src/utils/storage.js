@@ -112,7 +112,16 @@ export function sanitizeConversation(conv) {
   const updatedAt = typeof conv.updatedAt === "string" ? conv.updatedAt : new Date().toISOString();
 
   const rawMessages = Array.isArray(conv.messages) ? conv.messages : [];
-  const messages = rawMessages.map(sanitizeMessage).filter(Boolean);
+  const messages = [];
+  const seenIds = new Set();
+  for (const raw of rawMessages) {
+    const sanitized = sanitizeMessage(raw);
+    if (sanitized) {
+      if (seenIds.has(sanitized.id)) continue;
+      seenIds.add(sanitized.id);
+      messages.push(sanitized);
+    }
+  }
 
   return {
     id,
