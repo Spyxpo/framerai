@@ -22,6 +22,13 @@ const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
 // This provides smooth incremental playback without excessive message overhead
 const AUDIO_CHUNK_DURATION_SEC = 0.5;
 
+// Upper bound on the frames the simulated-streaming fallback emits. Each frame
+// repeats the whole prefix, so bytes on the wire grow with frames × length;
+// with one frame per word a reply built from a max-length prompt sent ~16 MB
+// over ~3 minutes. 64 frames at the delay below is already more than a second
+// of animation, which is as much as the effect is worth (Issue #364).
+const MAX_SIMULATED_FRAMES = 64;
+
 /**
  * Validate an incoming chat frame the same way the REST route does, so a bad
  * frame gets a clear error instead of failing somewhere in the model service.
@@ -450,13 +457,22 @@ function setupWebSocket(wss) {
           } else {
             // Fallback: simulated streaming for mock mode or non-streamed worker responses
             const words = response.content.split(" ");
+            // Group words so a long reply still arrives in at most
+            // MAX_SIMULATED_FRAMES frames. A reply with no more words than that
+            // is unchanged, one word per frame; a longer one carries several
+            // words per frame instead of growing the wire traffic with the
+            // square of the word count. The frames stay cumulative prefixes and
+            // the last one is still the complete reply (Issue #364).
+            const wordsPerFrame = Math.ceil(words.length / MAX_SIMULATED_FRAMES);
+            const frameCount = Math.ceil(words.length / wordsPerFrame);
             let acc = "";
 
-            for (let i = 0; i < words.length; i++) {
+            for (let i = 0; i < frameCount; i++) {
               if (ws.readyState !== 1 /* OPEN */) break;
 
-              acc += (i > 0 ? " " : "") + words[i];
-              const isDone = i === words.length - 1;
+              const slice = words.slice(i * wordsPerFrame, (i + 1) * wordsPerFrame);
+              acc += (i > 0 ? " " : "") + slice.join(" ");
+              const isDone = i === frameCount - 1;
               const sent = safeSend(ws, {
                 type: "stream",
                 conversationId,
