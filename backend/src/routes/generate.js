@@ -15,6 +15,7 @@ const {
 } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
 const { validator } = require("../middleware/validate");
+const uploadRetention = require("../services/uploadRetention");
 const config = require("../config");
 const { readSettings, ASPECT_RATIOS, SIZE_TIERS } = require("../generationSettings");
 const modelLimits = require("../modelLimits");
@@ -108,6 +109,11 @@ const storage = multer.diskStorage({
     const sub = UPLOAD_SUBDIRS[file.fieldname] || bucketForMime(file.mimetype);
     const dir = path.join(__dirname, "..", "..", "uploads", sub);
     fs.mkdirSync(dir, { recursive: true });
+    // Every accepted upload passes through here, so this is the one hook that
+    // covers all four upload routes. It is throttled and not awaited, and it
+    // runs before this file exists, so it can neither delay the upload nor
+    // reclaim the upload that triggered it (Issue #367).
+    uploadRetention.maybeSweep();
     cb(null, dir);
   },
   filename: (req, file, cb) => {

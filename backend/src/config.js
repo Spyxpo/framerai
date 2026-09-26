@@ -35,6 +35,20 @@ module.exports = {
   // Largest single upload accepted by the image and audio routes.
   maxFileSize: int("MAX_FILE_SIZE", 50 * 1024 * 1024),
 
+  // How long a stored upload is kept before it is reclaimed. Matched to the
+  // conversation TTL: an attachment that has outlived every conversation which
+  // could still reference it is only occupying disk.
+  uploadTtlMs: int("UPLOAD_TTL_MS", 24 * 60 * 60 * 1000),
+
+  // Ceiling on the uploads the routes manage, in bytes, measured from the files
+  // on disk. The TTL alone still admits rate × TTL, so this is what bounds a
+  // burst; the oldest files are reclaimed first once it is exceeded.
+  maxUploadBytes: int("MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024),
+
+  // Floor on how often a retention sweep may run, so a burst of uploads causes
+  // one directory scan rather than one per request.
+  uploadSweepIntervalMs: int("UPLOAD_SWEEP_INTERVAL_MS", 60 * 1000),
+
   // Largest WebSocket frame accepted before the connection is closed. Matches
   // the JSON body limit, so the streaming path is not the narrower one.
   maxWsPayload: int("MAX_WS_PAYLOAD", 8 * 1024 * 1024),
