@@ -45,6 +45,10 @@ const { logger } = require("./logger");
 
 const UPLOADS_ROOT = path.join(__dirname, "..", "..", "uploads");
 
+// The root a sweep actually walks. Production never changes it; _setUploadsRoot
+// below points it at a temporary directory for tests only.
+let _root = UPLOADS_ROOT;
+
 // Exactly the buckets the upload routes write to (UPLOAD_SUBDIRS plus the
 // bucketForMime fallback in routes/generate.js).
 const MANAGED_BUCKETS = ["images", "audio", "documents"];
@@ -64,10 +68,10 @@ let _sweeping = false;
 /** Absolute path of a managed bucket, or null if the name is not one of ours. */
 function bucketDir(bucket) {
   if (!MANAGED_BUCKETS.includes(bucket)) return null;
-  const dir = path.join(UPLOADS_ROOT, bucket);
+  const dir = path.join(_root, bucket);
   // Belt and braces: the bucket list is a constant, but keep the containment
   // check so this can never be pointed outside the uploads root.
-  return dir.startsWith(UPLOADS_ROOT + path.sep) ? dir : null;
+  return dir.startsWith(_root + path.sep) ? dir : null;
 }
 
 /**
@@ -220,6 +224,17 @@ function _resetLimits({ ttlMs, maxBytes, minSweepIntervalMs } = {}) {
   _sweeping = false;
 }
 
+/**
+ * Walk a different uploads root. Pass no argument to restore the production
+ * one. For tests only — not part of the public API: it lets a test own a whole
+ * directory, which the oldest-first ceiling cannot be asserted on otherwise,
+ * since the real uploads directory is shared with test files that run in
+ * parallel.
+ */
+function _setUploadsRoot(root) {
+  _root = root === undefined ? UPLOADS_ROOT : root;
+}
+
 module.exports = {
   sweep,
   maybeSweep,
@@ -228,6 +243,7 @@ module.exports = {
   MANAGED_NAME,
   _listManaged: listManaged,
   _resetLimits,
+  _setUploadsRoot,
   get _ttlMs() {
     return _ttlMs;
   },
