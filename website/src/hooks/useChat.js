@@ -19,6 +19,29 @@ export function useChat(settings) {
   const streamingConversationIdsRef = useRef(new Set());
   // Track ALL in-flight REST generation IDs (#354).
   const loadingConversationIdsRef = useRef(new Set());
+  // Track active in-flight assistant message ID per conversation (#366)
+  const activeAssistantIdByConvRef = useRef(new Map());
+  // Track completed assistant message IDs to guarantee idempotent completion handling (#366)
+  const completedMessageIdsRef = useRef(new Set());
+
+  const findTargetAssistantIndex = (msgs, targetMsgId, convId) => {
+    if (!Array.isArray(msgs) || msgs.length === 0) return -1;
+    if (targetMsgId) {
+      const idx = msgs.findIndex((m) => m.id === targetMsgId);
+      if (idx !== -1) return idx;
+    }
+    const inFlightId = convId ? activeAssistantIdByConvRef.current.get(convId) : null;
+    if (inFlightId) {
+      const idx = msgs.findIndex((m) => m.id === inFlightId);
+      if (idx !== -1) return idx;
+    }
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i]?.role === "assistant" && !msgs[i]?.completed) {
+        return i;
+      }
+    }
+    return -1;
+  };
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState(null); // global banner error
@@ -121,46 +144,44 @@ export function useChat(settings) {
         : null;
       const targetConvId = data.conversationId || inFlightConvId || activeConversationRef.current;
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
+      const targetMsgId = data.messageId || data.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
+
+      // If this message has already completed, ignore duplicate completion/stream events safely (#366)
+      if (targetMsgId && completedMessageIdsRef.current.has(targetMsgId)) {
+        if (data.done && targetConvId) {
+          markStreamingEnd(targetConvId);
+        }
+        return;
+      }
 
       if (data.type === "error") {
         // Server sent an error event mid-stream
         // Update the correct conversation's messages
+        if (targetConvId) markStreamingEnd(targetConvId);
+        const applyError = (msgs) => {
+          const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+          if (idx === -1) return msgs;
+          const target = msgs[idx];
+          if (target.completed) return msgs;
+          const updated = [...msgs];
+          const newMsg = {
+            ...target,
+            content: data.message || "An error occurred while generating the response.",
+            type: "error",
+            completed: true,
+          };
+          if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+          if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+          updated[idx] = newMsg;
+          return updated;
+        };
+
         if (isActiveConv) {
-          markStreamingEnd(targetConvId);
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              const newLast = {
-                ...last,
-                content: data.message || "An error occurred while generating the response.",
-                type: "error",
-              };
-              updated[updated.length - 1] = newLast;
-            }
-            return updated;
-          });
+          setMessages(applyError);
         } else if (targetConvId) {
           setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== targetConvId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const newLast = {
-                  ...last,
-                  content: data.message || "An error occurred while generating the response.",
-                  type: "error",
-                };
-                updated[updated.length - 1] = newLast;
-              }
-              return { ...c, messages: updated };
-            })
+            prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyError(c.messages || []) } : c))
           );
-
-          // Stop streaming for this specific conversation
-          if (targetConvId) markStreamingEnd(targetConvId);
         }
         return;
       }
@@ -168,99 +189,66 @@ export function useChat(settings) {
       // Handle audio streaming chunks
       if (data.responseType === "audio") {
         if (data.done) {
+          if (targetConvId) markStreamingEnd(targetConvId);
+          const applyAudioDone = (msgs) => {
+            const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+            if (idx === -1) return msgs;
+            const target = msgs[idx];
+            if (target.completed || target.audioComplete) return msgs;
+            const updated = [...msgs];
+            const newMsg = {
+              ...target,
+              type: "audio",
+              content: data.content || target.content,
+              audioChunks: data.metadata?.chunkData
+                ? [...(target.audioChunks || []), data.metadata.chunkData]
+                : target.audioChunks,
+              metadata: data.metadata,
+              audioComplete: true,
+              completed: true,
+            };
+            if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+            if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+            updated[idx] = newMsg;
+            return updated;
+          };
+
           if (isActiveConv) {
-            markStreamingEnd(targetConvId);
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const newLast = {
-                  ...last,
-                  type: "audio",
-                  content: data.content || last.content,
-                  audioChunks: data.metadata?.chunkData
-                    ? [...(last.audioChunks || []), data.metadata.chunkData]
-                    : last.audioChunks,
-                  metadata: data.metadata,
-                  audioComplete: true,
-                };
-                updated[updated.length - 1] = newLast;
-              }
-              return updated;
-            });
+            setMessages(applyAudioDone);
           } else if (targetConvId) {
             setConversations((prev) =>
-              prev.map((c) => {
-                if (c.id !== targetConvId) return c;
-                const msgs = c.messages || [];
-                const updated = [...msgs];
-                const last = updated[updated.length - 1];
-                if (last?.role === "assistant") {
-                  const newLast = {
-                    ...last,
-                    type: "audio",
-                    content: data.content || last.content,
-                    audioChunks: data.metadata?.chunkData
-                      ? [...(last.audioChunks || []), data.metadata.chunkData]
-                      : last.audioChunks,
-                    metadata: data.metadata,
-                    audioComplete: true,
-                  };
-                  updated[updated.length - 1] = newLast;
-                }
-                return { ...c, messages: updated };
-              })
+              prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyAudioDone(c.messages || []) } : c))
             );
-
-            if (targetConvId) markStreamingEnd(targetConvId);
           }
         } else {
           // Accumulate audio chunks
+          const applyAudioChunk = (msgs) => {
+            const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+            if (idx === -1) return msgs;
+            const target = msgs[idx];
+            if (target.completed || target.audioComplete) return msgs;
+            const updated = [...msgs];
+            const newMsg = {
+              ...target,
+              type: "audio",
+              content: data.content || target.content,
+              audioChunks: [...(target.audioChunks || []), data.metadata.chunkData],
+              audioMetadata: {
+                sampleRate: data.metadata?.sampleRate,
+                channels: data.metadata?.channels,
+                bitsPerSample: data.metadata?.bitsPerSample,
+                totalChunks: data.metadata?.totalChunks,
+              },
+            };
+            updated[idx] = newMsg;
+            return updated;
+          };
+
           if (isActiveConv) {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const newLast = {
-                  ...last,
-                  type: "audio",
-                  content: data.content || last.content,
-                  audioChunks: [...(last.audioChunks || []), data.metadata.chunkData],
-                  audioMetadata: {
-                    sampleRate: data.metadata.sampleRate,
-                    channels: data.metadata.channels,
-                    bitsPerSample: data.metadata.bitsPerSample,
-                    totalChunks: data.metadata.totalChunks,
-                  },
-                };
-                updated[updated.length - 1] = newLast;
-              }
-              return updated;
-            });
+            setMessages(applyAudioChunk);
           } else if (targetConvId) {
             setConversations((prev) =>
-              prev.map((c) => {
-                if (c.id !== targetConvId) return c;
-                const msgs = c.messages || [];
-                const updated = [...msgs];
-                const last = updated[updated.length - 1];
-                if (last?.role === "assistant") {
-                  const newLast = {
-                    ...last,
-                    type: "audio",
-                    content: data.content || last.content,
-                    audioChunks: [...(last.audioChunks || []), data.metadata.chunkData],
-                    audioMetadata: {
-                      sampleRate: data.metadata.sampleRate,
-                      channels: data.metadata.channels,
-                      bitsPerSample: data.metadata.bitsPerSample,
-                      totalChunks: data.metadata.totalChunks,
-                    },
-                  };
-                  updated[updated.length - 1] = newLast;
-                }
-                return { ...c, messages: updated };
-              })
+              prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyAudioChunk(c.messages || []) } : c))
             );
           }
         }
@@ -268,68 +256,53 @@ export function useChat(settings) {
       }
 
       if (data.done) {
+        if (targetConvId) markStreamingEnd(targetConvId);
+        const applyDone = (msgs) => {
+          const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+          if (idx === -1) return msgs;
+          const target = msgs[idx];
+          if (target.completed) return msgs;
+          const updated = [...msgs];
+          const newMsg = {
+            ...target,
+            content: data.content !== undefined ? data.content : target.content,
+            type: data.responseType || target.type || "text",
+            metadata: data.metadata !== undefined ? data.metadata : target.metadata,
+            completed: true,
+          };
+          if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+          if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+          updated[idx] = newMsg;
+          return updated;
+        };
+
         if (isActiveConv) {
-          markStreamingEnd(targetConvId);
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              const newLast = {
-                ...last,
-                content: data.content,
-                type: data.responseType || "text",
-                metadata: data.metadata,
-              };
-              updated[updated.length - 1] = newLast;
-            }
-            return updated;
-          });
+          setMessages(applyDone);
         } else if (targetConvId) {
           setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== targetConvId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const newLast = {
-                  ...last,
-                  content: data.content,
-                  type: data.responseType || "text",
-                  metadata: data.metadata,
-                };
-                updated[updated.length - 1] = newLast;
-              }
-              return { ...c, messages: updated, updatedAt: new Date().toISOString() };
-            })
+            prev.map((c) =>
+              c.id === targetConvId
+                ? { ...c, messages: applyDone(c.messages || []), updatedAt: new Date().toISOString() }
+                : c
+            )
           );
-
-          if (targetConvId) markStreamingEnd(targetConvId);
         }
       } else {
+        const applyChunk = (msgs) => {
+          const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+          if (idx === -1) return msgs;
+          const target = msgs[idx];
+          if (target.completed) return msgs;
+          const updated = [...msgs];
+          updated[idx] = { ...target, content: data.content };
+          return updated;
+        };
+
         if (isActiveConv) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              const newLast = { ...last, content: data.content };
-              updated[updated.length - 1] = newLast;
-            }
-            return updated;
-          });
+          setMessages(applyChunk);
         } else if (targetConvId) {
           setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== targetConvId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const newLast = { ...last, content: data.content };
-                updated[updated.length - 1] = newLast;
-              }
-              return { ...c, messages: updated };
-            })
+            prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyChunk(c.messages || []) } : c))
           );
         }
       }
@@ -352,42 +325,34 @@ export function useChat(settings) {
         : null;
       const targetConvId = data?.conversationId || inFlightConvId || activeConversationRef.current;
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
+      const targetMsgId = data?.messageId || data?.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
+
+      if (targetConvId) markStreamingEnd(targetConvId);
+
+      const applyWsError = (msgs) => {
+        const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
+        if (idx === -1) return msgs;
+        const target = msgs[idx];
+        if (target.completed || target.content) return msgs;
+        const updated = [...msgs];
+        const newMsg = {
+          ...target,
+          content: data?.message || "Something went wrong. Please try again.",
+          type: "error",
+          completed: true,
+        };
+        if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+        if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+        updated[idx] = newMsg;
+        return updated;
+      };
 
       if (isActiveConv) {
-        markStreamingEnd(targetConvId);
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last?.role === "assistant" && !last.content) {
-            const newLast = {
-              ...last,
-              content: data?.message || "Something went wrong. Please try again.",
-              type: "error",
-            };
-            updated[updated.length - 1] = newLast;
-          }
-          return updated;
-        });
+        setMessages(applyWsError);
       } else if (targetConvId) {
         setConversations((prev) =>
-          prev.map((c) => {
-            if (c.id !== targetConvId) return c;
-            const msgs = c.messages || [];
-            const updated = [...msgs];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant" && !last.content) {
-              const newLast = {
-                ...last,
-                content: data?.message || "Something went wrong. Please try again.",
-                type: "error",
-              };
-              updated[updated.length - 1] = newLast;
-            }
-            return { ...c, messages: updated };
-          })
+          prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyWsError(c.messages || []) } : c))
         );
-
-        if (targetConvId) markStreamingEnd(targetConvId);
       }
     });
 
@@ -400,35 +365,29 @@ export function useChat(settings) {
     ws.on("close", () => {
       const orphaned = [...streamingConversationIdsRef.current];
       for (const convId of orphaned) {
+        const inFlightId = activeAssistantIdByConvRef.current.get(convId);
+        const applyClose = (msgs) => {
+          const idx = findTargetAssistantIndex(msgs, inFlightId, convId);
+          if (idx === -1) return msgs;
+          const target = msgs[idx];
+          if (target.completed || target.content) return msgs;
+          const updated = [...msgs];
+          const newMsg = {
+            ...target,
+            content: "Connection lost. Please retry.",
+            type: "error",
+            completed: true,
+          };
+          if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+          activeAssistantIdByConvRef.current.delete(convId);
+          updated[idx] = newMsg;
+          return updated;
+        };
         if (convId === activeConversationRef.current) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant" && !last.content) {
-              updated[updated.length - 1] = {
-                ...last,
-                content: "Connection lost. Please retry.",
-                type: "error",
-              };
-            }
-            return updated;
-          });
+          setMessages(applyClose);
         } else {
           setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== convId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant" && !last.content) {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: "Connection lost. Please retry.",
-                  type: "error",
-                };
-              }
-              return { ...c, messages: updated };
-            })
+            prev.map((c) => (c.id === convId ? { ...c, messages: applyClose(c.messages || []) } : c))
           );
         }
         markStreamingEnd(convId);
@@ -502,11 +461,18 @@ export function useChat(settings) {
     try {
       const conv = await api.getConversation(id);
       if (conv && Array.isArray(conv.messages)) {
+        const seen = new Set();
+        const deduped = conv.messages.filter((m) => {
+          if (!m?.id) return true;
+          if (seen.has(m.id)) return false;
+          seen.add(m.id);
+          return true;
+        });
         if (activeConversationRef.current === id) {
-          setMessages(conv.messages);
+          setMessages(deduped);
         }
         setConversations((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, messages: conv.messages, title: conv.title || c.title } : c))
+          prev.map((c) => (c.id === id ? { ...c, messages: deduped, title: conv.title || c.title } : c))
         );
       }
     } catch (err) {
@@ -537,6 +503,7 @@ export function useChat(settings) {
       // If this conversation was actively streaming or loading, remove it from the Sets
       markStreamingEnd(id);
       markLoadingEnd(id);
+      activeAssistantIdByConvRef.current.delete(id);
       setConversations((prev) => {
         const remaining = prev.filter((c) => c.id !== id);
         if (activeConversationRef.current === id) {
@@ -562,6 +529,8 @@ export function useChat(settings) {
     setStreaming(false);
     loadingConversationIdsRef.current.clear();
     setLoading(false);
+    activeAssistantIdByConvRef.current.clear();
+    completedMessageIdsRef.current.clear();
     activeConversationRef.current = null;
     setConversations([]);
     setActiveConversation(null);
@@ -619,6 +588,7 @@ export function useChat(settings) {
         type: "text",
         timestamp: new Date().toISOString(),
       };
+      activeAssistantIdByConvRef.current.set(convId, assistantMsg.id);
       setMessages((prev) => [...prev, assistantMsg]);
 
       // Try WebSocket streaming first
@@ -639,77 +609,64 @@ export function useChat(settings) {
       try {
         const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current);
         const isActiveConv = convId === activeConversationRef.current;
+        completedMessageIdsRef.current.add(assistantMsg.id);
+        activeAssistantIdByConvRef.current.delete(convId);
+
+        const applyRestSuccess = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
+          const targetIdx = idx !== -1 ? idx : (msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed ? msgs.length - 1 : -1);
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...assistantMsg,
+            content: response.content,
+            type: response.type,
+            metadata: response.metadata,
+            completed: true,
+          };
+          return updated;
+        };
+
         if (isActiveConv) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const idx = updated.findIndex((m) => m.id === assistantMsg.id);
-            const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
-            if (targetIdx >= 0) {
-              updated[targetIdx] = {
-                ...updated[targetIdx],
-                ...assistantMsg,
-                content: response.content,
-                type: response.type,
-                metadata: response.metadata,
-              };
-            }
-            return updated;
-          });
+          setMessages(applyRestSuccess);
         } else {
           setConversations((prev) =>
             prev.map((c) => {
               if (c.id !== convId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const idx = updated.findIndex((m) => m.id === assistantMsg.id);
-              const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
-              if (targetIdx >= 0) {
-                updated[targetIdx] = {
-                  ...updated[targetIdx],
-                  ...assistantMsg,
-                  content: response.content,
-                  type: response.type,
-                  metadata: response.metadata,
-                };
-              }
-              return { ...c, messages: updated, updatedAt: new Date().toISOString() };
+              return { ...c, messages: applyRestSuccess(c.messages || []), updatedAt: new Date().toISOString() };
             })
           );
         }
       } catch (err) {
         const isActiveConv = convId === activeConversationRef.current;
+        completedMessageIdsRef.current.add(assistantMsg.id);
+        activeAssistantIdByConvRef.current.delete(convId);
+
+        const applyRestError = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
+          const targetIdx = idx !== -1 ? idx : (msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed ? msgs.length - 1 : -1);
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...assistantMsg,
+            content: err.message || "Something went wrong. Please try again.",
+            type: "error",
+            completed: true,
+          };
+          return updated;
+        };
+
         if (isActiveConv) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const idx = updated.findIndex((m) => m.id === assistantMsg.id);
-            const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
-            if (targetIdx >= 0) {
-              updated[targetIdx] = {
-                ...updated[targetIdx],
-                ...assistantMsg,
-                content: err.message || "Something went wrong. Please try again.",
-                type: "error",
-              };
-            }
-            return updated;
-          });
+          setMessages(applyRestError);
         } else {
           setConversations((prev) =>
             prev.map((c) => {
               if (c.id !== convId) return c;
-              const msgs = c.messages || [];
-              const updated = [...msgs];
-              const idx = updated.findIndex((m) => m.id === assistantMsg.id);
-              const targetIdx = idx !== -1 ? idx : (updated[updated.length - 1]?.role === "assistant" ? updated.length - 1 : -1);
-              if (targetIdx >= 0) {
-                updated[targetIdx] = {
-                  ...updated[targetIdx],
-                  ...assistantMsg,
-                  content: err.message || "Something went wrong. Please try again.",
-                  type: "error",
-                };
-              }
-              return { ...c, messages: updated };
+              return { ...c, messages: applyRestError(c.messages || []) };
             })
           );
         }
