@@ -127,6 +127,9 @@ function append(id, message) {
   const conv = conversations.get(id);
   if (!conv) return false;
   _touch(conv);
+  if (message?.id && conv.messages.some((m) => m.id === message.id)) {
+    return true;
+  }
   conv.messages.push(message);
   if (conv.messages.length > _maxMessages) {
     conv.messages.splice(0, conv.messages.length - _maxMessages);
