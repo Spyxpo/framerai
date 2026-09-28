@@ -463,8 +463,8 @@ function setupWebSocket(wss) {
             // words per frame instead of growing the wire traffic with the
             // square of the word count. The frames stay cumulative prefixes and
             // the last one is still the complete reply (Issue #364).
-            const wordsPerFrame = Math.ceil(words.length / MAX_SIMULATED_FRAMES);
-            const frameCount = Math.ceil(words.length / wordsPerFrame);
+            const wordsPerFrame = Math.max(1, Math.ceil(words.length / MAX_SIMULATED_FRAMES));
+            const frameCount = Math.max(1, Math.ceil(words.length / wordsPerFrame));
             let acc = "";
 
             for (let i = 0; i < frameCount; i++) {

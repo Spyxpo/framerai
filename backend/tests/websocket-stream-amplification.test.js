@@ -62,7 +62,7 @@ function streamingModel(content, deltas) {
 }
 
 /** Run one turn, recording every frame plus its raw size on the wire. */
-function turn(wsUrl, { timeoutMs = 30000 } = {}) {
+function turn(wsUrl, { timeoutMs = 30000, content = "hi", conversationId = CONV_ID } = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const frames = [];
@@ -77,7 +77,7 @@ function turn(wsUrl, { timeoutMs = 30000 } = {}) {
     const timer = setTimeout(() => finish("TIMEOUT"), timeoutMs);
 
     ws.on("open", () =>
-      ws.send(JSON.stringify({ type: "chat", content: "hi", conversationId: CONV_ID }))
+      ws.send(JSON.stringify({ type: "chat", content, conversationId }))
     );
     ws.on("error", reject);
     ws.on("message", (data) => {
@@ -233,3 +233,69 @@ test("the worker streaming path is unaffected", async (t) => {
   assert.equal(final.content, "Hello world again");
   assert.deepEqual(final.metadata, { model: "test-model" });
 });
+
+test("a controlled ~8 KB client-provided message does not cause output amplification", async (t) => {
+  mockModel();
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const clientMessage = words(4000);
+  assert.ok(
+    clientMessage.length >= 7999,
+    `expected message size of ~8 KB, got ${clientMessage.length} bytes`
+  );
+
+  const { frames, bytes, reason } = await turn(server.wsUrl, { content: clientMessage });
+  const streams = streamsOf(frames);
+
+  assert.equal(reason, "done", "must finish without timing out");
+  assert.ok(
+    streams.length <= MAX_SIMULATED_FRAMES,
+    `expected at most ${MAX_SIMULATED_FRAMES} stream frames, got ${streams.length}`
+  );
+  assert.ok(
+    bytes < 1024 * 1024,
+    `expected wire traffic to stay well under 1 MB, got ${(bytes / 1024).toFixed(1)} KB`
+  );
+
+  // Message ordering and completion checks
+  for (let i = 0; i < streams.length - 1; i++) {
+    assert.equal(streams[i].done, false, `intermediate frame ${i} must have done: false`);
+  }
+  const final = streams[streams.length - 1];
+  assert.equal(final.done, true, "terminal frame must have done: true");
+  assert.ok(
+    final.content.startsWith("reply to: a a"),
+    "terminal frame must contain the complete echoed reply"
+  );
+  assert.equal(
+    final.content.split(" ").length,
+    4002,
+    "terminal frame must preserve all 4000 client words"
+  );
+});
+
+test("simulated streaming handles empty string response cleanly", async (t) => {
+  mockModel(nonStreamingModel(""));
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const streams = streamsOf((await turn(server.wsUrl)).frames);
+
+  assert.equal(streams.length, 1, "empty response must emit exactly one terminal frame");
+  assert.equal(streams[0].done, true);
+  assert.equal(streams[0].content, "");
+});
+
+test("WebSocket error handling remains intact alongside simulated streaming", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const res = await turn(server.wsUrl, { content: "" });
+  const errorFrames = res.frames.filter((m) => m.type === "error");
+  const streamFrames = streamsOf(res.frames);
+
+  assert.ok(errorFrames.length > 0, "missing/empty content should trigger an error frame");
+  assert.equal(streamFrames.length, 0, "an invalid frame must not initiate any stream frames");
+});
+
