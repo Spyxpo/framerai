@@ -27,6 +27,7 @@ const test = require("node:test");
 const { after } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const request = require("supertest");
@@ -79,7 +80,30 @@ after(() => {
     }
   }
   retention._resetLimits();
+  retention._setUploadsRoot();
 });
+
+/**
+ * Give the calling test its own empty managed upload root, restored and removed
+ * afterwards.
+ *
+ * The real uploads directory is shared: it holds whatever a developer has lying
+ * around, and the other test files run in parallel and upload into the same
+ * buckets. A test that asserts an exact removal count, or that depends on a
+ * sweep finishing promptly, needs to own the directory it walks (Issue #371).
+ */
+function isolatedRoot(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "framerai-uploads-"));
+  for (const bucket of retention.MANAGED_BUCKETS) {
+    fs.mkdirSync(path.join(root, bucket), { recursive: true });
+  }
+  retention._setUploadsRoot(root);
+  t.after(() => {
+    retention._setUploadsRoot();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  return root;
+}
 
 // ---------------------------------------------------------------------------
 // 1 & 2. Stale files go, fresh files stay
@@ -341,29 +365,39 @@ test("the managed buckets and name shape are constrained", () => {
 
 test("the size ceiling reclaims oldest-first until the buckets fit", async (t) => {
   const now = Date.now();
-  const DAY = 24 * HOUR;
 
-  // The buckets may already hold files from other tests or earlier runs, and
-  // those are newer than anything backdated here. So: measure what is already
-  // there, make this test's files unambiguously the oldest, disable the TTL so
-  // only the ceiling can act, and set the ceiling to leave room for exactly two
-  // of the three.
-  const baseBytes = (await retention._listManaged()).reduce((sum, f) => sum + f.size, 0);
-  retention._resetLimits({ ttlMs: Infinity, maxBytes: baseBytes + 8000 });
+  // The ceiling reclaims oldest-first across every managed bucket, so an exact
+  // removal count can only be asserted while this test owns the directory.
+  const root = isolatedRoot(t);
+
+  // 12000 bytes will be present against an 8000 byte ceiling, so the overage is
+  // exactly one file. The TTL is disabled so only the ceiling can act.
+  retention._resetLimits({ ttlMs: Infinity, maxBytes: 8000 });
   t.after(() => retention._resetLimits());
 
-  const oldest = makeManaged("images", { bytes: 4000, ageMs: 30 * DAY, now });
-  const middle = makeManaged("images", { bytes: 4000, ageMs: 29 * DAY, now });
-  const newest = makeManaged("images", { bytes: 4000, ageMs: 28 * DAY, now });
+  const write = (ageMs) => {
+    const full = path.join(root, "images", `${randomUUID()}.png`);
+    fs.writeFileSync(full, Buffer.alloc(4000, 0x41));
+    const when = new Date(now - ageMs);
+    fs.utimesSync(full, when, when);
+    return full;
+  };
+  const oldest = write(3000);
+  const middle = write(2000);
+  const newest = write(1000);
+
+  assert.equal(
+    (await retention._listManaged()).length,
+    3,
+    "the isolated root must hold exactly this test's three files"
+  );
 
   const stats = await retention.sweep({ now });
 
   assert.equal(stats.removedStale, 0, "the TTL was disabled, so nothing was stale");
   assert.equal(stats.removedForCeiling, 1, "freeing 4000 bytes needs exactly one removal");
-  assert.ok(
-    stats.bytesAfter <= baseBytes + 8000,
-    `expected <= ${baseBytes + 8000} bytes retained, got ${stats.bytesAfter}`
-  );
+  assert.equal(stats.bytesBefore, 12000, "all three files were counted");
+  assert.equal(stats.bytesAfter, 8000, "exactly the configured ceiling is retained");
   assert.equal(fs.existsSync(oldest), false, "the oldest is reclaimed first");
   assert.equal(fs.existsSync(middle), true, "the middle one survives");
   assert.equal(fs.existsSync(newest), true, "the newest survives");
@@ -395,6 +429,9 @@ test("a generous ceiling leaves fresh files alone", async (t) => {
 const settle = () => new Promise((r) => setTimeout(r, 60));
 
 test("maybeSweep does not start a second sweep while one is running", async (t) => {
+  // An empty root, so the sweep these calls kick off is trivial and cannot
+  // reclaim anything real.
+  isolatedRoot(t);
   retention._resetLimits({ ttlMs: 1 * HOUR, maxBytes: Infinity, minSweepIntervalMs: 0 });
   t.after(() => retention._resetLimits());
 
@@ -407,6 +444,10 @@ test("maybeSweep does not start a second sweep while one is running", async (t) 
 });
 
 test("maybeSweep throttles to at most one sweep per interval", async (t) => {
+  // An empty root: settle() below waits for the fire-and-forget sweep to finish
+  // before the next call, and a scan of the shared real directory under
+  // parallel load can outlast that wait, which made this flaky.
+  isolatedRoot(t);
   retention._resetLimits({ ttlMs: 1 * HOUR, maxBytes: Infinity, minSweepIntervalMs: 60_000 });
   t.after(() => retention._resetLimits());
 
