@@ -248,6 +248,13 @@ class Worker {
           _clearTimeout(this._safetyTimer);
           this._safetyTimer = null;
         }
+        // Exiting before startup settled is a failed startup. The safety timer above
+        // was the only other thing that could settle it, and it is gone, so without
+        // this start() and the first request would wait forever.
+        if (!resolved) {
+          resolved = true;
+          resolve(false);
+        }
         // Clear liveness timer
         if (this._livenessTimer) {
           _clearTimeout(this._livenessTimer);

@@ -2917,3 +2917,318 @@ describe("Issue #239 regression: timed-out worker force-kill and pool capacity p
     bridge._setTimerImpl(prev.set, prev.clear);
   });
 });
+
+
+// ============================================================================
+// Issue #386 Regression Tests: worker that exits before reporting ready
+// ============================================================================
+
+// A worker can die before it reports ready: a broken virtualenv, an OOM kill while
+// the model loads, PYTHON_BIN=/usr/bin/false. The exit handler cancelled the startup
+// safety timer and nothing else settled the startup promise, so start() and the
+// first request waited forever.
+describe("Issue #386: worker that exits before reporting ready", () => {
+  let bridge = null;
+  let originalExistsSync = null;
+  let savedEnv = {};
+
+  // Everything the bridge reads when it loads. Earlier suites in this file leave their
+  // own values behind, so pin each one here and put the previous values back afterwards.
+  // undefined means unset, which leaves the bridge on its defaults.
+  const MANAGED_ENV = {
+    MODEL_ENABLED: "true",
+    MODEL_PATH: "/fake/model.pt",
+    TOKENIZER_PATH: "/fake/tokenizer",
+    MODEL_WORKERS: "2",
+    PYTHON_BIN: undefined,
+    MODEL_TOOLS: undefined,
+    MODEL_CLI_MODE: undefined,
+    MODEL_CLI_ROOT: undefined,
+    MODEL_TIMEOUT_MS: undefined,
+    MODEL_STARTUP_TIMEOUT_MS: undefined,
+    MODEL_WORKER_STABILITY_MS: undefined,
+    MODEL_KILL_GRACE_MS: undefined,
+    MODEL_HEARTBEAT_TIMEOUT_MS: undefined,
+    MODEL_HEARTBEAT_STARTUP_GRACE_MS: undefined,
+  };
+
+  beforeEach(() => {
+    // Reset module state
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    savedEnv = {};
+    for (const [key, value] of Object.entries(MANAGED_ENV)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    // Mock fs.existsSync
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path.includes("model.pt")) return true;
+      return originalExistsSync(path);
+    };
+
+    // Mock spawn
+    mockSpawn = (command, args, options) => {
+      return new MockChildProcess(command, args, options);
+    };
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    // Restore fs.existsSync
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    // Cleanup
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  // Resolves to "STILL PENDING" instead of hanging the run when the original bug is present.
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  // With the timers below unset, restart backoffs (500 ms doubling to 8 s) are the
+  // only timers the bridge arms in this range.
+  const isBackoff = (timer) => timer.ms >= 500 && timer.ms <= 8000;
+
+  // Records every timer the bridge arms instead of running it, so a test decides which
+  // restart backoff fires and when. Startup, liveness and stability timers never fire.
+  const recordTimers = () => {
+    const armed = [];
+    const cleared = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        const timer = { fn, ms };
+        armed.push(timer);
+        return timer;
+      },
+      (timer) => {
+        cleared.push(timer);
+      }
+    );
+    return { armed, cleared, restore: () => bridge._setTimerImpl(prev.set, prev.clear) };
+  };
+
+  it("REGRESSION #386: start() resolves false when every worker exits before reporting ready", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => {
+      spawnedProcesses[0].simulateExit(1);
+      spawnedProcesses[1].simulateExit(1);
+    });
+
+    assert.strictEqual(await settlesWithin(startPromise, 1000), false, "start should fail, not hang");
+    assert.strictEqual(bridge.available(), false, "the bridge should fall back instead of staying enabled");
+  });
+
+  it("REGRESSION #386: the first request is rejected, not left pending, when every worker exits before ready", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    const first = bridge.request("chat", { prompt: "hi" }).then(
+      () => "resolved",
+      (err) => `rejected: ${err.message}`
+    );
+    setImmediate(() => {
+      spawnedProcesses[0].simulateExit(1);
+      spawnedProcesses[1].simulateExit(1);
+    });
+
+    assert.strictEqual(await settlesWithin(first, 1000), "rejected: no workers available");
+  });
+
+  it("REGRESSION #386: a worker that exits before ready does not stall the first request for a healthy one", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    const first = bridge.request("chat", { prompt: "hi" });
+    spawnedProcesses[1].onStdinWrite = (data) => {
+      spawnedProcesses[1].simulateResponse(JSON.parse(data).id, true, { content: "from the healthy worker" });
+    };
+    setImmediate(() => {
+      spawnedProcesses[0].simulateExit(1);
+      spawnedProcesses[1].simulateReady(true);
+    });
+
+    assert.deepStrictEqual(await settlesWithin(first, 1000), { content: "from the healthy worker" });
+  });
+
+  it("REGRESSION #386: a ready line that arrives after the worker exited does not revive it", async () => {
+    // 'exit' can be delivered ahead of stdout the child wrote before it died. The startup
+    // promise is already settled by then, so the late line must not count as a start.
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    const worker = bridge._pool().workers[0]; // the pool drops a dead worker, so keep a handle
+    try {
+      setImmediate(() => {
+        spawnedProcesses[0].simulateExit(1);
+        spawnedProcesses[0].simulateReady(true);
+      });
+
+      assert.strictEqual(
+        await settlesWithin(startPromise, 1000),
+        false,
+        "a worker that already exited is not a started worker"
+      );
+      assert.strictEqual(worker.ready, false, "the dead worker must not be marked ready");
+      assert.strictEqual(worker._livenessTimer, null, "a dead worker must not get a liveness watchdog");
+    } finally {
+      worker.cleanup(); // the pool no longer owns it, so afterEach will not
+    }
+  });
+
+  it("REGRESSION #386: a worker that exits before ready is still replaced after its backoff, and the pool recovers", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      const startPromise = bridge.start();
+      const startupTimer = timers.armed.find((timer) => timer.ms === 60000);
+      setImmediate(() => spawnedProcesses[0].simulateExit(1));
+
+      assert.strictEqual(await settlesWithin(startPromise, 1000), false, "start should fail, not hang");
+      assert.ok(timers.cleared.includes(startupTimer), "the exit must still cancel the startup safety timer");
+      assert.strictEqual(timers.armed.filter(isBackoff).length, 1, "exactly one restart should be scheduled");
+      assert.strictEqual(spawnedProcesses.length, 1, "the replacement must wait for its backoff");
+
+      timers.armed.find(isBackoff).fn();
+      await tick();
+      assert.strictEqual(spawnedProcesses.length, 2, "the replacement should spawn once the backoff fires");
+
+      spawnedProcesses[1].onStdinWrite = (data) => {
+        spawnedProcesses[1].simulateResponse(JSON.parse(data).id, true, { content: "recovered" });
+      };
+      spawnedProcesses[1].simulateReady(true);
+      await tick();
+      assert.strictEqual(bridge.available(), true, "the pool should recover once the replacement is ready");
+
+      const reply = await settlesWithin(bridge.request("chat", { prompt: "after recovery" }), 1000);
+      assert.deepStrictEqual(reply, { content: "recovered" });
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("REGRESSION #386: a replacement that exits before ready is reported failed, like one that reports ready:false", async () => {
+    // The Issue #152 recovery test, except that the failing replacement dies before it
+    // reports anything. Its startup promise used to stay unsettled, so the restart logic
+    // never recorded the failed attempt.
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      const startPromise = bridge.start();
+      setImmediate(() => spawnedProcesses[0].simulateReady(true));
+      assert.strictEqual(await settlesWithin(startPromise, 1000), true);
+      assert.strictEqual(bridge.available(), true);
+
+      // The ready worker crashes: the existing restart path, which must not change.
+      spawnedProcesses[0].simulateExit(1);
+      await tick();
+      timers.armed.filter(isBackoff)[0].fn();
+      await tick();
+      assert.strictEqual(spawnedProcesses.length, 2, "the replacement should spawn after the backoff");
+
+      // The replacement dies before it ever reports ready.
+      spawnedProcesses[1].simulateExit(1);
+      await tick();
+      assert.strictEqual(bridge.available(), false, "a replacement that never became ready must disable the pool");
+      const backoffs = timers.armed.filter(isBackoff);
+      assert.strictEqual(backoffs.length, 2, "the restart loop must keep going");
+
+      backoffs[1].fn();
+      await tick();
+      spawnedProcesses[2].simulateReady(true);
+      await tick();
+      assert.strictEqual(bridge.available(), true, "the pool should recover once a later replacement is ready");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("REGRESSION #386: workers that keep exiting before ready are replaced MAX_RESTART_ATTEMPTS times, then given up on", async () => {
+    process.env.MODEL_WORKERS = "1";
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      const startPromise = bridge.start();
+
+      // Kill each worker as soon as it spawns, before it can report ready, and run each
+      // backoff, until the pool stops scheduling restarts.
+      let killed = 0;
+      while (killed < 20) {
+        spawnedProcesses[killed].simulateExit(1);
+        killed += 1;
+        await tick();
+        const next = timers.armed.filter(isBackoff)[killed - 1];
+        if (!next) break;
+        next.fn();
+        await tick();
+      }
+
+      assert.strictEqual(await settlesWithin(startPromise, 1000), false, "start should fail, not hang");
+      assert.deepStrictEqual(
+        timers.armed.filter(isBackoff).map((timer) => timer.ms),
+        [500, 1000, 2000, 4000, 8000],
+        "each dead worker should be counted once, with the usual backoff"
+      );
+      assert.strictEqual(spawnedProcesses.length, 6, "the first worker plus MAX_RESTART_ATTEMPTS replacements");
+      assert.strictEqual(bridge.available(), false, "the pool should be given up on after the cap");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  // The issue reproduces with PYTHON_BIN=/usr/bin/false. Windows has no such file, so
+  // there node itself is the interpreter that dies at once: it rejects -m and exits 9.
+  const EXITS_AT_ONCE =
+    process.platform !== "win32" && require("fs").existsSync("/usr/bin/false") ? "/usr/bin/false" : process.execPath;
+
+  it("REGRESSION #386 (real process): the first request is rejected when the interpreter exits before ready", async () => {
+    mockSpawn = null; // fall through to the real child_process.spawn
+    process.env.PYTHON_BIN = EXITS_AT_ONCE;
+    bridge = require("../src/services/pythonBridge");
+    // The restart loop is not under test, and its real timers would outlive the test.
+    const timers = recordTimers();
+    try {
+      const first = bridge.request("chat", { prompt: "hi" }).then(
+        () => "resolved",
+        (err) => `rejected: ${err.message}`
+      );
+
+      assert.strictEqual(await settlesWithin(first, 5000), "rejected: no workers available");
+      assert.strictEqual(spawnedProcesses.length, 0, "real child processes should have been used, not the mock");
+      assert.strictEqual(bridge.available(), false, "the bridge should fall back instead of staying enabled");
+    } finally {
+      timers.restore();
+    }
+  });
+});
