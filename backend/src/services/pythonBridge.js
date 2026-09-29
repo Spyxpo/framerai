@@ -113,6 +113,28 @@ class Worker {
 
       let resolved = false;
 
+      // spawn() does not throw for ENOENT, EACCES, EAGAIN and friends: it returns
+      // a child and reports the failure afterwards as an 'error' event, so the
+      // try/catch above cannot see it. An 'error' event with no listener is
+      // rethrown as an uncaught exception that takes the whole backend down.
+      // Attached before anything else touches the child, since EMFILE/ENFILE
+      // leave child.stdout undefined.
+      this.child.on("error", (err) => {
+        if (resolved) {
+          // Startup already settled: the process is running and its exit
+          // handler owns it, so this is not a failed spawn.
+          workerLog.warn("worker process error", { error: err.message });
+          return;
+        }
+        resolved = true;
+        workerLog.warn("spawn failed", { error: err.message });
+        // Same teardown as the startup timeout. It stops the safety timer and
+        // detaches the exit handler, so an 'exit' that still follows cannot
+        // reach onExit and restart a worker already reported as failed.
+        this.cleanup();
+        resolve(false);
+      });
+
       this.child.stdout.on("data", (data) => {
         this.buffer += data.toString();
         let idx;

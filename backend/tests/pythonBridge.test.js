@@ -870,6 +870,220 @@ describe("pythonBridge worker pool", () => {
     );
   });
 
+  // A failed spawn is not thrown. child_process.spawn() returns a ChildProcess
+  // and reports ENOENT, EACCES, EAGAIN and friends afterwards as an 'error'
+  // event; 'exit' never follows. These tests deliver the failure that way,
+  // because a spawn() that simply throws would only exercise the try/catch.
+  const enoent = (command) =>
+    Object.assign(new Error(`spawn ${command} ENOENT`), {
+      code: "ENOENT",
+      errno: -2,
+      syscall: `spawn ${command}`,
+      path: command,
+    });
+
+  // Mimics Node: the child is returned now and its 'error' is emitted on the next tick.
+  const failSpawnAsync = () => {
+    mockSpawn = (command, args, options) => {
+      const child = new MockChildProcess(command, args, options);
+      process.nextTick(() => child.emit("error", enoent(command)));
+      return child;
+    };
+  };
+
+  // Resolves to "STILL PENDING" instead of hanging the run when startup never settles.
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
+
+  it("should resolve start() false and clean up when every worker fails to spawn", async () => {
+    failSpawnAsync();
+    bridge = require("../src/services/pythonBridge");
+
+    const armed = [];
+    const cleared = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        const timer = { ms };
+        armed.push(timer);
+        return timer;
+      },
+      (timer) => {
+        cleared.push(timer);
+      }
+    );
+
+    let result;
+    try {
+      result = await settlesWithin(bridge.start(), 500);
+    } finally {
+      bridge._setTimerImpl(prev.set, prev.clear);
+    }
+
+    assert.strictEqual(result, false, "start should return false when no worker can spawn");
+    assert.strictEqual(bridge.available(), false, "the bridge should fall back instead of staying enabled");
+    assert.strictEqual(spawnedProcesses.length, 2, "both workers should have tried to spawn");
+    for (const worker of bridge._pool().workers) {
+      assert.strictEqual(worker.child, null, `worker ${worker.id} should not keep the dead child`);
+      assert.strictEqual(worker.ready, false, `worker ${worker.id} should not be ready`);
+    }
+    assert.ok(armed.length > 0, "startup should have armed its safety timers");
+    assert.ok(
+      armed.every((timer) => cleared.includes(timer)),
+      "every startup timer must be cleared once the spawn has failed"
+    );
+  });
+
+  it("should not run the exit path for a worker that already failed to spawn", async () => {
+    // Node documents that 'exit' may or may not follow 'error'. If it does, it must
+    // not reach handleWorkerExit(): that would clean the worker up a second time
+    // and schedule a restart for a worker that was already reported as failed.
+    process.env.MODEL_WORKERS = "1";
+    failSpawnAsync();
+    bridge = require("../src/services/pythonBridge");
+
+    const delays = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        delays.push(ms);
+        return {};
+      },
+      () => {}
+    );
+
+    try {
+      const result = await settlesWithin(bridge.start(), 500);
+      assert.strictEqual(result, false, "start should return false when the worker cannot spawn");
+
+      delays.length = 0;
+      spawnedProcesses[0].simulateExit(1);
+      await new Promise((r) => setImmediate(r));
+
+      assert.deepStrictEqual(delays, [], "a late 'exit' must not schedule a restart");
+      assert.strictEqual(spawnedProcesses.length, 1, "no replacement worker should be spawned");
+      assert.strictEqual(
+        bridge._pool().workers.length,
+        1,
+        "the failed worker must not go through handleWorkerExit() a second time"
+      );
+    } finally {
+      bridge._setTimerImpl(prev.set, prev.clear);
+    }
+  });
+
+  it("should fail startup cleanly when PYTHON_BIN does not exist (real spawn)", async () => {
+    // No mock child: the real child_process.spawn reports the missing interpreter
+    // exactly as it does in production. Before the fix the 'error' event had no
+    // listener, and the uncaught exception failed this test (and would kill the backend).
+    mockSpawn = null;
+    const previous = process.env.PYTHON_BIN;
+    process.env.PYTHON_BIN = "/nonexistent/py";
+    try {
+      bridge = require("../src/services/pythonBridge");
+    } finally {
+      if (previous === undefined) delete process.env.PYTHON_BIN;
+      else process.env.PYTHON_BIN = previous;
+    }
+
+    const result = await settlesWithin(bridge.start(), 5000);
+
+    assert.strictEqual(result, false, "start should return false when the interpreter cannot be spawned");
+    assert.strictEqual(spawnedProcesses.length, 0, "the real spawn should have been used, not the mock");
+    assert.strictEqual(bridge.available(), false, "the bridge should fall back instead of staying enabled");
+    for (const worker of bridge._pool().workers) {
+      assert.strictEqual(worker.child, null, `worker ${worker.id} should not keep the dead child`);
+      assert.strictEqual(worker.ready, false, `worker ${worker.id} should not be ready`);
+    }
+  });
+
+  it("should not crash the process when PYTHON_BIN cannot be spawned (real process)", () => {
+    // The real bridge and the real child_process, in a separate Node process so a
+    // crash shows up as an exit status. Before the fix the failed spawn was an
+    // uncaught exception and this process exited with status 1.
+    const { spawnSync } = require("child_process");
+    const script = `
+      process.env.MODEL_ENABLED = "true";
+      process.env.MODEL_PATH = ${JSON.stringify(__filename)};
+      process.env.PYTHON_BIN = "/nonexistent/py";
+      const bridge = require(${JSON.stringify(require.resolve("../src/services/pythonBridge"))});
+      bridge.request("chat", { prompt: "hi" }).then(
+        () => console.log("settled: resolved"),
+        (err) => console.log("settled: rejected " + err.message)
+      );
+    `;
+    const res = spawnSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      timeout: 15000,
+      env: { ...process.env, LOG_LEVEL: "error" },
+    });
+
+    assert.notStrictEqual(
+      res.error && res.error.code,
+      "ETIMEDOUT",
+      "the request never settled, or a startup timer kept the process alive"
+    );
+    const reason = String(res.stderr).split("\n").find((line) => /Error/.test(line));
+    assert.strictEqual(res.status, 0, `the process crashed: ${reason}`);
+    assert.match(res.stdout, /settled: rejected no workers available/);
+  });
+
+  it("should start with the workers that did spawn when another one fails to spawn", async () => {
+    mockSpawn = (command, args, options) => {
+      const child = new MockChildProcess(command, args, options);
+      if (spawnedProcesses.length === 1) {
+        // The first worker cannot spawn; the second one is healthy.
+        process.nextTick(() => child.emit("error", enoent(command)));
+      }
+      return child;
+    };
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => spawnedProcesses[1].simulateReady(true));
+
+    assert.strictEqual(await settlesWithin(startPromise, 1000), true, "start should succeed on the surviving worker");
+    assert.strictEqual(bridge.available(), true);
+
+    const reqPromise = bridge.request("chat", { prompt: "served by the healthy worker" });
+    await new Promise((r) => setImmediate(r));
+    const msg = JSON.parse(spawnedProcesses[1].lastWrite);
+    spawnedProcesses[1].simulateResponse(msg.id, true, { content: "healthy" });
+
+    assert.strictEqual((await reqPromise).content, "healthy");
+  });
+
+  it("should leave a ready worker running when an 'error' event arrives after startup", async () => {
+    // Node also emits 'error' when a kill or a send fails. Once startup has settled
+    // the process is alive and its exit handler owns it, so the event is logged and
+    // must not be treated as a failed spawn.
+    bridge = require("../src/services/pythonBridge");
+
+    const startPromise = bridge.start();
+    setImmediate(() => {
+      spawnedProcesses[0].simulateReady(true);
+      spawnedProcesses[1].simulateReady(true);
+    });
+    assert.strictEqual(await startPromise, true);
+
+    spawnedProcesses[0].emit("error", Object.assign(new Error("kill EPERM"), { code: "EPERM", syscall: "kill" }));
+
+    const worker = bridge._pool().workers[0];
+    assert.strictEqual(worker.ready, true, "the healthy worker must stay ready");
+    assert.strictEqual(worker.child, spawnedProcesses[0], "the healthy worker must keep its child");
+    assert.strictEqual(bridge.available(), true);
+
+    const reqPromise = bridge.request("chat", { prompt: "after the stray error" });
+    await new Promise((r) => setImmediate(r));
+    const msg = JSON.parse(spawnedProcesses[0].lastWrite);
+    spawnedProcesses[0].simulateResponse(msg.id, true, { content: "still serving" });
+
+    assert.strictEqual((await reqPromise).content, "still serving");
+  });
+
   it("should re-enable bridge.available() when worker pool recovers after transient failure (Issue #152)", async () => {
     process.env.MODEL_WORKERS = "1";
     bridge = require("../src/services/pythonBridge");
