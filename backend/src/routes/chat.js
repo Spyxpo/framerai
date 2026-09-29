@@ -47,11 +47,12 @@ router.post("/conversations", (req, res) => {
 // List conversations
 router.get("/conversations", (req, res) => {
   const list = conversations.list()
-    .map(({ id, title, createdAt, messages }) => ({
+    .map(({ id, title, createdAt, messages, parentConversationId, branchedFromMessageId }) => ({
       id,
       title,
       createdAt,
       messageCount: messages.length,
+      ...(parentConversationId ? { parentConversationId, branchedFromMessageId } : {}),
     }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   res.json(list);
@@ -60,6 +61,42 @@ router.get("/conversations", (req, res) => {
 // Get conversation
 router.get("/conversations/:id", (req, res) => {
   res.json(getConversation(conversationId(req)));
+});
+
+// Branch conversation
+router.post("/conversations/:id/branch", (req, res) => {
+  const parentId = conversationId(req);
+  const conv = getConversation(parentId);
+
+  const v = validator(req.body);
+  const messageId = v.uuid("messageId");
+  v.done();
+
+  const messageIndex = conv.messages.findIndex((m) => m.id === messageId);
+  if (messageIndex === -1) {
+    throw ApiError.badRequest("Message not found in conversation");
+  }
+
+  // Slice history up to and including the branched message, deep cloning messages
+  const branchedMessages = conv.messages.slice(0, messageIndex + 1).map((m) => ({
+    ...m,
+    ...(m.attachments ? { attachments: [...m.attachments] } : {}),
+    ...(m.metadata ? { metadata: { ...m.metadata } } : {}),
+  }));
+
+  const branchId = randomUUID();
+  const branchTitle = `${conv.title} (Branch)`;
+  const branchConv = {
+    id: branchId,
+    title: branchTitle,
+    parentConversationId: parentId,
+    branchedFromMessageId: messageId,
+    messages: branchedMessages,
+    createdAt: new Date().toISOString(),
+  };
+
+  conversations.create(branchConv);
+  res.json(branchConv);
 });
 
 // Delete conversation

@@ -44,6 +44,8 @@ export function useChat(settings) {
   };
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [branching, setBranching] = useState(false);
+  const branchingRef = useRef(false);
   const [error, setError] = useState(null); // global banner error
   const [pendingApproval, setPendingApproval] = useState(null);
   const [denyEverything, setDenyEverything] = useState(false);
@@ -472,7 +474,7 @@ export function useChat(settings) {
           setMessages(deduped);
         }
         setConversations((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, messages: deduped, title: conv.title || c.title } : c))
+          prev.map((c) => (c.id === id ? { ...c, ...conv, messages: deduped, title: conv.title || c.title } : c))
         );
       }
     } catch (err) {
@@ -521,6 +523,86 @@ export function useChat(settings) {
       });
     },
     []
+  );
+
+  const branchConversation = useCallback(
+    async (messageId, targetConvId) => {
+      if (branchingRef.current) return null;
+      const convId = targetConvId || activeConversationRef.current;
+      if (!convId || !messageId) return null;
+
+      const currentConvs = conversationsRef.current;
+      const currentConv = currentConvs.find((c) => c.id === convId);
+      const convMessages =
+        convId === activeConversationRef.current && messages.length > 0
+          ? messages
+          : currentConv?.messages || [];
+
+      const messageIndex = convMessages.findIndex((m) => m.id === messageId);
+      if (messageIndex === -1) {
+        setError("Message not found in conversation");
+        return null;
+      }
+
+      const historyPrefix = convMessages.slice(0, messageIndex + 1);
+
+      branchingRef.current = true;
+      setBranching(true);
+      setError(null);
+
+      try {
+        const branch = await api.branchConversation(convId, messageId);
+        const newBranchConv = {
+          ...branch,
+          messages: branch.messages || historyPrefix,
+          parentConversationId: branch.parentConversationId || convId,
+          branchedFromMessageId: branch.branchedFromMessageId || messageId,
+        };
+        activeConversationRef.current = newBranchConv.id;
+        setConversations((prev) => [newBranchConv, ...prev]);
+        setActiveConversation(newBranchConv.id);
+        setMessages(newBranchConv.messages);
+        saveConversationsToStorage([newBranchConv, ...conversationsRef.current], newBranchConv.id);
+        return newBranchConv;
+      } catch (err) {
+        const isNetworkOffline =
+          err instanceof TypeError ||
+          err?.name === "TypeError" ||
+          Boolean(err?.message && /fetch|network|offline|connect/i.test(err.message));
+
+        if (isNetworkOffline) {
+          // Offline fallback — create branch locally
+          const branchId = crypto.randomUUID();
+          const clonedMessages = historyPrefix.map((m) => ({
+            ...m,
+            ...(m.attachments ? { attachments: [...m.attachments] } : {}),
+            ...(m.metadata ? { metadata: { ...m.metadata } } : {}),
+          }));
+          const fallbackConv = {
+            id: branchId,
+            title: `${currentConv?.title || "New Chat"} (Branch)`,
+            parentConversationId: convId,
+            branchedFromMessageId: messageId,
+            messages: clonedMessages,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          activeConversationRef.current = branchId;
+          setConversations((prev) => [fallbackConv, ...prev]);
+          setActiveConversation(branchId);
+          setMessages(clonedMessages);
+          saveConversationsToStorage([fallbackConv, ...conversationsRef.current], branchId);
+          return fallbackConv;
+        }
+
+        setError(err.message || "Could not branch conversation");
+        return null;
+      } finally {
+        branchingRef.current = false;
+        setBranching(false);
+      }
+    },
+    [messages]
   );
 
   const clearAllConversations = useCallback(() => {
@@ -705,11 +787,13 @@ export function useChat(settings) {
     error,
     pendingApproval,
     denyEverything,
+    branching,
     createConversation,
     selectConversation,
     deleteConversation,
     clearAllConversations,
     sendMessage,
+    branchConversation,
     dismissError,
     approveCommand,
     denyCommand,

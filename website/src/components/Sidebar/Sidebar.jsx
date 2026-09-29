@@ -1,5 +1,5 @@
 import { useRef, useEffect } from "react";
-import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings } from "lucide-react";
+import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings, GitBranch } from "lucide-react";
 
 export default function Sidebar({
   open,
@@ -157,8 +157,15 @@ export default function Sidebar({
         onClick={() => onSelect(conv.id)}
         onKeyDown={(e) => handleItemKeyDown(e, conv.id)}
       >
-        <MessageSquare size={16} aria-hidden="true" />
+        {conv.parentConversationId ? (
+          <GitBranch size={16} aria-hidden="true" className="branch-icon" />
+        ) : (
+          <MessageSquare size={16} aria-hidden="true" />
+        )}
         <span className="conversation-title">{conv.title || "New Chat"}</span>
+        {conv.parentConversationId && (
+          <span className="branch-badge" aria-label="Branch">branch</span>
+        )}
         <button
           className="delete-btn"
           onClick={(e) => {

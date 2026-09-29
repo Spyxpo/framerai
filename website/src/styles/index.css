@@ -187,6 +187,25 @@ body {
   white-space: nowrap;
 }
 
+.branch-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.branch-badge {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
 .delete-btn {
   display: none;
   align-items: center;
