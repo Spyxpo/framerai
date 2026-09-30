@@ -1,11 +1,11 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import { User, Bot, Copy, Check, AlertCircle, RefreshCw } from "lucide-react";
+import { User, Bot, Copy, Check, AlertCircle, RefreshCw, GitBranch, Loader2 } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
 import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
 import CognitionTrace from "./CognitionTrace";
 
-export default function MessageBubble({ message, isStreaming, onRetry }) {
+export default function MessageBubble({ message, isStreaming, onRetry, onBranch, isBranching }) {
   const [copied, setCopied] = React.useState(false);
   const isUser = message.role === "user";
   const isError = message.type === "error";
@@ -146,9 +146,43 @@ export default function MessageBubble({ message, isStreaming, onRetry }) {
             >
               {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
             </button>
+            {onBranch && message.id && (
+              <button
+                className="action-btn branch-btn"
+                onClick={() => onBranch(message.id)}
+                disabled={isBranching || isStreaming}
+                aria-label="Branch from here"
+                title="Branch from here"
+              >
+                {isBranching ? (
+                  <Loader2 size={14} className="spin" aria-hidden="true" />
+                ) : (
+                  <GitBranch size={14} aria-hidden="true" />
+                )}
+                <span>Branch</span>
+              </button>
+            )}
             {message.metadata?.model && (
               <span className="model-tag">{message.metadata.model}</span>
             )}
+          </div>
+        )}
+        {isUser && message.content && !isError && onBranch && message.id && (
+          <div className="message-actions">
+            <button
+              className="action-btn branch-btn"
+              onClick={() => onBranch(message.id)}
+              disabled={isBranching}
+              aria-label="Branch from here"
+              title="Branch from here"
+            >
+              {isBranching ? (
+                <Loader2 size={14} className="spin" aria-hidden="true" />
+              ) : (
+                <GitBranch size={14} aria-hidden="true" />
+              )}
+              <span>Branch</span>
+            </button>
           </div>
         )}
         {isError && onRetry && (

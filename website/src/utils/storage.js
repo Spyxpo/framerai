@@ -110,6 +110,11 @@ export function sanitizeConversation(conv) {
 
   const title = typeof conv.title === "string" && conv.title.trim() ? conv.title : "New Chat";
   const updatedAt = typeof conv.updatedAt === "string" ? conv.updatedAt : new Date().toISOString();
+  const createdAt = typeof conv.createdAt === "string" && conv.createdAt ? conv.createdAt : undefined;
+  const parentConversationId =
+    typeof conv.parentConversationId === "string" && conv.parentConversationId ? conv.parentConversationId : undefined;
+  const branchedFromMessageId =
+    typeof conv.branchedFromMessageId === "string" && conv.branchedFromMessageId ? conv.branchedFromMessageId : undefined;
 
   const rawMessages = Array.isArray(conv.messages) ? conv.messages : [];
   const messages = [];
@@ -127,6 +132,9 @@ export function sanitizeConversation(conv) {
     id,
     title,
     updatedAt,
+    ...(createdAt ? { createdAt } : {}),
+    ...(parentConversationId ? { parentConversationId } : {}),
+    ...(branchedFromMessageId ? { branchedFromMessageId } : {}),
     messages,
   };
 }

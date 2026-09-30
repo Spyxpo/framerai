@@ -28,6 +28,8 @@ export default function Chat({
   pendingApproval,
   onApproveCommand,
   onDenyCommand,
+  branching,
+  onBranch,
   sidebarOpen,
   onSend,
   onToggleSidebar,
@@ -591,6 +593,8 @@ export default function Chat({
                   message={msg}
                   isStreaming={streaming && isLastMsg}
                   onRetry={isErrorMsg && isLastMsg ? handleRetry : undefined}
+                  onBranch={onBranch}
+                  isBranching={branching}
                 />
               );
             })}

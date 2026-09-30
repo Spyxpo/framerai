@@ -27,11 +27,13 @@ export default function App() {
     loadingMessages,
     error,
     pendingApproval,
+    branching,
     createConversation,
     selectConversation,
     deleteConversation,
     clearAllConversations,
     sendMessage,
+    branchConversation,
     dismissError,
     approveCommand,
     denyCommand,
@@ -113,6 +115,8 @@ export default function App() {
         pendingApproval={pendingApproval}
         onApproveCommand={approveCommand}
         onDenyCommand={denyCommand}
+        branching={branching}
+        onBranch={branchConversation}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}

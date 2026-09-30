@@ -240,6 +240,51 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/chat/conversations/{id}/branch": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "Parent conversation UUID to branch from",
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+        post: {
+          summary: "Branch conversation",
+          description: "Creates a new branched conversation up to and including the specified message.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["messageId"],
+                  properties: {
+                    messageId: {
+                      type: "string",
+                      format: "uuid",
+                      description: "UUID of the message to branch from",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Newly created branched conversation",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Conversation" },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or message not in conversation"),
+            "404": errorResponseRef(404, "Conversation not found"),
+          },
+        },
+      },
       "/generate/image": {
         post: {
           summary: "Generate image from text",
@@ -768,6 +813,8 @@ function generateOpenApiSpec() {
           properties: {
             id: { type: "string", format: "uuid" },
             title: { type: "string" },
+            parentConversationId: { type: "string", format: "uuid" },
+            branchedFromMessageId: { type: "string", format: "uuid" },
             createdAt: { type: "string", format: "date-time" },
             messageCount: { type: "integer", minimum: 0 },
           },
@@ -778,6 +825,8 @@ function generateOpenApiSpec() {
           properties: {
             id: { type: "string", format: "uuid" },
             title: { type: "string" },
+            parentConversationId: { type: "string", format: "uuid" },
+            branchedFromMessageId: { type: "string", format: "uuid" },
             messages: {
               type: "array",
               items: { $ref: "#/components/schemas/ChatMessage" },
