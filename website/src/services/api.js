@@ -31,6 +31,11 @@ export const api = {
   getConversation: (id) => request(`/chat/conversations/${id}`),
   deleteConversation: (id) =>
     request(`/chat/conversations/${id}`, { method: "DELETE" }),
+  branchConversation: (conversationId, messageId) =>
+    request(`/chat/conversations/${conversationId}/branch`, {
+      method: "POST",
+      body: JSON.stringify({ messageId }),
+    }),
 
   // Messages
   sendMessage: (conversationId, content, type = "text", attachments = [], settings) =>

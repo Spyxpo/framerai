@@ -63,6 +63,11 @@ function createApp() {
   // Routes
   app.use("/api/health", healthRoutes);
   app.use("/api/chat", chatRoutes);
+  // Support direct /api/conversations routes as well as /api/chat/conversations
+  app.use("/api/conversations", (req, res, next) => {
+    req.url = "/conversations" + req.url;
+    chatRoutes(req, res, next);
+  });
   app.use("/api/generate", generationLimiter, generateRoutes);
 
   // Unmatched routes and every thrown error share one response shape

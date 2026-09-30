@@ -23,4 +23,5 @@ module.exports = {
   apiLimiter: rateLimit(apiCounter, "Too many requests"),
   generationLimiter: rateLimit(generationCounter, "Too many generation requests"),
   generationCounter,
+  apiCounter,
 };
