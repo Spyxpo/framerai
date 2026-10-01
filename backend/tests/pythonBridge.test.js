@@ -3446,3 +3446,335 @@ describe("Issue #386: worker that exits before reporting ready", () => {
     }
   });
 });
+
+describe("Issue #390 regression: worker exit before ready propagates startup failure", { concurrency: 1 }, () => {
+  let bridge = null;
+  let savedEnv = null;
+  let originalExistsSync = null;
+
+  const MANAGED_ENV = {
+    MODEL_ENABLED: "true",
+    MODEL_PATH: "/fake/model.pt",
+    TOKENIZER_PATH: "/fake/tokenizer",
+    MODEL_WORKERS: "1",
+    PYTHON_BIN: undefined,
+    MODEL_TOOLS: undefined,
+    MODEL_CLI_MODE: undefined,
+    MODEL_CLI_ROOT: undefined,
+    MODEL_TIMEOUT_MS: undefined,
+    MODEL_STARTUP_TIMEOUT_MS: undefined,
+    MODEL_WORKER_STABILITY_MS: undefined,
+    MODEL_KILL_GRACE_MS: undefined,
+    MODEL_HEARTBEAT_TIMEOUT_MS: undefined,
+    MODEL_HEARTBEAT_STARTUP_GRACE_MS: undefined,
+  };
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    savedEnv = {};
+    for (const [key, value] of Object.entries(MANAGED_ENV)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path && path.includes("model.pt")) return true;
+      return originalExistsSync ? originalExistsSync(path) : false;
+    };
+
+    mockSpawn = (command, args, options) => {
+      return new MockChildProcess(command, args, options);
+    };
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([
+      promise.then(
+        (val) => (val === undefined ? "resolved: undefined" : val),
+        (err) => `rejected: ${err.message}`
+      ),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
+  };
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  it("1. Worker exits before ready: Worker.prototype.start() rejects and state is cleaned up", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+    assert.strictEqual(worker.starting, false);
+
+    const startPromise = worker.start();
+    assert.strictEqual(worker.starting, true);
+    await tick();
+
+    // Exit before reporting ready
+    spawnedProcesses[0].simulateExit(1);
+
+    const result = await settlesWithin(startPromise, 1000);
+    assert.match(result, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.strictEqual(worker.starting, false, "worker must not remain starting");
+    assert.strictEqual(worker.ready, false, "worker must not be ready");
+    assert.strictEqual(worker.child, null, "child process reference must be cleared");
+    assert.strictEqual(worker._safetyTimer, null, "safety timer must be cleared");
+  });
+
+  it("2. Multiple concurrent worker.start() callers all settle correctly on exit before ready", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+
+    const p1 = worker.start();
+    const p2 = worker.start();
+    const p3 = worker.start();
+
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+
+    const [r1, r2, r3] = await Promise.all([
+      settlesWithin(p1, 1000),
+      settlesWithin(p2, 1000),
+      settlesWithin(p3, 1000),
+    ]);
+
+    assert.match(r1, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.match(r2, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.match(r3, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.strictEqual(worker.starting, false);
+  });
+
+  it("3. Worker error + exit sequence: startup rejects cleanly with no unhandled rejections", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+
+    const startPromise = worker.start();
+    await tick();
+
+    // Error event followed by exit event
+    spawnedProcesses[0].emit("error", new Error("spawn ENOENT"));
+    spawnedProcesses[0].simulateExit(1);
+
+    const result = await settlesWithin(startPromise, 1000);
+    assert.match(result, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.strictEqual(worker.starting, false);
+    assert.strictEqual(worker.ready, false);
+  });
+
+  it("4. Worker exit due to signal rejects startup with deterministic error", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+
+    const startPromise = worker.start();
+    await tick();
+
+    // Child terminated by SIGKILL
+    spawnedProcesses[0].emit("exit", null, "SIGKILL");
+
+    const result = await settlesWithin(startPromise, 1000);
+    assert.match(result, /rejected: worker 0 startup failed: process exited before ready/);
+    assert.strictEqual(worker.starting, false);
+    assert.strictEqual(worker.ready, false);
+  });
+
+  it("5. Late ready event after worker exit cannot revive the worker or resolve failed startup", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+
+    const startPromise = worker.start();
+    await tick();
+
+    spawnedProcesses[0].simulateExit(1);
+    const result = await settlesWithin(startPromise, 1000);
+    assert.match(result, /rejected: worker 0 startup failed: process exited before ready/);
+
+    // Late ready arrives after exit
+    spawnedProcesses[0].simulateReady(true);
+
+    assert.strictEqual(worker.ready, false, "dead worker must not become ready from late event");
+    assert.strictEqual(worker.starting, false);
+    assert.strictEqual(worker.child, null);
+    assert.strictEqual(worker._livenessTimer, null);
+  });
+
+  it("6. Subsequent worker startup can succeed after an earlier startup failure", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+
+    // First attempt fails
+    const failPromise = worker.start();
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+    await settlesWithin(failPromise, 1000);
+    assert.strictEqual(worker.ready, false);
+
+    // Second attempt on new worker instance succeeds
+    const healthyWorker = new bridge.Worker(1);
+    const successPromise = healthyWorker.start();
+    await tick();
+    spawnedProcesses[1].simulateReady(true);
+
+    const res = await settlesWithin(successPromise, 1000);
+    assert.strictEqual(res, healthyWorker);
+    assert.strictEqual(healthyWorker.ready, true);
+    assert.strictEqual(healthyWorker.starting, false);
+    healthyWorker.cleanup();
+  });
+
+  it("7. WorkerPool.prototype.start() rejects multiple concurrent startup callers when workers exit before ready", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const pool = new bridge.WorkerPool(1);
+
+    const s1 = pool.start();
+    const s2 = pool.start();
+    const s3 = pool.start();
+
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+
+    const [r1, r2, r3] = await Promise.all([
+      settlesWithin(s1, 1000),
+      settlesWithin(s2, 1000),
+      settlesWithin(s3, 1000),
+    ]);
+
+    assert.strictEqual(r1, "rejected: no workers available");
+    assert.strictEqual(r2, "rejected: no workers available");
+    assert.strictEqual(r3, "rejected: no workers available");
+    assert.strictEqual(pool.starting, false, "pool must not remain starting");
+    pool.shutdown();
+  });
+
+  it("8. First request and multiple pending requests on WorkerPool are all rejected when worker exits before ready", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const pool = new bridge.WorkerPool(1);
+
+    const startPromise = pool.start();
+    const req1 = pool.execute("chat", { prompt: "first" });
+    const req2 = pool.execute("chat", { prompt: "second" });
+    const req3 = pool.execute("chat", { prompt: "third" });
+
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+
+    const [startRes, res1, res2, res3] = await Promise.all([
+      settlesWithin(startPromise, 1000),
+      settlesWithin(req1, 1000),
+      settlesWithin(req2, 1000),
+      settlesWithin(req3, 1000),
+    ]);
+
+    assert.strictEqual(startRes, "rejected: no workers available");
+    assert.strictEqual(res1, "rejected: no workers available");
+    assert.strictEqual(res2, "rejected: no workers available");
+    assert.strictEqual(res3, "rejected: no workers available");
+    assert.strictEqual(pool.queue.length, 0, "queue must be emptied");
+    assert.strictEqual(pool.starting, false);
+    pool.shutdown();
+  });
+
+  it("9. Bridge-level concurrent start() and request() callers all settle promptly and do not hang", async () => {
+    bridge = require("../src/services/pythonBridge");
+
+    const start1 = bridge.start();
+    const start2 = bridge.start();
+    const req1 = bridge.request("chat", { prompt: "req1" });
+    const req2 = bridge.request("chat", { prompt: "req2" });
+
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+
+    const [s1, s2, r1, r2] = await Promise.all([
+      settlesWithin(start1, 1000),
+      settlesWithin(start2, 1000),
+      settlesWithin(req1, 1000),
+      settlesWithin(req2, 1000),
+    ]);
+
+    assert.strictEqual(s1, false, "start1 must resolve false");
+    assert.strictEqual(s2, false, "start2 must resolve false, not true");
+    assert.strictEqual(r1, "rejected: no workers available");
+    assert.strictEqual(r2, "rejected: no workers available");
+
+    // Subsequent request after startup failure must reject immediately rather than hanging
+    const req3 = bridge.request("chat", { prompt: "req3" });
+    const r3 = await settlesWithin(req3, 1000);
+    assert.strictEqual(r3, "rejected: model disabled");
+  });
+
+  it("10. Existing restart/recovery behavior remains functional and replaces dead worker", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const timers = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        const t = { fn, ms };
+        timers.push(t);
+        return t;
+      },
+      () => {}
+    );
+
+    try {
+      const startPromise = bridge.start();
+      await tick();
+      spawnedProcesses[0].simulateReady(true);
+
+      const started = await settlesWithin(startPromise, 1000);
+      assert.strictEqual(started, true);
+      assert.strictEqual(bridge.available(), true);
+
+      // Healthy worker crashes
+      spawnedProcesses[0].simulateExit(1);
+      await tick();
+
+      // Find restart backoff timer
+      const backoff = timers.find((t) => t.ms >= 500 && t.ms <= 8000);
+      assert.ok(backoff, "restart backoff should be scheduled");
+      backoff.fn();
+      await tick();
+
+      assert.strictEqual(spawnedProcesses.length, 2, "replacement worker should spawn");
+      spawnedProcesses[1].onStdinWrite = (data) => {
+        spawnedProcesses[1].simulateResponse(JSON.parse(data).id, true, { content: "recovered response" });
+      };
+      spawnedProcesses[1].simulateReady(true);
+      await tick();
+
+      assert.strictEqual(bridge.available(), true, "bridge should be available after recovery");
+      const reply = await settlesWithin(bridge.request("chat", { prompt: "hello" }), 1000);
+      assert.deepStrictEqual(reply, { content: "recovered response" });
+    } finally {
+      bridge._setTimerImpl(prev.set, prev.clear);
+    }
+  });
+});
