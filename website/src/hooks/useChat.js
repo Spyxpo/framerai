@@ -144,7 +144,8 @@ export function useChat(settings) {
       const inFlightConvId = streamingConversationIdsRef.current.size === 1
         ? Array.from(streamingConversationIdsRef.current)[0]
         : null;
-      const targetConvId = data.conversationId || inFlightConvId || activeConversationRef.current;
+      const targetConvId = data.conversationId || inFlightConvId || (streamingConversationIdsRef.current.has(activeConversationRef.current) ? activeConversationRef.current : null);
+      if (!targetConvId) return;
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
       const targetMsgId = data.messageId || data.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
 
@@ -314,7 +315,7 @@ export function useChat(settings) {
       const targetConvId = data?.conversationId;
       const isActiveConv = !targetConvId || targetConvId === activeConversationRef.current;
 
-      if (isActiveConv) {
+      if (isActiveConv && activeConversationRef.current) {
         markStreamingStart(targetConvId || activeConversationRef.current);
       }
     });
@@ -325,11 +326,13 @@ export function useChat(settings) {
       const inFlightConvId = streamingConversationIdsRef.current.size === 1
         ? Array.from(streamingConversationIdsRef.current)[0]
         : null;
-      const targetConvId = data?.conversationId || inFlightConvId || activeConversationRef.current;
+      const targetConvId = data?.conversationId || inFlightConvId || (streamingConversationIdsRef.current.has(activeConversationRef.current) ? activeConversationRef.current : null);
+      if (!targetConvId) return;
+
+      markStreamingEnd(targetConvId);
+
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
       const targetMsgId = data?.messageId || data?.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
-
-      if (targetConvId) markStreamingEnd(targetConvId);
 
       const applyWsError = (msgs) => {
         const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
@@ -496,33 +499,89 @@ export function useChat(settings) {
 
   const deleteConversation = useCallback(
     async (id) => {
+      if (!id) return;
       setError(null);
-      try {
-        await api.deleteConversation(id);
-      } catch {
-        // Continue anyway — remove from local list regardless
-      }
-      // If this conversation was actively streaming or loading, remove it from the Sets
+
+      // Clean up in-flight generation / streaming / loading states immediately
       markStreamingEnd(id);
       markLoadingEnd(id);
       activeAssistantIdByConvRef.current.delete(id);
-      setConversations((prev) => {
-        const remaining = prev.filter((c) => c.id !== id);
-        if (activeConversationRef.current === id) {
-          const nextConv = remaining[0] || null;
-          const nextId = nextConv ? nextConv.id : null;
-          const nextMsgs = nextConv ? nextConv.messages || [] : [];
-          activeConversationRef.current = nextId;
-          setActiveConversation(nextId);
-          setMessages(nextMsgs);
-          saveConversationsToStorage(remaining, nextId);
-        } else {
-          saveConversationsToStorage(remaining, activeConversationRef.current);
+      setPendingApproval((prev) => (prev?.conversationId === id ? null : prev));
+
+      const currentList = conversationsRef.current;
+      const exists = currentList.some((c) => c.id === id);
+      const remaining = currentList.filter((c) => c.id !== id);
+      conversationsRef.current = remaining;
+      setConversations(remaining);
+
+      const isCurrentActive = activeConversationRef.current === id || activeConversation === id;
+
+      if (isCurrentActive) {
+        setLoadingMessages(false);
+        if (branchingRef.current) {
+          branchingRef.current = false;
+          setBranching(false);
         }
-        return remaining;
-      });
+
+        const nextConv = remaining[0] || null;
+        const nextId = nextConv ? nextConv.id : null;
+        const nextMsgs = nextConv && Array.isArray(nextConv.messages) ? nextConv.messages : [];
+        activeConversationRef.current = nextId;
+        setActiveConversation(nextId);
+        setMessages(nextMsgs);
+
+        if (!nextId) {
+          setPendingApproval(null);
+          clearConversationsFromStorage();
+        } else {
+          saveConversationsToStorage(remaining, nextId);
+          // If the newly active conversation has unloaded messages on the backend, fetch them
+          const needsFetch =
+            !nextConv.messages ||
+            (typeof nextConv.messageCount === "number" && nextConv.messageCount > 0 && nextConv.messages.length === 0);
+
+          if (needsFetch) {
+            setLoadingMessages(true);
+            api
+              .getConversation(nextId)
+              .then((conv) => {
+                if (conv && Array.isArray(conv.messages) && activeConversationRef.current === nextId) {
+                  const seen = new Set();
+                  const deduped = conv.messages.filter((m) => {
+                    if (!m?.id) return true;
+                    if (seen.has(m.id)) return false;
+                    seen.add(m.id);
+                    return true;
+                  });
+                  if (deduped.length > 0) {
+                    setMessages(deduped);
+                    setConversations((prev) =>
+                      prev.map((c) =>
+                        c.id === nextId ? { ...c, ...conv, messages: deduped, title: conv.title || c.title } : c
+                      )
+                    );
+                  }
+                }
+              })
+              .catch(() => {})
+              .finally(() => {
+                if (activeConversationRef.current === nextId) {
+                  setLoadingMessages(false);
+                }
+              });
+          }
+        }
+      } else if (exists) {
+        saveConversationsToStorage(remaining, activeConversationRef.current);
+      }
+
+      try {
+        await api.deleteConversation(id);
+      } catch {
+        // Continue anyway — removed from local state regardless
+      }
     },
-    []
+    [activeConversation]
   );
 
   const branchConversation = useCallback(
@@ -613,6 +672,12 @@ export function useChat(settings) {
     setLoading(false);
     activeAssistantIdByConvRef.current.clear();
     completedMessageIdsRef.current.clear();
+    setLoadingMessages(false);
+    setPendingApproval(null);
+    if (branchingRef.current) {
+      branchingRef.current = false;
+      setBranching(false);
+    }
     activeConversationRef.current = null;
     setConversations([]);
     setActiveConversation(null);
