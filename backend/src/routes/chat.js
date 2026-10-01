@@ -159,7 +159,11 @@ router.post(
       timestamp: new Date().toISOString(),
     };
     conversations.append(conv.id, assistantMessage);
-    res.json(assistantMessage);
+    // The reply is the response, so the user's message would otherwise never
+    // learn the id it was stored under, and a client holding a different one
+    // could not ask for it again (branching). Added to the response only: the
+    // stored reply stays a plain message.
+    res.json({ ...assistantMessage, userMessageId: userMessage.id });
   })
 );
 

@@ -173,8 +173,9 @@ function safeSend(ws, payload) {
 /**
  * Stream audio in chunks over WebSocket.
  * Reads the generated WAV file, extracts PCM data, and sends it in time-based chunks.
+ * The last frame carries messageId, the id the reply is stored under (Issue #394).
  */
-async function streamAudio(ws, response, conversationId, wsLog) {
+async function streamAudio(ws, response, conversationId, wsLog, messageId) {
   const audioUrl = response.metadata?.url;
   if (!audioUrl) {
     // No audio file available, send non-streaming response
@@ -183,6 +184,7 @@ async function streamAudio(ws, response, conversationId, wsLog) {
       conversationId,
       content: response.content,
       done: true,
+      messageId,
       responseType: "audio",
       metadata: response.metadata,
     });
@@ -230,6 +232,7 @@ async function streamAudio(ws, response, conversationId, wsLog) {
         conversationId,
         content: i === 0 ? response.content : "",
         done: isLast,
+        ...(isLast ? { messageId } : {}),
         responseType: "audio",
         metadata: {
           chunk: i,
@@ -260,6 +263,7 @@ async function streamAudio(ws, response, conversationId, wsLog) {
       conversationId,
       content: response.content,
       done: true,
+      messageId,
       responseType: "audio",
       metadata: response.metadata,
     });
@@ -337,10 +341,16 @@ function setupWebSocket(wss) {
             }
           }
 
+          // The id the user's message is stored under. The ack used to carry a
+          // random id that matched nothing, and the stored turn had none, so the
+          // client could not tell which message the server meant, or ask for it
+          // again (to branch from it). The ack now says what it is (Issue #394).
+          const userMessageId = randomUUID();
+
           // Send acknowledgment
           safeSend(ws, {
             type: "ack",
-            messageId: randomUUID(),
+            messageId: userMessageId,
             conversationId,
           });
 
@@ -352,6 +362,7 @@ function setupWebSocket(wss) {
           // model sees the exchange rather than only its latest line. An
           // unknown id keeps the old single-turn behaviour.
           const userMessage = {
+            id: userMessageId,
             role: "user",
             content,
             type: messageType,
@@ -421,8 +432,12 @@ function setupWebSocket(wss) {
 
           // The reply joins the conversation too. Recording only the user's
           // half would give the next turn a history of questions with no
-          // answers, which reads worse than no history at all.
+          // answers, which reads worse than no history at all. One id per reply,
+          // stored with it and named on its last frame below, so the message is
+          // never known by two (Issue #394).
+          const assistantMessageId = randomUUID();
           conversations.append(conversationId, {
+            id: assistantMessageId,
             role: "assistant",
             content: response.content,
             type: response.type,
@@ -441,7 +456,7 @@ function setupWebSocket(wss) {
 
           // Special handling for audio: stream PCM chunks
           if (response.type === "audio") {
-            await streamAudio(ws, response, conversationId, wsLog);
+            await streamAudio(ws, response, conversationId, wsLog, assistantMessageId);
             return;
           }
 
@@ -451,6 +466,7 @@ function setupWebSocket(wss) {
               conversationId,
               content: response.content || accumulated,
               done: true,
+              messageId: assistantMessageId,
               responseType: response.type,
               metadata: response.metadata,
             });
@@ -478,6 +494,7 @@ function setupWebSocket(wss) {
                 conversationId,
                 content: acc,
                 done: isDone,
+                ...(isDone ? { messageId: assistantMessageId } : {}),
                 responseType: response.type,
                 metadata: isDone ? response.metadata : undefined,
               });

@@ -587,9 +587,11 @@ export default function Chat({
             {messages.map((msg, i) => {
               const isLastMsg = i === messages.length - 1;
               const isErrorMsg = msg.type === "error";
+              // clientId is the id the message was created with. It stays the key
+              // when the server's id replaces it, so the bubble is not remounted.
               return (
                 <MessageBubble
-                  key={msg.id || i}
+                  key={msg.clientId || msg.id || i}
                   message={msg}
                   isStreaming={streaming && isLastMsg}
                   onRetry={isErrorMsg && isLastMsg ? handleRetry : undefined}
