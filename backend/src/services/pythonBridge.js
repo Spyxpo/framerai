@@ -78,6 +78,8 @@ class Worker {
     this.id = id;
     this.child = null;
     this.ready = false;
+    this.starting = false;
+    this._startPromise = null;
     this.info = null;
     this.busy = false;
     this.currentRequest = null;
@@ -96,6 +98,7 @@ class Worker {
 
   spawn() {
     const workerLog = createLogger({ route: `worker-${this.id}` });
+    this.starting = true;
     return new Promise((resolve) => {
       const argv = ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH];
       if (MODEL_TOOLS) argv.push("--tools", MODEL_TOOLS);
@@ -106,6 +109,7 @@ class Worker {
       try {
         this.child = spawn(PYTHON_BIN, argv, { cwd: REPO_ROOT });
       } catch (err) {
+        this.starting = false;
         workerLog.warn("spawn failed", { error: err.message });
         resolve(false);
         return;
@@ -127,6 +131,8 @@ class Worker {
           return;
         }
         resolved = true;
+        this.starting = false;
+        this.ready = false;
         workerLog.warn("spawn failed", { error: err.message });
         // Same teardown as the startup timeout. It stops the safety timer and
         // detaches the exit handler, so an 'exit' that still follows cannot
@@ -150,6 +156,7 @@ class Worker {
           }
           if (!resolved && Object.prototype.hasOwnProperty.call(msg, "ready")) {
             resolved = true;
+            this.starting = false;
             // Clear safety timeout on success or failure
             if (this._safetyTimer) {
               _clearTimeout(this._safetyTimer);
@@ -172,6 +179,7 @@ class Worker {
               resolve(true);
             } else {
               workerLog.warn("failed to load", { error: msg.error });
+              this.ready = false;
               resolve(false);
             }
             continue;
@@ -261,9 +269,10 @@ class Worker {
 
       this.child.stderr.on("data", (d) => process.stderr.write(`[model:worker-${this.id}] ${d}`));
 
-      this.child.on("exit", (code) => {
-        workerLog.warn("exited", { code });
+      this.child.on("exit", (code, signal) => {
+        workerLog.warn("exited", { code, signal });
         this.ready = false;
+        this.starting = false;
         this.child = null;
         // Clear safety timeout if still pending
         if (this._safetyTimer) {
@@ -305,6 +314,8 @@ class Worker {
       this._safetyTimer = _setTimeout(() => {
         if (!resolved) {
           resolved = true;
+          this.starting = false;
+          this.ready = false;
           this._safetyTimer = null;
           workerLog.warn("startup timeout, cleaning up", { timeoutMs: STARTUP_TIMEOUT_MS });
           this.cleanup();
@@ -526,6 +537,7 @@ class Worker {
   }
 
   cleanup() {
+    this.starting = false;
     if (this._safetyTimer) {
       _clearTimeout(this._safetyTimer);
       this._safetyTimer = null;
@@ -549,6 +561,23 @@ class Worker {
     this.currentRequest = null;
     this.currentRequestId = null;
   }
+
+  start() {
+    if (this.ready) return Promise.resolve(this);
+    if (this._startPromise) return this._startPromise;
+    this.starting = true;
+    this._startPromise = (async () => {
+      const ok = await this.spawn();
+      if (!ok || !this.ready) {
+        this.cleanup();
+        throw new Error(`worker ${this.id} startup failed: process exited before ready`);
+      }
+      return this;
+    })();
+    return this._startPromise.finally(() => {
+      this._startPromise = null;
+    });
+  }
 }
 
 // Pool state
@@ -563,6 +592,7 @@ class WorkerPool {
     this.size = size;
     this.starting = false;
     this.stopped = false;
+    this._startPromise = null;
     // Track consecutive restart attempts per worker slot (by id)
     this._restartCounts = new Map();
     this._restartTimers = new Map();
@@ -590,39 +620,67 @@ class WorkerPool {
     this._stabilityTimers.set(workerId, timer);
   }
 
-  async start() {
-    if (this.starting) return;
+  failQueuedRequests(err) {
+    while (this.queue.length > 0) {
+      const item = this.queue.shift();
+      clearTimeout(item.timer);
+      item.reject(err);
+    }
+  }
+
+  start() {
+    if (this._startPromise) return this._startPromise;
+    if (this.workers.some((w) => w.ready)) return Promise.resolve();
+
     this.starting = true;
+    this._startPromise = (async () => {
+      fs.mkdirSync(GENERATED_DIR, { recursive: true });
 
-    fs.mkdirSync(GENERATED_DIR, { recursive: true });
-
-    const startPromises = [];
-    for (let i = 0; i < this.size; i++) {
-      const worker = new Worker(i);
-      worker.onAvailable = () => this.dispatch();
-      worker.onExit = (w) => this.handleWorkerExit(w);
-      worker.onSuccess = (w) => this.markWorkerStable(w.id);
-      this.workers.push(worker);
-      startPromises.push(worker.spawn());
-    }
-
-    const results = await Promise.all(startPromises);
-    const successCount = results.filter((r) => r).length;
-
-    if (successCount === 0) {
-      this.poolLog.warn("no workers started successfully");
-      disabled = true;
-      throw new Error("no workers available");
-    }
-
-    for (let i = 0; i < this.size; i++) {
-      if (results[i]) {
-        this.scheduleStabilityTimer(i);
+      const startPromises = [];
+      for (let i = 0; i < this.size; i++) {
+        const worker = new Worker(i);
+        worker.onAvailable = () => this.dispatch();
+        worker.onExit = (w) => this.handleWorkerExit(w);
+        worker.onSuccess = (w) => this.markWorkerStable(w.id);
+        this.workers.push(worker);
+        startPromises.push(worker.spawn());
       }
-    }
 
-    this.poolLog.info("pool started", { successCount, totalWorkers: this.size });
-    this.dispatch();
+      let results;
+      try {
+        results = await Promise.all(startPromises);
+      } catch (err) {
+        this.starting = false;
+        this.failQueuedRequests(err);
+        throw err;
+      }
+
+      const successCount = results.filter((r) => r).length;
+
+      if (successCount === 0) {
+        this.poolLog.warn("no workers started successfully");
+        disabled = true;
+        this.starting = false;
+        const err = new Error("no workers available");
+        this.failQueuedRequests(err);
+        throw err;
+      }
+
+      this.starting = false;
+
+      for (let i = 0; i < this.size; i++) {
+        if (results[i]) {
+          this.scheduleStabilityTimer(i);
+        }
+      }
+
+      this.poolLog.info("pool started", { successCount, totalWorkers: this.size });
+      this.dispatch();
+    })();
+
+    return this._startPromise.finally(() => {
+      this._startPromise = null;
+    });
   }
 
   async handleWorkerExit(deadWorker) {
@@ -734,6 +792,13 @@ class WorkerPool {
   }
 
   async execute(op, params, optionsOrRequestId = null, operatorCtxParam = null) {
+    if (this.stopped) {
+      throw new Error("pool shutdown");
+    }
+    if (disabled) {
+      throw new Error("no workers available");
+    }
+
     let options = {};
     if (typeof optionsOrRequestId === "string") {
       options = { requestId: optionsOrRequestId, operatorCtx: operatorCtxParam };
@@ -767,6 +832,7 @@ class WorkerPool {
 
   shutdown() {
     this.stopped = true;
+    this.starting = false;
     // Cancel any pending backoff timers so restart loops stop immediately
     for (const timer of this._restartTimers.values()) {
       _clearTimeout(timer);
@@ -793,8 +859,9 @@ function isConfigured() {
   return MODEL_ENABLED && MODEL_PATH && fs.existsSync(MODEL_PATH);
 }
 
+let poolInitPromise = null;
+
 async function ensurePool() {
-  if (poolInitialized) return pool;
   if (disabled) throw new Error("model disabled");
 
   if (!isConfigured()) {
@@ -802,17 +869,35 @@ async function ensurePool() {
     throw new Error("model not configured");
   }
 
-  pool = new WorkerPool(WORKER_COUNT);
-  poolInitialized = true;
-
-  try {
-    await pool.start();
-  } catch (err) {
-    disabled = true;
-    throw err;
+  if (poolInitialized && pool && !disabled) {
+    return pool;
   }
 
-  return pool;
+  if (pool && !disabled && pool.workers.some((w) => w.ready)) {
+    poolInitialized = true;
+    return pool;
+  }
+
+  if (poolInitPromise) {
+    return poolInitPromise;
+  }
+
+  pool = new WorkerPool(WORKER_COUNT);
+  poolInitPromise = (async () => {
+    try {
+      await pool.start();
+      poolInitialized = true;
+      return pool;
+    } catch (err) {
+      disabled = true;
+      poolInitialized = false;
+      throw err;
+    } finally {
+      poolInitPromise = null;
+    }
+  })();
+
+  return poolInitPromise;
 }
 
 async function request(op, params = {}, optionsOrRequestId = null, operatorCtx = null) {
@@ -845,7 +930,8 @@ function modelInfo() {
 }
 
 async function start() {
-  if (poolInitialized) return !disabled;
+  if (disabled) return false;
+  if (poolInitialized && pool && pool.workers.some((w) => w.ready)) return true;
   try {
     await ensurePool();
     return true;
@@ -854,4 +940,15 @@ async function start() {
   }
 }
 
-module.exports = { request, available, hasAvailableWorker, start, modelInfo, GENERATED_DIR, _pool: () => pool, _setTimerImpl };
+module.exports = {
+  Worker,
+  WorkerPool,
+  request,
+  available,
+  hasAvailableWorker,
+  start,
+  modelInfo,
+  GENERATED_DIR,
+  _pool: () => pool,
+  _setTimerImpl,
+};
