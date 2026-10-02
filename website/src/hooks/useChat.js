@@ -7,6 +7,30 @@ import {
   clearConversationsFromStorage,
 } from "../utils/storage";
 
+/**
+ * Give a message the id the server stored it under (Issue #394).
+ *
+ * The client mints a temporary id for every message it shows, so the interface can
+ * render and stream into it at once. The server mints its own, and that is the id
+ * it looks a message up by, "Branch from here" included, so the client adopts it as
+ * soon as the server reports the persisted message. The temporary id is kept as
+ * `clientId` and used only as the key the list renders the bubble under: a new
+ * key would remount it, replaying its entry animation and tearing down an audio
+ * player mid-playback.
+ *
+ * Nothing changes without a server id, with the id the message already has, or
+ * when no message carries the current one. The message is replaced in place, so
+ * adopting an id never adds or removes a message.
+ */
+function adoptServerId(msgs, currentId, serverId) {
+  if (!currentId || !serverId || serverId === currentId) return msgs;
+  const idx = msgs.findIndex((m) => m.id === currentId);
+  if (idx === -1) return msgs;
+  const updated = [...msgs];
+  updated[idx] = { ...updated[idx], id: serverId, clientId: updated[idx].clientId || currentId };
+  return updated;
+}
+
 export function useChat(settings) {
   const [initialStorage] = useState(loadConversationsFromStorage);
   const [conversations, setConversations] = useState(initialStorage.conversations);
@@ -210,9 +234,10 @@ export function useChat(settings) {
               completed: true,
             };
             if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+            if (data.messageId) completedMessageIdsRef.current.add(data.messageId);
             if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
             updated[idx] = newMsg;
-            return updated;
+            return adoptServerId(updated, newMsg.id, data.messageId);
           };
 
           if (isActiveConv) {
@@ -273,9 +298,12 @@ export function useChat(settings) {
             completed: true,
           };
           if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+          // The last frame names the persisted reply. Remembering that id too
+          // keeps a repeated completion that names it from being applied twice.
+          if (data.messageId) completedMessageIdsRef.current.add(data.messageId);
           if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
           updated[idx] = newMsg;
-          return updated;
+          return adoptServerId(updated, newMsg.id, data.messageId);
         };
 
         if (isActiveConv) {
@@ -307,6 +335,30 @@ export function useChat(settings) {
             prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyChunk(c.messages || []) } : c))
           );
         }
+      }
+    });
+
+    // The server has stored the user's message and says under which id. The
+    // message on screen still carries the temporary one minted when it was sent.
+    ws.on("ack", (data) => {
+      const targetConvId = data?.conversationId || activeConversationRef.current;
+      const inFlightId = targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null;
+      if (!data?.messageId || !inFlightId) return;
+
+      const applyAck = (msgs) => {
+        // sendMessage appends the user's message and the reply's placeholder
+        // together, so the message being acknowledged is the one just before it.
+        const idx = msgs.findIndex((m) => m.id === inFlightId);
+        const user = idx > 0 ? msgs[idx - 1] : null;
+        return user?.role === "user" ? adoptServerId(msgs, user.id, data.messageId) : msgs;
+      };
+
+      if (targetConvId === activeConversationRef.current) {
+        setMessages(applyAck);
+      } else {
+        setConversations((prev) =>
+          prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyAck(c.messages || []) } : c))
+        );
       }
     });
 
@@ -708,7 +760,13 @@ export function useChat(settings) {
             metadata: response.metadata,
             completed: true,
           };
-          return updated;
+          // The response names the reply and the user's message by the ids the
+          // server stored them under, which replace the temporary ones.
+          return adoptServerId(
+            adoptServerId(updated, assistantMsg.id, response.id),
+            userMsg.id,
+            response.userMessageId
+          );
         };
 
         if (isActiveConv) {
