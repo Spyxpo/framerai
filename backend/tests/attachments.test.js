@@ -13,7 +13,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { resolveAttachments } = require("../src/services/model");
+const bridge = require("../src/services/pythonBridge");
+const { resolveAttachments, processMessage } = require("../src/services/model");
 
 const uploadsRoot = path.join(__dirname, "..", "uploads");
 const imageName = "attachment-test.png";
@@ -86,4 +87,75 @@ test("no attachments is not an error", () => {
   assert.deepEqual(resolveAttachments([]), []);
   assert.deepEqual(resolveAttachments("not an array"), []);
   assert.deepEqual(resolveAttachments([null, 42, {}]), []);
+});
+
+// One file, however many times it is listed (Issue #392).
+//
+// Every reference the worker receives is a full read of the file and another
+// copy of its text in the prompt, so a repeat costs as much as a distinct file
+// and carries nothing. A message may list ten, which is ten reads of one upload.
+
+test("a file listed twice is resolved once", () => {
+  const resolved = resolveAttachments([`/uploads/images/${imageName}`, `/uploads/images/${imageName}`]);
+  assert.deepEqual(resolved, [{ path: imagePath, kind: "image" }]);
+});
+
+test("different spellings of one path are one file", () => {
+  const resolved = resolveAttachments([
+    `/uploads/documents/${documentName}`,
+    { path: `/uploads/documents/${documentName}` },
+    `/uploads/documents/./${documentName}`,
+    `/uploads/documents//${documentName}`,
+    `/uploads/images/../documents/${documentName}`,
+  ]);
+  assert.deepEqual(resolved, [{ path: documentPath, kind: "document" }]);
+});
+
+test("repeats keep the order of first appearance and displace nothing else", () => {
+  const image = `/uploads/images/${imageName}`;
+  const document = `/uploads/documents/${documentName}`;
+  const resolved = resolveAttachments([document, image, document, image, document]);
+  assert.deepEqual(
+    resolved.map((a) => a.kind),
+    ["document", "image"]
+  );
+});
+
+test("a refused reference is refused every time it is listed", () => {
+  const escape = "/uploads/../../../etc/passwd";
+  assert.deepEqual(resolveAttachments([escape, escape]), []);
+
+  const absent = "/uploads/images/absent.png";
+  const resolved = resolveAttachments([absent, absent, `/uploads/images/${imageName}`]);
+  assert.deepEqual(resolved, [{ path: imagePath, kind: "image" }]);
+});
+
+test("ten references to one upload reach the worker as one attachment", async () => {
+  const origAvailable = bridge.available;
+  const origRequest = bridge.request;
+  const requests = [];
+  bridge.available = () => true;
+  bridge.request = async (op, params) => {
+    requests.push({ op, params });
+    return { content: "a reply", finish_reason: "stop" };
+  };
+
+  try {
+    const reference = `/uploads/documents/${documentName}`;
+    const reply = await processMessage(
+      [{ role: "user", content: "Summarise the attached file.", attachments: Array(10).fill(reference) }],
+      "text",
+      {},
+      "req-392"
+    );
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].op, "chat");
+    assert.deepEqual(requests[0].params.attachments, [{ path: documentPath, kind: "document" }]);
+    // The reply reports what reached the model, so it reports one, not ten.
+    assert.deepEqual(reply.metadata.attachments, ["document"]);
+  } finally {
+    bridge.available = origAvailable;
+    bridge.request = origRequest;
+  }
 });

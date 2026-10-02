@@ -27,6 +27,7 @@ from model.document import (
     order_spans,
     rasterize_page,
     read_document,
+    read_pdf,
     register_raster_backend,
     spans_to_text,
 )
@@ -234,3 +235,237 @@ def test_attachments_without_paths_are_skipped():
     image, documents = _read_attachments(_StubGen(), [{"kind": "image"}, {}])
     assert image is None and documents == []
     assert _read_attachments(_StubGen(), None) == (None, [])
+
+
+# ── Limits on how much of a long document is read (Issue #392) ────────────
+#
+# A document is read on the worker's only thread, and tokenizing what comes out
+# of it costs far more than parsing it, so a limit has to stop the reading and
+# not trim the result afterwards. The PDF reader is an optional extra, so these
+# tests stand in for it with pages that record when they are opened. What a
+# limit saved is then an exact set of page numbers, and no test depends on time.
+
+
+class _StubPage:
+    mediabox = type("Box", (), {"width": 612.0, "height": 792.0})()
+
+    def __init__(self, index, text, opened):
+        self.index, self.text, self.opened = index, text, opened
+
+    def extract_text(self, visitor_text=None):
+        self.opened.add(self.index)
+        if visitor_text is not None:
+            visitor_text(self.text, None, [1, 0, 0, 1, 50.0, 700.0], {}, 10.0)
+            return ""
+        return self.text
+
+
+def _stub_pdf(monkeypatch, texts):
+    """Make read_pdf see a PDF with these page texts. Returns the pages it opened."""
+    import model.document as document
+
+    opened = set()
+    pages = [_StubPage(i, text, opened) for i, text in enumerate(texts)]
+
+    class Reader:
+        metadata = {}
+
+        def __init__(self, path):
+            self.pages = pages
+
+    monkeypatch.setattr(document, "_load_pdf_reader", lambda: Reader)
+    return opened
+
+
+def _rendered_limit(max_chars):
+    """Most characters to_text may write for a budget: the budget plus its own markers."""
+    return max_chars + len(DOC_TOKEN) + len(DOC_END_TOKEN) + 1
+
+
+def test_pages_past_the_character_budget_are_never_opened(monkeypatch):
+    opened = _stub_pdf(monkeypatch, ["x" * 100] * 10)
+
+    doc = read_pdf("stub.pdf", max_chars=350)
+
+    assert doc.truncated
+    assert opened == {0, 1, 2, 3}, "reading has to stop when the budget is spent, not after"
+    assert len(doc) == 4
+    # The page that crosses the line is cut to fit, not dropped and not kept whole.
+    assert 0 < len(doc.pages[3].text) < 100
+    assert len(doc.to_text()) <= _rendered_limit(350)
+
+
+def test_blank_pages_spend_the_budget_too(monkeypatch):
+    opened = _stub_pdf(monkeypatch, [""] * 1000)
+
+    doc = read_pdf("stub.pdf", max_chars=100)
+
+    assert doc.truncated
+    assert len(opened) < 20, "a run of blank pages must not be free to read"
+    assert len(doc) == len(opened)
+
+
+def test_the_page_limit_stops_reading_and_says_so(monkeypatch):
+    opened = _stub_pdf(monkeypatch, [f"page {i}" for i in range(5)])
+
+    doc = read_pdf("stub.pdf", max_pages=2)
+
+    assert [p.text for p in doc.pages] == ["page 0", "page 1"]
+    assert opened == {0, 1}
+    assert doc.truncated
+
+
+def test_a_document_inside_its_limits_is_not_marked_truncated(monkeypatch):
+    _stub_pdf(monkeypatch, ["alpha", "beta"])
+    for limits in (
+        {},
+        {"max_pages": 2},
+        {"max_chars": 10_000},
+        {"max_pages": 2, "max_chars": 10_000},
+    ):
+        doc = read_pdf("stub.pdf", **limits)
+        assert [p.text for p in doc.pages] == ["alpha", "beta"], limits
+        assert not doc.truncated, limits
+
+
+def test_a_budget_spent_exactly_on_the_last_page_is_not_truncation(monkeypatch):
+    _stub_pdf(monkeypatch, ["0123456789", "0123456789"])
+    exact = 2 * (10 + len(PAGE_TOKEN) + 1 + 2)  # two ten-character pages and their markers
+
+    whole = read_pdf("stub.pdf", max_chars=exact)
+    assert not whole.truncated
+    assert [len(p.text) for p in whole.pages] == [10, 10]
+
+    one_short = read_pdf("stub.pdf", max_chars=exact - 1)
+    assert one_short.truncated
+    assert [len(p.text) for p in one_short.pages] == [10, 9]
+
+
+def test_a_text_file_is_cut_to_the_budget(tmp_path):
+    path = tmp_path / "long.txt"
+    path.write_text("y" * 5000)
+
+    doc = read_document(str(path), max_chars=200)
+
+    assert doc.truncated
+    assert 0 < len(doc.pages[0].text) < 200
+    assert len(doc.to_text()) <= _rendered_limit(200)
+
+
+def test_a_text_file_is_read_only_as_far_as_the_budget(tmp_path, monkeypatch):
+    import model.document as document
+
+    path = tmp_path / "long.txt"
+    path.write_text("y" * 5000)
+    sizes = []
+
+    class Spy:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def read(self, size=-1):
+            sizes.append(size)
+            return self.handle.read(size)
+
+    real_open = open
+    monkeypatch.setattr(document, "open", lambda *a, **k: Spy(real_open(*a, **k)), raising=False)
+
+    read_document(str(path), max_chars=200)
+
+    assert len(sizes) == 1 and 0 < sizes[0] <= 200, "the rest of the file must not be read"
+
+
+def test_a_text_file_inside_the_budget_is_read_whole(tmp_path):
+    path = tmp_path / "short.txt"
+    path.write_text("a short note")
+
+    doc = read_document(str(path), max_chars=200)
+
+    assert doc.pages[0].text == "a short note"
+    assert not doc.truncated
+
+
+class _WindowConfig:
+    image_size = 8
+
+    def __init__(self, max_seq_len):
+        self.max_seq_len = max_seq_len
+
+
+class _WindowGen:
+    def __init__(self, max_seq_len):
+        self.model = type("M", (), {"config": _WindowConfig(max_seq_len)})()
+
+
+def test_the_character_budget_follows_the_models_window():
+    from model.serve import ATTACHMENT_CHARS_PER_TOKEN, _attachment_chars
+
+    assert _attachment_chars(_WindowConfig(1000)) == 1000 * ATTACHMENT_CHARS_PER_TOKEN
+    assert _attachment_chars(_WindowConfig(0)) is None
+    assert _attachment_chars(_StubConfig()) is None, "a config with no window has nothing to size against"
+
+
+def test_a_document_that_fits_the_window_is_read_whole(tmp_path):
+    from model.serve import _read_attachments
+
+    note = tmp_path / "note.txt"
+    note.write_text("a short note")
+
+    _, documents = _read_attachments(_WindowGen(100), [{"kind": "document", "path": str(note)}])
+
+    assert len(documents) == 1 and "a short note" in documents[0]
+    assert "truncated" not in documents[0] and "skipped" not in documents[0]
+
+
+def test_documents_share_one_character_budget(tmp_path):
+    from model.serve import ATTACHMENT_CHARS_PER_TOKEN, _read_attachments
+
+    window = 100
+    budget = window * ATTACHMENT_CHARS_PER_TOKEN
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    first.write_text("a" * (budget * 4))
+    second.write_text("a note that no longer fits")
+
+    _, documents = _read_attachments(
+        _WindowGen(window),
+        [{"kind": "document", "path": str(first)}, {"kind": "document", "path": str(second)}],
+    )
+
+    assert len(documents) == 2
+    text, _, note = documents[0].partition("\n[document truncated")
+    assert note, "text that was cut has to say so"
+    assert 0 < len(text) <= _rendered_limit(budget)
+    assert "skipped" in documents[1] and "a note" not in documents[1]
+
+
+def test_without_a_window_the_text_is_not_cut(tmp_path):
+    from model.serve import _read_attachments
+
+    path = tmp_path / "long.txt"
+    path.write_text("b" * 50_000)
+
+    _, documents = _read_attachments(_StubGen(), [{"kind": "document", "path": str(path)}])
+
+    assert len(documents[0]) > 50_000
+    assert "truncated" not in documents[0]
+
+
+def test_the_page_ceiling_is_shared_across_a_requests_documents(monkeypatch):
+    import model.serve as serve
+
+    opened = _stub_pdf(monkeypatch, [f"page {i}" for i in range(10)])
+    monkeypatch.setattr(serve, "MAX_ATTACHMENT_PAGES", 3)
+    ref = {"kind": "document", "path": "long.pdf"}
+
+    _, documents = serve._read_attachments(_StubGen(), [ref, ref])
+
+    assert opened == {0, 1, 2}, "pages past the ceiling are never opened, in this document or the next"
+    assert f"{PAGE_TOKEN}3" in documents[0] and f"{PAGE_TOKEN}4" not in documents[0]
+    assert "truncated" in documents[0]
+    assert "skipped" in documents[1]

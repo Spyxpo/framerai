@@ -227,6 +227,44 @@ def _sampling(params):
     return res
 
 
+# What one request may spend reading what a client attached. The worker has one
+# thread, so an attachment that is cheap to upload and dear to read stalls every
+# request behind it, and the upload size ceiling says little about the cost: a
+# few hundred kilobytes can hold a decode of hundreds of megabytes, or a
+# document whose text takes minutes to tokenize. Each bound sits where the size
+# of the file stops predicting the work.
+#
+# Pixels in an image, read from the header before anything is decoded. This is
+# Pillow's own decompression-bomb threshold (a quarter of a GiB of RGB), which
+# Pillow only warns about, refusing at twice the figure; here it is the limit.
+MAX_INPUT_IMAGE_PIXELS = 1024 * 1024 * 1024 // 4 // 3
+
+# Pages read from documents, counted across all of a request's documents. A file
+# inside the upload ceiling can hold well over a hundred thousand pages, and a
+# page costs milliseconds to read whether or not it has any text. The figure is
+# the most pages a client may already ask for when it reads a document on purpose
+# (MAX_DOCUMENT_PAGES in backend/src/routes/generate.js), so attaching a document
+# is held to the ceiling that reading one is, not to a stricter one of its own.
+MAX_ATTACHMENT_PAGES = 2000
+
+# Characters of document text, counted across a request's documents: the model's
+# window, as text. Tokenizing is most of what a document costs, and what the
+# window cannot hold is trimmed only after all of it has been tokenized, so a
+# document may carry what a message may. backend/src/modelLimits.js bounds a
+# message at the same three characters per token.
+ATTACHMENT_CHARS_PER_TOKEN = 3
+
+
+def _attachment_chars(config):
+    """Characters of document text a request may carry, or None with no window.
+
+    None is how the generator reads a config with no window too: it trims
+    nothing then, so there is nothing to size against.
+    """
+    window = int(getattr(config, "max_seq_len", 0) or 0)
+    return window * ATTACHMENT_CHARS_PER_TOKEN if window else None
+
+
 def _load_image(path, config):
     """Load an image file as a (3, H, W) tensor in the model's range.
 
@@ -242,7 +280,18 @@ def _load_image(path, config):
     from PIL import Image
 
     tile = config.image_size
-    img = Image.open(path).convert("RGB")
+    img = Image.open(path)
+    # Opening reads the header and no pixels, so the size is known before the
+    # decode that convert() starts. The resize further down cannot limit that
+    # decode: it only runs once the decode has finished.
+    width, height = img.size
+    if width * height > MAX_INPUT_IMAGE_PIXELS:
+        img.close()
+        raise ValueError(
+            f"image is {width}x{height} ({width * height:,} pixels); "
+            f"at most {MAX_INPUT_IMAGE_PIXELS:,} are read"
+        )
+    img = img.convert("RGB")
 
     if getattr(config, "vision_tiling", False):
         max_tiles = max(1, int(getattr(config, "vision_max_tiles", 12)))
@@ -270,9 +319,15 @@ def _read_attachments(gen, attachments):
     root, so this opens what it is given. A document that cannot be read
     contributes a note rather than raising, because one unreadable attachment
     should not lose the rest of the turn.
+
+    The documents of one request share a page and a character budget (see
+    MAX_ATTACHMENT_PAGES and ATTACHMENT_CHARS_PER_TOKEN). What does not fit is
+    never read, and the text says so, so a partial answer can be explained.
     """
     image = None
     documents = []
+    pages_left = MAX_ATTACHMENT_PAGES
+    chars_left = _attachment_chars(gen.model.config)
     for item in attachments or []:
         kind, path = item.get("kind"), item.get("path")
         if not path:
@@ -282,10 +337,21 @@ def _read_attachments(gen, attachments):
         elif kind == "document":
             from .document import DocumentError, read_document
 
+            if pages_left <= 0 or (chars_left is not None and chars_left <= 0):
+                documents.append("[document skipped: the other attachments used up what a request may read]")
+                continue
             try:
-                documents.append(read_document(path).to_text())
+                document = read_document(path, max_pages=pages_left, max_chars=chars_left)
             except DocumentError as exc:
                 documents.append(f"[document could not be read: {exc}]")
+                continue
+            text = document.to_text()
+            if document.truncated:
+                text += "\n[document truncated: the rest was not read]"
+            documents.append(text)
+            pages_left -= len(document)
+            if chars_left is not None:
+                chars_left -= len(text)
     return image, documents
 
 
