@@ -84,6 +84,9 @@ class Document:
     path: str
     pages: list[Page] = field(default_factory=list)
     title: str = ""
+    # True when a page or character limit left part of the file unread, so a
+    # caller can say the text is partial instead of passing it off as the whole.
+    truncated: bool = False
 
     def __len__(self) -> int:
         return len(self.pages)
@@ -275,11 +278,29 @@ def _page_spans(page) -> list[TextSpan]:
     return spans
 
 
-def read_pdf(path: str, max_pages: int | None = None) -> Document:
+def _page_overhead(number: int) -> int:
+    """Characters ``to_text`` spends around a page's text, whatever the page holds.
+
+    The marker and the two line breaks, one after the marker and one after the
+    text. A blank page writes only the first, so this never undercounts.
+    """
+    return len(PAGE_TOKEN) + len(str(number)) + 2
+
+
+def read_pdf(
+    path: str, max_pages: int | None = None, max_chars: int | None = None
+) -> Document:
     """Read ``path`` into a :class:`Document` with pages in reading order.
 
     Pages that raise are kept as empty pages rather than dropped, so page
     numbers stay aligned with the file and a later raster pass can fill them in.
+
+    ``max_pages`` and ``max_chars`` bound how much of a long file is read. Reading
+    stops at the page limit, or once the pages read fill ``max_chars`` of
+    :meth:`Document.to_text` output, page markers included so a run of blank pages
+    is not free. The page that crosses the line is cut to fit and no page after
+    it is opened, so what a limit saves is the work of reading what it leaves
+    out. Either way ``Document.truncated`` records that the file held more.
     """
     reader_cls = _load_pdf_reader()
     try:
@@ -295,8 +316,10 @@ def read_pdf(path: str, max_pages: int | None = None) -> Document:
         title = ""
 
     document = Document(path=path, title=title)
+    room = max_chars
     for index, page in enumerate(reader.pages):
-        if max_pages is not None and index >= max_pages:
+        if (max_pages is not None and index >= max_pages) or (room is not None and room <= 0):
+            document.truncated = True
             break
         try:
             box = page.mediabox
@@ -312,21 +335,40 @@ def read_pdf(path: str, max_pages: int | None = None) -> Document:
                 text = page.extract_text() or ""
             except Exception:  # noqa: BLE001 - a damaged page yields no text
                 text = ""
-        document.pages.append(
-            Page(number=index + 1, text=text.strip(), width=width, height=height)
-        )
+        text = text.strip()
+        if room is not None:
+            room -= _page_overhead(index + 1)
+            if len(text) > max(room, 0):
+                text, document.truncated = text[: max(room, 0)], True
+            room -= len(text)
+        document.pages.append(Page(number=index + 1, text=text, width=width, height=height))
     return document
 
 
-def read_document(path: str, max_pages: int | None = None) -> Document:
-    """Read any supported document. PDF today; the dispatch point for more."""
+def read_document(
+    path: str, max_pages: int | None = None, max_chars: int | None = None
+) -> Document:
+    """Read any supported document. PDF today; the dispatch point for more.
+
+    ``max_chars`` stops a long file being read past that much text; see
+    :func:`read_pdf`. A plain-text file is one page, so ``max_pages`` does not
+    apply to it, and ``max_chars`` is what bounds it.
+    """
     lowered = path.lower()
     if lowered.endswith(".pdf"):
-        return read_pdf(path, max_pages=max_pages)
+        return read_pdf(path, max_pages=max_pages, max_chars=max_chars)
     if lowered.endswith((".txt", ".md")):
+        room = None if max_chars is None else max(max_chars - _page_overhead(1), 0)
         with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-        return Document(path=path, pages=[Page(number=1, text=text.strip())])
+            # One character past the limit is enough to know there was more, and
+            # the rest of the file is never read.
+            text = handle.read() if room is None else handle.read(room + 1)
+        truncated = room is not None and len(text) > room
+        if truncated:
+            text = text[:room]
+        return Document(
+            path=path, pages=[Page(number=1, text=text.strip())], truncated=truncated
+        )
     raise DocumentError(f"unsupported document type: '{path}'")
 
 

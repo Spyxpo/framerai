@@ -296,11 +296,17 @@ const ATTACHMENT_KINDS = {
  * name cannot walk out into the rest of the filesystem. Anything that fails a
  * check is dropped with a log line rather than passed on, because a bad
  * reference should cost the caller its attachment, not the whole request.
+ *
+ * A file is passed on once however many times it is listed. Every copy would
+ * make the worker read it again and put the same text in the prompt again, so
+ * ten references to one upload cost ten times what one does and carry nothing
+ * more. References are compared once resolved, so spellings of one path match.
  */
 function resolveAttachments(attachments, requestId = null) {
   if (!Array.isArray(attachments) || attachments.length === 0) return [];
 
   const resolved = [];
+  const seen = new Set();
   for (const entry of attachments) {
     const raw = typeof entry === "string" ? entry : entry && entry.path;
     if (typeof raw !== "string" || !raw.startsWith(UPLOAD_PREFIX)) {
@@ -320,10 +326,15 @@ function resolveAttachments(attachments, requestId = null) {
       logger.warn("attachment ignored", { reason: `unknown bucket '${bucket}'`, requestId });
       continue;
     }
+    if (seen.has(full)) {
+      logger.warn("attachment ignored", { reason: "already attached", requestId });
+      continue;
+    }
     if (!fs.existsSync(full)) {
       logger.warn("attachment ignored", { reason: "no such file", requestId });
       continue;
     }
+    seen.add(full);
     resolved.push({ path: full, kind });
   }
   return resolved;
