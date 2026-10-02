@@ -29,12 +29,15 @@ class MockChildProcess extends EventEmitter {
     // listener.
     this.exitCode = null;
     this.signalCode = null;
-    this.stdin = {
+    // A real child's stdin is a stream, so it can emit 'error' (EPIPE once the worker
+    // is gone), and the bridge listens for that. Like the real one, it is a separate
+    // emitter from the ChildProcess: removeAllListeners() below leaves it alone.
+    this.stdin = Object.assign(new EventEmitter(), {
       write: (data) => {
         this.lastWrite = data;
         if (this.onStdinWrite) this.onStdinWrite(data);
       },
-    };
+    });
     this.stdout = new EventEmitter();
     this.stderr = new EventEmitter();
     spawnedProcesses.push(this);
@@ -3776,5 +3779,423 @@ describe("Issue #390 regression: worker exit before ready propagates startup fai
     } finally {
       bridge._setTimerImpl(prev.set, prev.clear);
     }
+  });
+});
+
+
+// ============================================================================
+// Issue #399 Regression Tests: stdin error after the worker is running
+// ============================================================================
+
+// A worker that dies after reporting ready (an OOM kill, a crash) or closes its stdin
+// leaves the pipe without a reader. The next write to it does not throw: Node reports
+// EPIPE afterwards, as an 'error' event on child.stdin, once the try/catch around the
+// write has returned. The ChildProcess 'error' listener added for spawn failures (#384)
+// is on a different emitter and never sees it, so with nothing listening on the stream
+// it was an uncaught exception that took the whole backend down, and every conversation
+// held in memory with it.
+describe("Issue #399: stdin error after the worker is running", { concurrency: 1 }, () => {
+  let bridge = null;
+  let savedEnv = null;
+  let originalExistsSync = null;
+
+  const MANAGED_ENV = {
+    MODEL_ENABLED: "true",
+    MODEL_PATH: "/fake/model.pt",
+    TOKENIZER_PATH: "/fake/tokenizer",
+    MODEL_WORKERS: "1",
+    PYTHON_BIN: undefined,
+    MODEL_TOOLS: undefined,
+    MODEL_CLI_MODE: undefined,
+    MODEL_CLI_ROOT: undefined,
+    MODEL_TIMEOUT_MS: undefined,
+    MODEL_STARTUP_TIMEOUT_MS: undefined,
+    MODEL_WORKER_STABILITY_MS: undefined,
+    MODEL_KILL_GRACE_MS: undefined,
+    MODEL_HEARTBEAT_TIMEOUT_MS: undefined,
+    MODEL_HEARTBEAT_STARTUP_GRACE_MS: undefined,
+  };
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    savedEnv = {};
+    for (const [key, value] of Object.entries(MANAGED_ENV)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path && path.includes("model.pt")) return true;
+      return originalExistsSync ? originalExistsSync(path) : false;
+    };
+
+    mockSpawn = (command, args, options) => {
+      return new MockChildProcess(command, args, options);
+    };
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  // Resolves to "STILL PENDING" instead of hanging the run when a request is never settled.
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([
+      promise.then(
+        (val) => (val === undefined ? "resolved: undefined" : val),
+        (err) => `rejected: ${err.message}`
+      ),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
+  };
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  // With the timers below unset, restart backoffs (500 ms doubling to 8 s) are the
+  // only timers the bridge arms in this range.
+  const isBackoff = (timer) => timer.ms >= 500 && timer.ms <= 8000;
+
+  // Records every timer the bridge arms instead of running it, so a test decides which
+  // restart backoff fires and when. Startup, liveness and stability timers never fire.
+  const recordTimers = () => {
+    const armed = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        const timer = { fn, ms };
+        armed.push(timer);
+        return timer;
+      },
+      () => {}
+    );
+    return { armed, restore: () => bridge._setTimerImpl(prev.set, prev.clear) };
+  };
+
+  const epipe = () => Object.assign(new Error("write EPIPE"), { code: "EPIPE", errno: -32, syscall: "write" });
+
+  // Node reports a failed write to a broken pipe afterwards, as an 'error' event on the
+  // stdin stream, and not from write() itself. This does the same: the write goes through
+  // and the failure follows on the next tick. With no listener emit() rethrows, which in
+  // production is an uncaught exception. It is recorded in `escaped` instead, so a missing
+  // listener fails the test with an assertion and does not take the test run down.
+  const breakPipeOnWrite = (child, escaped, shouldBreak = () => true) => {
+    child.onStdinWrite = (data) => {
+      if (!shouldBreak(String(data))) return;
+      process.nextTick(() => {
+        try {
+          child.stdin.emit("error", epipe());
+        } catch (err) {
+          escaped.push(err);
+        }
+      });
+    };
+  };
+
+  const startReady = async () => {
+    bridge = require("../src/services/pythonBridge");
+    const started = bridge.start();
+    await tick();
+    for (const child of spawnedProcesses) child.simulateReady(true);
+    assert.strictEqual(await settlesWithin(started, 1000), true, "the pool should start");
+  };
+
+  it("1. every started worker has an 'error' listener on child.stdin", async () => {
+    process.env.MODEL_WORKERS = "2";
+    await startReady();
+
+    assert.strictEqual(spawnedProcesses.length, 2);
+    for (const child of spawnedProcesses) {
+      assert.ok(
+        child.stdin.listenerCount("error") >= 1,
+        "child.stdin has no 'error' listener, so an EPIPE would be an uncaught exception"
+      );
+    }
+  });
+
+  it("2. an EPIPE emitted on stdin is handled instead of thrown", async () => {
+    await startReady();
+
+    // With no listener EventEmitter#emit rethrows the error, which in Node is an uncaught exception.
+    assert.doesNotThrow(() => spawnedProcesses[0].stdin.emit("error", epipe()));
+  });
+
+  it("3. Worker.execute: a failed write settles the request in flight at once, not at the model timeout", async () => {
+    await startReady();
+    const escaped = [];
+    breakPipeOnWrite(spawnedProcesses[0], escaped);
+
+    // The model timeout is three minutes, so a request left to it shows as STILL PENDING here.
+    const request = settlesWithin(bridge.request("chat", { prompt: "hello" }), 2000);
+    await tick();
+
+    assert.ok(spawnedProcesses[0].lastWrite, "the request should have been written to the worker");
+    assert.deepStrictEqual(escaped.map((err) => err.message), [], "the EPIPE escaped as an uncaught exception");
+    assert.strictEqual(await request, "rejected: worker exited");
+  });
+
+  it("4. the failed worker is marked not ready, terminated and taken out of the pool", async () => {
+    await startReady();
+    const failed = bridge._pool().workers[0];
+    const escaped = [];
+    breakPipeOnWrite(spawnedProcesses[0], escaped);
+
+    const request = settlesWithin(bridge.request("chat", { prompt: "hello" }), 2000);
+    await tick();
+    await request;
+
+    assert.deepStrictEqual(escaped.map((err) => err.message), [], "the EPIPE escaped as an uncaught exception");
+    assert.strictEqual(failed.ready, false, "a worker whose pipe broke must not stay ready");
+    assert.strictEqual(spawnedProcesses[0].killed, true, "a worker that can no longer be written to should be terminated");
+    assert.strictEqual(bridge._pool().workers.includes(failed), false, "the exit lifecycle should take it out of the pool");
+    assert.strictEqual(bridge.hasAvailableWorker(), false, "nothing is left to dispatch to");
+  });
+
+  it("5. no further request is written to the failed worker, and the replacement serves it through the existing restart", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      await startReady();
+      const failedChild = spawnedProcesses[0];
+      const escaped = [];
+      breakPipeOnWrite(failedChild, escaped);
+
+      const first = settlesWithin(bridge.request("chat", { prompt: "first" }), 2000);
+      await tick();
+      assert.strictEqual(await first, "rejected: worker exited");
+      const firstPayload = failedChild.lastWrite;
+
+      // A request that arrives while the slot restarts finds nothing available and waits.
+      const second = settlesWithin(bridge.request("chat", { prompt: "second" }), 5000);
+      await tick();
+      assert.strictEqual(failedChild.lastWrite, firstPayload, "the failed worker must not be handed another request");
+
+      const backoff = timers.armed.find(isBackoff);
+      assert.ok(backoff, "the exit lifecycle should schedule a restart");
+      backoff.fn();
+      await tick();
+
+      assert.strictEqual(spawnedProcesses.length, 2, "a replacement worker should be spawned");
+      assert.ok(spawnedProcesses[1].stdin.listenerCount("error") >= 1, "the replacement must be protected too");
+      spawnedProcesses[1].onStdinWrite = (data) => {
+        spawnedProcesses[1].simulateResponse(JSON.parse(data).id, true, { content: "from the replacement" });
+      };
+      spawnedProcesses[1].simulateReady(true);
+      await tick();
+
+      assert.deepStrictEqual(await second, { content: "from the replacement" });
+      assert.deepStrictEqual(escaped.map((err) => err.message), [], "the EPIPE escaped as an uncaught exception");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("6. Worker.sendApprovalResponse: a failed write settles the request in flight at once", async () => {
+    await startReady();
+    const child = spawnedProcesses[0];
+    const escaped = [];
+    // Only the answer to the approval breaks the pipe; the request itself is written normally.
+    breakPipeOnWrite(child, escaped, (data) => data.includes("approval_response"));
+
+    const request = settlesWithin(
+      bridge.request("chat", { prompt: "run ls" }, { onApprovalRequest: (info) => info.respond(true) }),
+      2000
+    );
+    await tick();
+    child.stdout.emit(
+      "data",
+      Buffer.from(
+        JSON.stringify({
+          type: "approval_request",
+          approval_id: "app-uuid-1",
+          command: "ls -la",
+          argv: ["ls", "-la"],
+          root: "/sandbox",
+        }) + "\n"
+      )
+    );
+    await tick();
+
+    assert.strictEqual(
+      JSON.parse(child.lastWrite).type,
+      "approval_response",
+      "the answer to the approval should be the write that failed"
+    );
+    assert.deepStrictEqual(escaped.map((err) => err.message), [], "the EPIPE escaped as an uncaught exception");
+    assert.strictEqual(await request, "rejected: worker exited");
+  });
+
+  it("7. a stdin error that arrives after cleanup() is still handled", async () => {
+    // cleanup() runs on the timeout and restart paths. It strips the ChildProcess's
+    // listeners, not the stdin stream's, and an EPIPE from a write made just before
+    // the kill can still arrive afterwards.
+    await startReady();
+    const child = spawnedProcesses[0];
+    bridge._pool().workers[0].cleanup();
+
+    assert.doesNotThrow(() => child.stdin.emit("error", epipe()));
+  });
+
+  it("8. a stdin error that arrives after the worker already exited is still handled", async () => {
+    await startReady();
+    const child = spawnedProcesses[0];
+    child.simulateExit(1);
+    await tick();
+
+    assert.doesNotThrow(() => child.stdin.emit("error", epipe()));
+  });
+
+  it("9. a stdin error before the worker reports ready fails the startup through the exit handling from #386", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      const started = bridge.start();
+      await tick();
+
+      assert.doesNotThrow(() => spawnedProcesses[0].stdin.emit("error", epipe()));
+      assert.strictEqual(await settlesWithin(started, 1000), false, "start() should settle as a failed startup");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("10. until its exit is processed, the failed worker is not handed another request", async () => {
+    // A real child takes a moment to die after kill(), and its 'exit' event arrives later
+    // still. The mock exits at once, which would hide that window, so the exit is held back.
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers();
+    try {
+      await startReady();
+      const failed = bridge._pool().workers[0];
+      const child = spawnedProcesses[0];
+      child.kill = () => {
+        child.killed = true;
+      };
+
+      assert.doesNotThrow(() => child.stdin.emit("error", epipe()));
+      assert.strictEqual(child.killed, true, "a worker that can no longer be written to should be terminated");
+      assert.strictEqual(failed.ready, false, "it must stop being ready when its pipe breaks, not when its exit arrives");
+      assert.strictEqual(bridge.hasAvailableWorker(), false, "nothing is left to dispatch to");
+
+      const waiting = settlesWithin(bridge.request("chat", { prompt: "while it is dying" }), 2000);
+      await tick();
+      assert.strictEqual(child.lastWrite, undefined, "the dying worker must not be handed a request");
+      void waiting; // queued; the pool shutdown after the test rejects it
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("11. the stdin listener never throws itself, even when ending the worker fails", async () => {
+    // An exception from the listener would be the uncaught exception it exists to prevent.
+    await startReady();
+    spawnedProcesses[0].kill = () => {
+      throw new Error("kill failed");
+    };
+
+    assert.doesNotThrow(() => spawnedProcesses[0].stdin.emit("error", epipe()));
+    assert.strictEqual(bridge._pool().workers[0].ready, false, "the worker should be out of service all the same");
+  });
+
+  it("12. the failure is logged as a warning for that worker, with the error", async () => {
+    // The logger reads its level and format when it loads, so load it fresh with known ones.
+    const saved = { LOG_LEVEL: process.env.LOG_LEVEL, LOG_FORMAT: process.env.LOG_FORMAT };
+    process.env.LOG_LEVEL = "info";
+    process.env.LOG_FORMAT = "json";
+    delete require.cache[require.resolve("../src/services/logger")];
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+
+    const lines = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    try {
+      await startReady();
+      // Nothing is awaited while stdout is replaced, so nothing else can write to it meanwhile.
+      process.stdout.write = (chunk) => {
+        lines.push(String(chunk));
+        return true;
+      };
+      spawnedProcesses[0].stdin.emit("error", epipe());
+    } finally {
+      process.stdout.write = originalWrite;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      delete require.cache[require.resolve("../src/services/logger")];
+    }
+
+    const entries = lines
+      .join("")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    const entry = entries.find((e) => e.message === "worker stdin error");
+    assert.ok(entry, "the failure should be logged");
+    assert.strictEqual(entry.level, "warn");
+    assert.strictEqual(entry.route, "worker-0");
+    assert.match(entry.error, /write EPIPE/);
+  });
+
+  // The real thing: a real child, so the pipe and the EPIPE are the operating system's.
+  // The child is a Node script that speaks the worker protocol, so no Python or model is
+  // needed. A killed worker leaves its stdin pipe without a reader, but the bridge learns
+  // of the death only when the child's 'exit' event is processed. A busy event loop (a
+  // large JSON.parse, a long GC pause) keeps that event from running first, so the next
+  // request is written to a dead pipe.
+  const WORKER_SCRIPT = `
+    const readline = require('node:readline');
+    const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+    out({ ready: true });
+    readline.createInterface({ input: process.stdin }).on('line', (line) => {
+      out({ id: JSON.parse(line).id, ok: true, result: { content: 'reply' } });
+    });
+  `;
+
+  it("13. REAL process: a request written to a killed worker's pipe fails cleanly instead of crashing the backend", async () => {
+    mockSpawn = (_command, _args, options) => originalSpawn(process.execPath, ["-e", WORKER_SCRIPT], options);
+    bridge = require("../src/services/pythonBridge");
+
+    const warm = await settlesWithin(bridge.request("chat", { prompt: "warm" }), 10000);
+    assert.deepStrictEqual(warm, { content: "reply" }, "the real worker should have answered");
+
+    bridge._pool().workers[0].child.kill("SIGKILL");
+    // Keep the event loop busy until the child is certainly dead and its exit not yet processed.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+
+    const outcome = await settlesWithin(bridge.request("chat", { prompt: "after the kill" }), 5000);
+    assert.strictEqual(outcome, "rejected: worker exited");
   });
 });

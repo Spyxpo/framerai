@@ -141,6 +141,26 @@ class Worker {
         resolve(false);
       });
 
+      // The pipe to the worker is a stream of its own with its own 'error' event, which the
+      // listener above, on the ChildProcess, never sees. Writing to a pipe whose reader has
+      // gone (the worker died, or closed stdin) fails afterwards with EPIPE, once the try/catch
+      // around the write has returned, and an 'error' event with no listener is an uncaught
+      // exception that takes the whole backend down. Nothing more can reach this worker, so
+      // stop handing it requests and end it: its exit handler settles the request in flight
+      // and the pool starts a replacement. The child is held in a local because this.child
+      // may be null by the time the error arrives, and cleanup() only strips the ChildProcess,
+      // so the listener stays for an EPIPE from a write made just before a kill.
+      const child = this.child;
+      child.stdin.on("error", (err) => {
+        workerLog.warn("worker stdin error", { error: err.message });
+        this.ready = false;
+        try {
+          child.kill();
+        } catch {
+          // Already gone: its exit has been, or is about to be, handled.
+        }
+      });
+
       this.child.stdout.on("data", (data) => {
         this.buffer += data.toString();
         let idx;
