@@ -226,11 +226,11 @@ function generateOpenApiSpec() {
           },
           responses: {
             "200": {
-              description: "Assistant reply message",
+              description: "Assistant reply message, with the id the user's message was stored under",
               headers: rateLimitHeaderRefs,
               content: {
                 "application/json": {
-                  schema: { $ref: "#/components/schemas/ChatMessage" },
+                  schema: { $ref: "#/components/schemas/SendMessageResponse" },
                 },
               },
             },
@@ -806,6 +806,23 @@ function generateOpenApiSpec() {
             metadata: { type: "object", additionalProperties: true },
             timestamp: { type: "string", format: "date-time" },
           },
+        },
+        SendMessageResponse: {
+          allOf: [
+            { $ref: "#/components/schemas/ChatMessage" },
+            {
+              type: "object",
+              required: ["userMessageId"],
+              properties: {
+                userMessageId: {
+                  type: "string",
+                  format: "uuid",
+                  description:
+                    "Id the user's message was stored under. The reply's own id is id. Both are the ids to use when referring to these messages again, for example to branch from one.",
+                },
+              },
+            },
+          ],
         },
         ConversationSummary: {
           type: "object",
