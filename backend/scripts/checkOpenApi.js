@@ -10,7 +10,10 @@ if (!fs.existsSync(committedPath)) {
   process.exit(1);
 }
 
-const committedContent = fs.readFileSync(committedPath, "utf8");
+// Stored in git with LF line endings, like the generator's output, but a checkout with
+// core.autocrlf=true (the Git for Windows default) leaves CRLF on disk. Line endings are not
+// part of whether the file is in sync with the schema (Issue #402).
+const committedContent = fs.readFileSync(committedPath, "utf8").replace(/\r\n/g, "\n");
 const generatedContent = getOpenApiSpecJson();
 
 if (committedContent !== generatedContent) {
