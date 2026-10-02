@@ -8,6 +8,9 @@ three halves of that fix: the encoder is the same one either way, a tall page
 stays tall, and an image lands where the prompt mentions it.
 """
 
+import struct
+import zlib
+
 import numpy as np
 import pytest
 import torch
@@ -16,7 +19,7 @@ from PIL import Image
 from conftest import tiny_config
 from model.framer import FramerModel
 from model.generate import FramerGenerator
-from model.serve import _load_image
+from model.serve import _load_image, _read_attachments
 from model.tokenizer.tokenizer import FramerTokenizer
 
 
@@ -137,6 +140,90 @@ def test_pixels_land_in_the_models_range(tmp_path):
     config = mm_config(vision_tiling=False, image_size=32)
     tensor = _load_image(_write_image(tmp_path / "x.png", 40, 40), config)
     assert tensor.min() >= -1.0 and tensor.max() <= 1.0
+
+
+# ── Bounds on what is decoded (Issue #392) ────────────────────────────────
+#
+# The long side is capped when tiling, but that resize runs after the whole image
+# has been decoded, and a few hundred kilobytes of PNG can claim hundreds of
+# megabytes of pixels. The size is in the header, which opening reads without
+# decoding, so an image over the limit has to be refused from there.
+
+
+def _header_only_png(path, width, height):
+    """A PNG whose header claims width x height and whose pixel data is garbage.
+
+    Opening it works, because opening reads only the header, and decoding it
+    fails. So a refusal can be told apart from a failed decode, and nothing the
+    size of the claim is ever allocated, which keeps these tests small and quick.
+    """
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", b"not zlib data")
+        + chunk(b"IEND", b"")
+    )
+    return str(path)
+
+
+def test_an_image_over_the_pixel_limit_is_refused_before_any_of_it_is_decoded(tmp_path, monkeypatch):
+    config = mm_config(vision_tiling=False, image_size=32)
+    claims_four_megapixels = _header_only_png(tmp_path / "big.png", 2000, 2000)
+
+    monkeypatch.setattr("model.serve.MAX_INPUT_IMAGE_PIXELS", 1_000)
+    with pytest.raises(ValueError, match=r"2000x2000 \(4,000,000 pixels\)"):
+        _load_image(claims_four_megapixels, config)
+
+    # The same file under a limit it fits fails by decoding its garbage instead,
+    # so the refusal above came from the header and not from trying to decode.
+    monkeypatch.setattr("model.serve.MAX_INPUT_IMAGE_PIXELS", 10_000_000)
+    with pytest.raises(Exception) as decoded:  # noqa: B017 - the point is which one
+        _load_image(claims_four_megapixels, config)
+    assert "pixels" not in str(decoded.value)
+
+
+def test_an_image_at_the_pixel_limit_is_still_read(tmp_path, monkeypatch):
+    config = mm_config(vision_tiling=False, image_size=32)
+    monkeypatch.setattr("model.serve.MAX_INPUT_IMAGE_PIXELS", 40 * 25)
+
+    assert _load_image(_write_image(tmp_path / "exact.png", 40, 25), config).shape == (3, 32, 32)
+    with pytest.raises(ValueError, match="pixels"):
+        _load_image(_write_image(tmp_path / "over.png", 41, 25), config)
+
+
+def test_a_tiled_image_over_the_pixel_limit_is_refused_too(tmp_path, monkeypatch):
+    config = mm_config(vision_tiling=True, vision_max_tiles=4, image_size=32)
+    monkeypatch.setattr("model.serve.MAX_INPUT_IMAGE_PIXELS", 1_000)
+
+    with pytest.raises(ValueError, match="pixels"):
+        _load_image(_header_only_png(tmp_path / "big.png", 2000, 2000), config)
+
+
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+def test_the_default_limit_refuses_what_pillow_only_warns_about(tmp_path):
+    config = mm_config(vision_tiling=False, image_size=32)
+
+    # 100 megapixels is past Pillow's own threshold, which warns and then decodes
+    # all of it, about a gigabyte of memory for a file this small.
+    with pytest.raises(ValueError, match=r"10000x10000 \(100,000,000 pixels\)"):
+        _load_image(_header_only_png(tmp_path / "100mp.png", 10_000, 10_000), config)
+
+
+def test_an_oversize_image_attachment_is_refused_like_any_unreadable_image(tmp_path, monkeypatch):
+    monkeypatch.setattr("model.serve.MAX_INPUT_IMAGE_PIXELS", 1_000)
+    config = mm_config(vision_tiling=False, image_size=32)
+    gen = type("Gen", (), {"model": type("M", (), {"config": config})()})()
+
+    # It raises, as a corrupt image does, and the backend answers that the
+    # way it answers any worker error. Only documents degrade to a note.
+    with pytest.raises(ValueError, match="pixels"):
+        _read_attachments(gen, [{"kind": "image", "path": _header_only_png(tmp_path / "big.png", 2000, 2000)}])
 
 
 # ── Placement ─────────────────────────────────────────────────────────────
