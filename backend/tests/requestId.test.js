@@ -160,11 +160,12 @@ test("logger: context (requestId, route) appears in every emitted line", () => {
     constructor() {
       super();
       this.lastPayload = null;
-      this.stdin = {
+      // A real child's stdin is a stream with an 'error' event, which the bridge listens for.
+      this.stdin = Object.assign(new EventEmitter(), {
         write: (data) => {
           this.lastPayload = JSON.parse(data.toString().trim());
         },
-      };
+      });
       this.stdout = new EventEmitter();
       this.stderr = new EventEmitter();
     }
