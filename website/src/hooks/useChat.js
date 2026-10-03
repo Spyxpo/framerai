@@ -6,6 +6,7 @@ import {
   saveConversationsToStorage,
   clearConversationsFromStorage,
 } from "../utils/storage";
+import { dedupeMessages } from "../utils/dedupe";
 
 /**
  * Give a message the id the server stored it under (Issue #394).
@@ -518,13 +519,7 @@ export function useChat(settings) {
     try {
       const conv = await api.getConversation(id);
       if (conv && Array.isArray(conv.messages)) {
-        const seen = new Set();
-        const deduped = conv.messages.filter((m) => {
-          if (!m?.id) return true;
-          if (seen.has(m.id)) return false;
-          seen.add(m.id);
-          return true;
-        });
+        const deduped = dedupeMessages(conv.messages);
         if (activeConversationRef.current === id) {
           setMessages(deduped);
         }
@@ -598,13 +593,7 @@ export function useChat(settings) {
               .getConversation(nextId)
               .then((conv) => {
                 if (conv && Array.isArray(conv.messages) && activeConversationRef.current === nextId) {
-                  const seen = new Set();
-                  const deduped = conv.messages.filter((m) => {
-                    if (!m?.id) return true;
-                    if (seen.has(m.id)) return false;
-                    seen.add(m.id);
-                    return true;
-                  });
+                  const deduped = dedupeMessages(conv.messages);
                   if (deduped.length > 0) {
                     setMessages(deduped);
                     setConversations((prev) =>
