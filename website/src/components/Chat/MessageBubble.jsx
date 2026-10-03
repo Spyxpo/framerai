@@ -5,7 +5,7 @@ import CodeBlock from "../CodeBlock/CodeBlock";
 import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
 import CognitionTrace from "./CognitionTrace";
 
-export default function MessageBubble({ message, isStreaming, onRetry, onBranch, isBranching }) {
+export default function MessageBubble({ message, isStreaming, onRetry, onBranch, isBranching, isHighlighted }) {
   const [copied, setCopied] = React.useState(false);
   const isUser = message.role === "user";
   const isError = message.type === "error";
@@ -119,7 +119,9 @@ export default function MessageBubble({ message, isStreaming, onRetry, onBranch,
 
   return (
     <article
-      className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""} ${isError ? "error" : ""}`}
+      id={message.id ? `message-${message.id}` : undefined}
+      data-message-id={message.id || message.clientId}
+      className={`message ${isUser ? "user" : "assistant"} ${isStreaming ? "streaming" : ""} ${isError ? "error" : ""} ${isHighlighted ? "message-highlighted" : ""}`}
       aria-label={roleLabel}
     >
       <div className="message-avatar" aria-hidden="true">

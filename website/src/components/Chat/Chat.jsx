@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal, FileText } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal, FileText, Search } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -35,6 +35,8 @@ export default function Chat({
   onToggleSidebar,
   onDismissError,
   onOpenSettings,
+  onOpenSearch,
+  highlightedMessageId,
   focusRef,
   textareaFocusRef,
   onFocusSidebar,
@@ -93,6 +95,15 @@ export default function Chat({
     prevStreaming.current = streaming;
     prevLoading.current = loading;
   }, [streaming, loading]);
+
+  // Auto-scroll to highlighted message when navigating to a search result
+  useEffect(() => {
+    if (!highlightedMessageId) return;
+    const el = document.querySelector(`[data-message-id="${highlightedMessageId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlightedMessageId, messages]);
 
   // Focus message input via "/" keyboard shortcut when not typing in an editable field
   useEffect(() => {
@@ -426,6 +437,14 @@ export default function Chat({
         <h1 className="chat-title">FramerAI</h1>
         <div className="chat-subtitle" aria-hidden="true">Text, code, image, video, and audio</div>
         <button
+          className="icon-btn chat-search-btn"
+          onClick={onOpenSearch}
+          title="Search conversations and messages (Cmd+K)"
+          aria-label="Search chat"
+        >
+          <Search size={18} aria-hidden="true" />
+        </button>
+        <button
           className="icon-btn chat-settings-btn"
           ref={chatSettingsBtnRef}
           onClick={onOpenSettings}
@@ -597,6 +616,7 @@ export default function Chat({
                   onRetry={isErrorMsg && isLastMsg ? handleRetry : undefined}
                   onBranch={onBranch}
                   isBranching={branching}
+                  isHighlighted={Boolean(highlightedMessageId && (msg.id === highlightedMessageId || msg.clientId === highlightedMessageId))}
                 />
               );
             })}
