@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { api } from "../services/api";
 import { WebSocketClient } from "../services/websocket";
 import {
@@ -102,6 +102,10 @@ export function useChat(settings) {
     }
   };
 
+  // Issue #406: Track deleted conversation IDs and user-renamed titles to prevent stale backend overwrite/resurrection
+  const deletedConversationIdsRef = useRef(new Set());
+  const titleUpdatedAtByConvRef = useRef(new Map());
+
   // Track active conversation and conversations in refs so async handlers see current values
   const activeConversationRef = useRef(activeConversation);
   activeConversationRef.current = activeConversation;
@@ -129,6 +133,7 @@ export function useChat(settings) {
       const updatedConv = {
         ...currentConv,
         messages,
+        messageCount: Array.isArray(messages) ? messages.length : currentConv.messageCount,
         updatedAt: new Date().toISOString(),
       };
       const updatedList = [...prev];
@@ -137,10 +142,31 @@ export function useChat(settings) {
     });
   }, [activeConversation, messages]);
 
-  // Persist state to localStorage whenever conversations or activeConversation updates
+  // Issue #406: Derive synchronized conversations that always reflect active conversation's authoritative messages immediately
+  const synchronizedConversations = useMemo(() => {
+    if (!activeConversation) return conversations;
+    let modified = false;
+    const synced = conversations.map((c) => {
+      if (c.id === activeConversation) {
+        if (messages && messages.length > 0 && c.messages !== messages) {
+          modified = true;
+          return {
+            ...c,
+            messages,
+            messageCount: messages.length,
+            updatedAt: c.updatedAt || new Date().toISOString(),
+          };
+        }
+      }
+      return c;
+    });
+    return modified ? synced : conversations;
+  }, [conversations, activeConversation, messages]);
+
+  // Persist state to localStorage whenever synchronized conversations or activeConversation updates
   useEffect(() => {
-    saveConversationsToStorage(conversations, activeConversation);
-  }, [conversations, activeConversation]);
+    saveConversationsToStorage(synchronizedConversations, activeConversation);
+  }, [synchronizedConversations, activeConversation]);
 
   // Initialize WebSocket
   useEffect(() => {
@@ -463,9 +489,12 @@ export function useChat(settings) {
       .then((remoteConvs) => {
         if (Array.isArray(remoteConvs) && remoteConvs.length > 0) {
           setConversations((prev) => {
-            if (prev.length === 0) return remoteConvs;
+            const activeFiltered = remoteConvs.filter(
+              (c) => !deletedConversationIdsRef.current.has(c.id)
+            );
+            if (prev.length === 0) return activeFiltered;
             const existingIds = new Set(prev.map((c) => c.id));
-            const newFromRemote = remoteConvs.filter((c) => !existingIds.has(c.id));
+            const newFromRemote = activeFiltered.filter((c) => !existingIds.has(c.id));
             return [...prev, ...newFromRemote];
           });
         }
@@ -518,14 +547,28 @@ export function useChat(settings) {
     setLoadingMessages(true);
     try {
       const conv = await api.getConversation(id);
+      if (deletedConversationIdsRef.current.has(id)) return;
       if (conv && Array.isArray(conv.messages)) {
         const deduped = dedupeMessages(conv.messages);
         if (activeConversationRef.current === id) {
           setMessages(deduped);
         }
-        setConversations((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, ...conv, messages: deduped, title: conv.title || c.title } : c))
-        );
+        setConversations((prev) => {
+          const existing = prev.find((c) => c.id === id);
+          const keepTitle = titleUpdatedAtByConvRef.current.has(id)
+            ? (existing?.title || conv.title)
+            : (conv.title || existing?.title || "New Chat");
+          const updatedConv = {
+            id,
+            ...conv,
+            messages: (conv.messages && conv.messages.length > 0) ? deduped : (existing?.messages || []),
+            title: keepTitle,
+          };
+          if (!existing) {
+            return [updatedConv, ...prev];
+          }
+          return prev.map((c) => (c.id === id ? { ...c, ...updatedConv } : c));
+        });
       }
     } catch (err) {
       if (activeConversationRef.current === id) {
@@ -547,6 +590,8 @@ export function useChat(settings) {
   const deleteConversation = useCallback(
     async (id) => {
       if (!id) return;
+      deletedConversationIdsRef.current.add(id);
+      titleUpdatedAtByConvRef.current.delete(id);
       setError(null);
 
       // Clean up in-flight generation / streaming / loading states immediately
@@ -707,6 +752,8 @@ export function useChat(settings) {
 
   const clearAllConversations = useCallback(() => {
     setError(null);
+    deletedConversationIdsRef.current.clear();
+    titleUpdatedAtByConvRef.current.clear();
     streamingConversationIdsRef.current.clear();
     setStreaming(false);
     loadingConversationIdsRef.current.clear();
@@ -724,6 +771,25 @@ export function useChat(settings) {
     setActiveConversation(null);
     setMessages([]);
     clearConversationsFromStorage();
+  }, []);
+
+  const renameConversation = useCallback((id, newTitle) => {
+    if (!id || typeof newTitle !== "string") return;
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    titleUpdatedAtByConvRef.current.set(id, Date.now());
+
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        return {
+          ...c,
+          title: trimmed,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
   }, []);
 
   const dismissError = useCallback(() => setError(null), []);
@@ -889,7 +955,7 @@ export function useChat(settings) {
   }, []);
 
   return {
-    conversations,
+    conversations: synchronizedConversations,
     activeConversation,
     messages,
     loading,
@@ -906,6 +972,7 @@ export function useChat(settings) {
     clearAllConversations,
     sendMessage,
     branchConversation,
+    renameConversation,
     dismissError,
     approveCommand,
     denyCommand,
