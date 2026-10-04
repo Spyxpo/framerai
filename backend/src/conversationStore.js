@@ -82,6 +82,16 @@ function _evict() {
 }
 
 function create(conversation) {
+  // If conversation already exists and incoming conversation has fewer messages,
+  // do not let a stale snapshot overwrite newer state.
+  const existing = conversations.get(conversation.id);
+  if (existing && Array.isArray(existing.messages) && Array.isArray(conversation.messages)) {
+    if (conversation.messages.length < existing.messages.length) {
+      _touch(existing);
+      return existing;
+    }
+  }
+
   // Re-creating an existing id refreshes it without consuming a slot.
   if (!conversations.has(conversation.id)) {
     _evict();
@@ -118,18 +128,69 @@ function messages(id) {
 
 /**
  * Record a turn against a conversation, if it exists.
- *
- * An unknown id is ignored rather than created: the WebSocket path may name a
- * conversation the REST path never opened, and inventing one there would build
- * a second history that nothing else can see.
  */
-function append(id, message) {
+function append(id, message, options = {}) {
   const conv = conversations.get(id);
   if (!conv) return false;
   _touch(conv);
   if (message?.id && conv.messages.some((m) => m.id === message.id)) {
     return true;
   }
+
+  const replyToId = options.replyToId || message.replyToId;
+  if (replyToId) {
+    const parentIndex = conv.messages.findIndex((m) => m.id === replyToId);
+    if (parentIndex !== -1) {
+      let insertIndex = parentIndex + 1;
+      while (
+        insertIndex < conv.messages.length &&
+        conv.messages[insertIndex].role === "assistant"
+      ) {
+        insertIndex++;
+      }
+
+      // Ensure monotonic timestamp ordering:
+      // message timestamp must not be earlier than the parent message,
+      // and if inserted before a subsequent message, must not exceed that next message.
+      const parentMsg = conv.messages[parentIndex];
+      const parentTime = new Date(parentMsg.timestamp || parentMsg.createdAt || 0).getTime();
+      const nextMsg = insertIndex < conv.messages.length ? conv.messages[insertIndex] : null;
+      const nextTime = nextMsg ? new Date(nextMsg.timestamp || nextMsg.createdAt || 0).getTime() : Infinity;
+
+      let msgTime = new Date(message.timestamp || message.createdAt || 0).getTime();
+      if (isNaN(msgTime) || msgTime < parentTime) {
+        msgTime = parentTime;
+      }
+      if (nextTime !== Infinity && !isNaN(nextTime) && msgTime > nextTime) {
+        msgTime = nextTime;
+      }
+
+      const isoTime = new Date(msgTime).toISOString();
+      if (message.timestamp) message.timestamp = isoTime;
+      if (message.createdAt) message.createdAt = isoTime;
+      if (!message.timestamp && !message.createdAt) message.timestamp = isoTime;
+
+      conv.messages.splice(insertIndex, 0, message);
+      if (conv.messages.length > _maxMessages) {
+        conv.messages.splice(0, conv.messages.length - _maxMessages);
+      }
+      return true;
+    }
+  }
+
+  // Monotonic timestamp check against last message if appended at end
+  if (conv.messages.length > 0) {
+    const lastMsg = conv.messages[conv.messages.length - 1];
+    const lastTime = new Date(lastMsg.timestamp || lastMsg.createdAt || 0).getTime();
+    let msgTime = new Date(message.timestamp || message.createdAt || 0).getTime();
+    if (!isNaN(lastTime) && (!isNaN(msgTime) && msgTime < lastTime)) {
+      const isoTime = lastMsg.timestamp || lastMsg.createdAt || new Date(lastTime).toISOString();
+      if (message.timestamp) message.timestamp = isoTime;
+      if (message.createdAt) message.createdAt = isoTime;
+      if (!message.timestamp && !message.createdAt) message.timestamp = isoTime;
+    }
+  }
+
   conv.messages.push(message);
   if (conv.messages.length > _maxMessages) {
     conv.messages.splice(0, conv.messages.length - _maxMessages);
