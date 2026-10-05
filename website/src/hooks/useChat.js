@@ -48,6 +48,55 @@ export function useChat(settings) {
   const activeAssistantIdByConvRef = useRef(new Map());
   // Track completed assistant message IDs to guarantee idempotent completion handling (#366)
   const completedMessageIdsRef = useRef(new Set());
+  const inFlightTurnsByConvRef = useRef(new Map());
+
+  const addActiveAssistantId = (convId, msgId) => {
+    if (!convId || !msgId) return;
+    const existing = activeAssistantIdByConvRef.current.get(convId);
+    if (Array.isArray(existing)) {
+      if (!existing.includes(msgId)) existing.push(msgId);
+    } else if (existing) {
+      activeAssistantIdByConvRef.current.set(convId, [existing, msgId]);
+    } else {
+      activeAssistantIdByConvRef.current.set(convId, [msgId]);
+    }
+  };
+
+  const removeActiveAssistantId = (convId, msgId) => {
+    if (!convId) return;
+    const existing = activeAssistantIdByConvRef.current.get(convId);
+    if (Array.isArray(existing)) {
+      const remaining = msgId ? existing.filter((id) => id !== msgId) : existing.slice(1);
+      if (remaining.length > 0) {
+        activeAssistantIdByConvRef.current.set(convId, remaining);
+      } else {
+        activeAssistantIdByConvRef.current.delete(convId);
+      }
+    } else {
+      activeAssistantIdByConvRef.current.delete(convId);
+    }
+
+    const turns = inFlightTurnsByConvRef.current.get(convId);
+    if (Array.isArray(turns)) {
+      const remainingTurns = msgId
+        ? turns.filter((t) => t.assistantId !== msgId && t.userMsgId !== msgId)
+        : turns.slice(1);
+      if (remainingTurns.length > 0) {
+        inFlightTurnsByConvRef.current.set(convId, remainingTurns);
+      } else {
+        inFlightTurnsByConvRef.current.delete(convId);
+      }
+    }
+  };
+
+  const getFirstActiveAssistantId = (convId) => {
+    if (!convId) return null;
+    const existing = activeAssistantIdByConvRef.current.get(convId);
+    if (Array.isArray(existing)) {
+      return existing[0] || null;
+    }
+    return existing || null;
+  };
 
   // Track monotonic operation sequence per conversation to drop stale out-of-order responses (#404)
   const operationSeqRef = useRef(new Map());
@@ -60,13 +109,20 @@ export function useChat(settings) {
 
   const findTargetAssistantIndex = (msgs, targetMsgId, convId) => {
     if (!Array.isArray(msgs) || msgs.length === 0) return -1;
-    if (targetMsgId) {
-      const idx = msgs.findIndex((m) => m.id === targetMsgId);
+    if (targetMsgId && typeof targetMsgId === "string") {
+      const idx = msgs.findIndex((m) => (m.id === targetMsgId || m.clientId === targetMsgId) && !m.completed);
       if (idx !== -1) return idx;
+      const anyIdx = msgs.findIndex((m) => m.id === targetMsgId || m.clientId === targetMsgId);
+      if (anyIdx !== -1) return anyIdx;
     }
-    const inFlightId = convId ? activeAssistantIdByConvRef.current.get(convId) : null;
-    if (inFlightId) {
-      const idx = msgs.findIndex((m) => m.id === inFlightId);
+    const inFlight = convId ? activeAssistantIdByConvRef.current.get(convId) : null;
+    if (Array.isArray(inFlight)) {
+      for (const id of inFlight) {
+        const idx = msgs.findIndex((m) => (m.id === id || m.clientId === id) && !m.completed);
+        if (idx !== -1) return idx;
+      }
+    } else if (inFlight && typeof inFlight === "string") {
+      const idx = msgs.findIndex((m) => (m.id === inFlight || m.clientId === inFlight) && !m.completed);
       if (idx !== -1) return idx;
     }
     for (let i = msgs.length - 1; i >= 0; i--) {
@@ -188,7 +244,7 @@ export function useChat(settings) {
         return;
       }
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
-      const targetMsgId = data.messageId || data.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
+      const targetMsgId = data.messageId || data.id || getFirstActiveAssistantId(targetConvId);
 
       // If this message has already completed, ignore duplicate completion/stream events safely (#366)
       if (targetMsgId && completedMessageIdsRef.current.has(targetMsgId)) {
@@ -215,7 +271,9 @@ export function useChat(settings) {
             completed: true,
           };
           if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
-          if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+          removeActiveAssistantId(targetConvId, target.id);
+          if (target.clientId) removeActiveAssistantId(targetConvId, target.clientId);
+          if (targetMsgId && targetMsgId !== target.id) removeActiveAssistantId(targetConvId, targetMsgId);
           updated[idx] = newMsg;
           return updated;
         };
@@ -253,7 +311,10 @@ export function useChat(settings) {
             };
             if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
             if (data.messageId) completedMessageIdsRef.current.add(data.messageId);
-            if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+            removeActiveAssistantId(targetConvId, target.id);
+            if (target.clientId) removeActiveAssistantId(targetConvId, target.clientId);
+            if (targetMsgId && targetMsgId !== target.id) removeActiveAssistantId(targetConvId, targetMsgId);
+            if (data.messageId) removeActiveAssistantId(targetConvId, data.messageId);
             updated[idx] = newMsg;
             return adoptServerId(updated, newMsg.id, data.messageId);
           };
@@ -319,7 +380,10 @@ export function useChat(settings) {
           // The last frame names the persisted reply. Remembering that id too
           // keeps a repeated completion that names it from being applied twice.
           if (data.messageId) completedMessageIdsRef.current.add(data.messageId);
-          if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+          removeActiveAssistantId(targetConvId, target.id);
+          if (target.clientId) removeActiveAssistantId(targetConvId, target.clientId);
+          if (targetMsgId && targetMsgId !== target.id) removeActiveAssistantId(targetConvId, targetMsgId);
+          if (data.messageId) removeActiveAssistantId(targetConvId, data.messageId);
           updated[idx] = newMsg;
           return adoptServerId(updated, newMsg.id, data.messageId);
         };
@@ -361,15 +425,33 @@ export function useChat(settings) {
     ws.on("ack", (data) => {
       const targetConvId = data?.conversationId || (streamingConversationIdsRef.current.has(activeConversationRef.current) ? activeConversationRef.current : null);
       if (!targetConvId || deletedConversationIdsRef.current.has(targetConvId)) return;
-      const inFlightId = activeAssistantIdByConvRef.current.get(targetConvId);
+      const turns = inFlightTurnsByConvRef.current.get(targetConvId) || [];
+      const turn = turns.find((t) => !t.acknowledged) || turns[0];
+      const inFlightId = turn ? turn.assistantId : getFirstActiveAssistantId(targetConvId);
       if (!data?.messageId || !inFlightId) return;
 
+      if (turn) {
+        turn.acknowledged = true;
+      }
+      const clientUserMsgId = turn ? turn.userMsgId : null;
+
+      if (data.assistantMessageId) {
+        if (turn) turn.assistantId = data.assistantMessageId;
+        addActiveAssistantId(targetConvId, data.assistantMessageId);
+      }
+
       const applyAck = (msgs) => {
-        // sendMessage appends the user's message and the reply's placeholder
-        // together, so the message being acknowledged is the one just before it.
-        const idx = msgs.findIndex((m) => m.id === inFlightId);
-        const user = idx > 0 ? msgs[idx - 1] : null;
-        return user?.role === "user" ? adoptServerId(msgs, user.id, data.messageId) : msgs;
+        let updated = msgs;
+        if (data.assistantMessageId) {
+          updated = adoptServerId(updated, inFlightId, data.assistantMessageId);
+        }
+        if (clientUserMsgId) {
+          return adoptServerId(updated, clientUserMsgId, data.messageId);
+        }
+        const targetId = data.assistantMessageId || inFlightId;
+        const idx = updated.findIndex((m) => m.id === targetId || m.clientId === inFlightId);
+        const user = idx > 0 ? updated[idx - 1] : null;
+        return user?.role === "user" ? adoptServerId(updated, user.id, data.messageId) : updated;
       };
 
       if (targetConvId === activeConversationRef.current) {
@@ -406,7 +488,7 @@ export function useChat(settings) {
       markStreamingEnd(targetConvId);
 
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
-      const targetMsgId = data?.messageId || data?.id || (targetConvId ? activeAssistantIdByConvRef.current.get(targetConvId) : null);
+      const targetMsgId = data?.messageId || data?.id || getFirstActiveAssistantId(targetConvId);
 
       const applyWsError = (msgs) => {
         const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
@@ -421,7 +503,10 @@ export function useChat(settings) {
           completed: true,
         };
         if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
-        if (targetConvId) activeAssistantIdByConvRef.current.delete(targetConvId);
+        removeActiveAssistantId(targetConvId, target.id);
+        if (target.clientId) removeActiveAssistantId(targetConvId, target.clientId);
+        if (targetMsgId && targetMsgId !== target.id) removeActiveAssistantId(targetConvId, targetMsgId);
+        if (newMsg.id) removeActiveAssistantId(targetConvId, newMsg.id);
         updated[idx] = newMsg;
         return updated;
       };
@@ -448,31 +533,34 @@ export function useChat(settings) {
           markStreamingEnd(convId);
           continue;
         }
-        const inFlightId = activeAssistantIdByConvRef.current.get(convId);
-        const applyClose = (msgs) => {
-          const idx = findTargetAssistantIndex(msgs, inFlightId, convId);
-          if (idx === -1) return msgs;
-          const target = msgs[idx];
-          if (target.completed || target.content) return msgs;
-          const updated = [...msgs];
-          const newMsg = {
-            ...target,
-            content: "Connection lost. Please retry.",
-            type: "error",
-            completed: true,
+        const inFlightList = activeAssistantIdByConvRef.current.get(convId);
+        const inFlightIds = Array.isArray(inFlightList) ? inFlightList : (inFlightList ? [inFlightList] : []);
+        for (const inFlightId of inFlightIds) {
+          const applyClose = (msgs) => {
+            const idx = findTargetAssistantIndex(msgs, inFlightId, convId);
+            if (idx === -1) return msgs;
+            const target = msgs[idx];
+            if (target.completed || target.content) return msgs;
+            const updated = [...msgs];
+            const newMsg = {
+              ...target,
+              content: "Connection lost. Please retry.",
+              type: "error",
+              completed: true,
+            };
+            if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+            updated[idx] = newMsg;
+            return updated;
           };
-          if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
-          activeAssistantIdByConvRef.current.delete(convId);
-          updated[idx] = newMsg;
-          return updated;
-        };
-        if (convId === activeConversationRef.current) {
-          setMessages(applyClose);
-        } else {
-          setConversations((prev) =>
-            prev.map((c) => (c.id === convId ? { ...c, messages: applyClose(c.messages || []) } : c))
-          );
+          if (convId === activeConversationRef.current) {
+            setMessages(applyClose);
+          } else {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === convId ? { ...c, messages: applyClose(c.messages || []) } : c))
+            );
+          }
         }
+        activeAssistantIdByConvRef.current.delete(convId);
         markStreamingEnd(convId);
       }
     });
@@ -614,6 +702,7 @@ export function useChat(settings) {
       markStreamingEnd(id);
       markLoadingEnd(id);
       activeAssistantIdByConvRef.current.delete(id);
+      inFlightTurnsByConvRef.current.delete(id);
       setPendingApproval((prev) => (prev?.conversationId === id ? null : prev));
 
       const currentList = conversationsRef.current;
@@ -789,6 +878,7 @@ export function useChat(settings) {
     loadingConversationIdsRef.current.clear();
     setLoading(false);
     activeAssistantIdByConvRef.current.clear();
+    inFlightTurnsByConvRef.current.clear();
     completedMessageIdsRef.current.clear();
     operationSeqRef.current.clear();
     titleUpdatedAtByConvRef.current.clear();
@@ -883,7 +973,12 @@ export function useChat(settings) {
         type: "text",
         timestamp: new Date().toISOString(),
       };
-      activeAssistantIdByConvRef.current.set(convId, assistantMsg.id);
+      const turns = inFlightTurnsByConvRef.current.get(convId) || [];
+      inFlightTurnsByConvRef.current.set(convId, [
+        ...turns,
+        { userMsgId: userMsg.id, assistantId: assistantMsg.id, acknowledged: false },
+      ]);
+      addActiveAssistantId(convId, assistantMsg.id);
 
       if (convId === activeConversationRef.current) {
         setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -902,7 +997,7 @@ export function useChat(settings) {
       );
 
       // Try WebSocket streaming first
-      if (wsRef.current?.ws?.readyState === WebSocket.OPEN) {
+      if (wsRef.current?.ws?.readyState === 1 || wsRef.current?.ws?.readyState === WebSocket?.OPEN) {
         markStreamingStart(convId);
         wsRef.current.send({
           type: "chat",
@@ -921,7 +1016,7 @@ export function useChat(settings) {
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);
-        activeAssistantIdByConvRef.current.delete(convId);
+        removeActiveAssistantId(convId, assistantMsg.id);
 
         const applyRestSuccess = (msgs) => {
           const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
@@ -960,7 +1055,7 @@ export function useChat(settings) {
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);
-        activeAssistantIdByConvRef.current.delete(convId);
+        removeActiveAssistantId(convId, assistantMsg.id);
 
         const applyRestError = (msgs) => {
           const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
