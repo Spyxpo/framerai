@@ -346,11 +346,13 @@ function setupWebSocket(wss) {
           // client could not tell which message the server meant, or ask for it
           // again (to branch from it). The ack now says what it is (Issue #394).
           const userMessageId = randomUUID();
+          const assistantMessageId = randomUUID();
 
           // Send acknowledgment
           safeSend(ws, {
             type: "ack",
             messageId: userMessageId,
+            assistantMessageId,
             conversationId,
           });
 
@@ -404,6 +406,7 @@ function setupWebSocket(wss) {
               safeSend(ws, {
                 type: "stream",
                 conversationId,
+                messageId: assistantMessageId,
                 content: accumulated,
                 done: false,
                 responseType: "text",
@@ -435,14 +438,17 @@ function setupWebSocket(wss) {
           // answers, which reads worse than no history at all. One id per reply,
           // stored with it and named on its last frame below, so the message is
           // never known by two (Issue #394).
-          const assistantMessageId = randomUUID();
-          conversations.append(conversationId, {
-            id: assistantMessageId,
-            role: "assistant",
-            content: response.content,
-            type: response.type,
-            timestamp: new Date().toISOString(),
-          });
+          conversations.append(
+            conversationId,
+            {
+              id: assistantMessageId,
+              role: "assistant",
+              content: response.content,
+              type: response.type,
+              timestamp: new Date().toISOString(),
+            },
+            { replyToId: userMessageId }
+          );
 
           // Privacy: validate and strip trace from response if not allowed (defense in depth)
           if (response.metadata?.trace) {
@@ -494,7 +500,7 @@ function setupWebSocket(wss) {
                 conversationId,
                 content: acc,
                 done: isDone,
-                ...(isDone ? { messageId: assistantMessageId } : {}),
+                messageId: assistantMessageId,
                 responseType: response.type,
                 metadata: isDone ? response.metadata : undefined,
               });
