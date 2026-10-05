@@ -1,5 +1,5 @@
 import { useRef, useEffect } from "react";
-import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings, GitBranch } from "lucide-react";
+import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings, GitBranch, Search } from "lucide-react";
 
 export default function Sidebar({
   open,
@@ -12,6 +12,7 @@ export default function Sidebar({
   onDelete,
   onClearAll,
   onOpenSettings,
+  onOpenSearch,
   onFocusChat,
   onFocusChatSettings,
   focusRef,
@@ -188,23 +189,33 @@ export default function Sidebar({
           <img src="/logo.svg" alt="FramerAI logo" className="sidebar-logo" />
           <span className="sidebar-title" aria-hidden="true">FramerAI</span>
         </div>
-        <button
-          className="icon-btn"
-          ref={toggleBtnRef}
-          onClick={onToggle}
-          aria-label="Close sidebar"
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown") {
-              e.preventDefault();
-              newChatBtnRef.current?.focus();
-            } else if (e.key === "ArrowRight") {
-              e.preventDefault();
-              onFocusChatSettings?.();
-            }
-          }}
-        >
-          <PanelLeftClose size={20} aria-hidden="true" />
-        </button>
+        <div className="sidebar-header-actions" style={{ display: "flex", gap: "4px" }}>
+          <button
+            className="icon-btn sidebar-search-btn"
+            onClick={onOpenSearch}
+            aria-label="Search conversations and messages"
+            title="Search (Cmd+K)"
+          >
+            <Search size={18} aria-hidden="true" />
+          </button>
+          <button
+            className="icon-btn"
+            ref={toggleBtnRef}
+            onClick={onToggle}
+            aria-label="Close sidebar"
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                newChatBtnRef.current?.focus();
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                onFocusChatSettings?.();
+              }
+            }}
+          >
+            <PanelLeftClose size={20} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <button

@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import Sidebar from "./components/Sidebar/Sidebar";
 import Chat from "./components/Chat/Chat";
 import SettingsPanel from "./components/Settings/SettingsPanel";
+import SearchModal from "./components/Search/SearchModal";
 import { useChat } from "./hooks/useChat";
 import { useSettings } from "./hooks/useSettings";
 import { api } from "./services/api";
@@ -9,6 +10,9 @@ import { api } from "./services/api";
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState(null);
+  const highlightTimeoutRef = useRef(null);
   const [model, setModel] = useState(null);
   const chatFocusRef = useRef(null);          // Chat: focus first suggestion or textarea
   const textareaFocusRef = useRef(null);      // Chat: focus textarea directly
@@ -47,10 +51,50 @@ export default function App() {
       .catch(() => setModel(null));
   }, []);
 
+  // Global keyboard shortcut: Cmd+K / Ctrl+K toggles global search
+  useEffect(() => {
+    const handleGlobalKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
+
+  // Clean up highlight timer on unmount
+  useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Select conversation → focus textarea when done
   const handleSelectConversation = useCallback(async (id) => {
     await selectConversation(id);
     textareaFocusRef.current?.();
+  }, [selectConversation]);
+
+  // Navigate to search result (conversation + message)
+  const handleNavigateToResult = useCallback(async (result) => {
+    if (!result) return;
+    if (result.conversationId) {
+      await selectConversation(result.conversationId);
+    }
+    if (result.messageId) {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+      setHighlightedMessageId(result.messageId);
+      highlightTimeoutRef.current = setTimeout(() => {
+        setHighlightedMessageId(null);
+      }, 3000);
+    } else {
+      textareaFocusRef.current?.();
+    }
   }, [selectConversation]);
 
   // Sidebar → → Chat area
@@ -101,6 +145,7 @@ export default function App() {
         onDelete={handleDeleteConversation}
         onClearAll={clearAllConversations}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSearch={() => setSearchOpen(true)}
         onFocusChat={focusChatArea}
         onFocusChatSettings={focusChatSettings}
         focusRef={sidebarFocusRef}
@@ -122,6 +167,8 @@ export default function App() {
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onDismissError={handleDismissError}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSearch={() => setSearchOpen(true)}
+        highlightedMessageId={highlightedMessageId}
         focusRef={chatFocusRef}
         textareaFocusRef={textareaFocusRef}
         chatSettingsFocusRef={chatSettingsFocusRef}
@@ -135,6 +182,13 @@ export default function App() {
         onChange={updateSetting}
         onReset={resetSettings}
         onClose={() => setSettingsOpen(false)}
+      />
+      <SearchModal
+        open={searchOpen}
+        conversations={conversations}
+        activeConversationId={activeConversation}
+        onClose={() => setSearchOpen(false)}
+        onNavigate={handleNavigateToResult}
       />
     </div>
   );

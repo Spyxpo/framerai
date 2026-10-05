@@ -20,14 +20,45 @@ test("GET /api/openapi.json returns 200 OK and valid JSON spec", async () => {
   assert.equal(res.body.info.version, "1.0.0");
 });
 
+// The committed file is stored in git with LF line endings, and the generator writes LF. A checkout
+// with core.autocrlf=true, the Git for Windows default, leaves CRLF on disk instead, while macOS,
+// Linux and CI check it out with LF. Whether the file matches the schema must not depend on how a
+// clone was configured, so a copy read from disk is compared as git stores it, with LF line endings,
+// and the line endings themselves are never part of the comparison (Issue #402).
+function assertMatchesGenerated(onDisk, message) {
+  assert.equal(onDisk.replace(/\r\n/g, "\n"), getOpenApiSpecJson(), message);
+}
+
 test("generated OpenAPI spec matches committed openapi.json file", () => {
   const committedPath = path.join(__dirname, "..", "openapi.json");
   assert.ok(fs.existsSync(committedPath), "committed openapi.json file must exist");
 
   const committedContent = fs.readFileSync(committedPath, "utf8");
-  const generatedContent = getOpenApiSpecJson();
 
-  assert.equal(committedContent, generatedContent, "committed openapi.json must match generator output");
+  assertMatchesGenerated(committedContent, "committed openapi.json must match generator output");
+});
+
+test("a copy of the spec with CRLF line endings, as a Windows checkout leaves it, matches like one with LF", () => {
+  // CI and macOS check the file out with LF. The CRLF form is made here, so a Windows clone
+  // is covered on every platform.
+  const generated = getOpenApiSpecJson();
+
+  assertMatchesGenerated(generated, "LF line endings");
+  assertMatchesGenerated(generated.replace(/\n/g, "\r\n"), "CRLF line endings");
+});
+
+test("ignoring line endings does not hide a real difference from the generated spec", () => {
+  const generated = getOpenApiSpecJson();
+  const retitled = generated.replace('"title": "FramerAI REST API"', '"title": "FramerAI REST API v2"');
+  assert.notEqual(retitled, generated, "the text to change must exist in the spec");
+
+  for (const [name, eol] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+    const onDisk = (text) => text.replace(/\n/g, eol);
+
+    assert.throws(() => assertMatchesGenerated(onDisk(retitled)), assert.AssertionError, `changed content, ${name}`);
+    assert.throws(() => assertMatchesGenerated(onDisk(generated.trimEnd())), assert.AssertionError, `no final newline, ${name}`);
+    assert.throws(() => assertMatchesGenerated(onDisk(generated + "\n")), assert.AssertionError, `extra final blank line, ${name}`);
+  }
 });
 
 test("OpenAPI spec contains all required REST API routes", () => {
