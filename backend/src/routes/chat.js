@@ -158,7 +158,7 @@ router.post(
       metadata: response.metadata || {},
       timestamp: new Date().toISOString(),
     };
-    conversations.append(conv.id, assistantMessage);
+    conversations.append(conv.id, assistantMessage, { replyToId: userMessage.id });
     // The reply is the response, so the user's message would otherwise never
     // learn the id it was stored under, and a client holding a different one
     // could not ask for it again (branching). Added to the response only: the
