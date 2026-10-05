@@ -160,12 +160,13 @@ export function searchConversations({
         // Reuse deduplication to guarantee no duplicate message results
         const dedupedMessages = dedupeMessages(conv.messages);
 
-        for (const msg of dedupedMessages) {
+        for (let msgIdx = 0; msgIdx < dedupedMessages.length; msgIdx++) {
+          const msg = dedupedMessages[msgIdx];
           if (!msg || typeof msg.content !== "string") continue;
           if (msg.content.toLowerCase().includes(lowerQuery)) {
-            const messageId = msg.id || msg.clientId || null;
+            const messageId = msg.id || msg.clientId || `idx-${msgIdx}`;
             results.push({
-              id: `msg-${conv.id}-${messageId || Math.random()}`,
+              id: `msg-${conv.id}-${messageId}`,
               type: "message",
               conversationId: conv.id,
               conversationTitle: convTitle,
