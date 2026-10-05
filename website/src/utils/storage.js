@@ -270,8 +270,24 @@ export function saveConversationsToStorage(
       return clearConversationsFromStorage(storage);
     }
 
+    const saveTime = typeof options.savedAt === "number" ? options.savedAt : Date.now();
+    const existingRaw = storage.getItem(STORAGE_KEY);
+    if (existingRaw && !options.force) {
+      try {
+        const existing = JSON.parse(existingRaw);
+        if (existing && typeof existing === "object") {
+          if (typeof existing.savedAt === "number" && existing.savedAt > saveTime) {
+            return false;
+          }
+        }
+      } catch {
+        // ignore parse error on corrupted storage
+      }
+    }
+
     const payload = {
       version: STORAGE_VERSION,
+      savedAt: saveTime,
       conversations: evictedList,
       activeConversationId: finalActiveId,
     };
