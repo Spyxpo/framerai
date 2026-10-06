@@ -200,5 +200,40 @@ describe("WebSocketClient", () => {
         payload: "data",
       });
     });
+
+    it("emits open event on connect and reconnect event on automatic reconnect", async () => {
+      client = new WebSocketClient("ws://localhost:8080/ws");
+      const openSpy = vi.fn();
+      const reconnectSpy = vi.fn();
+
+      client.on("open", openSpy);
+      client.on("reconnect", reconnectSpy);
+
+      // Initial connection
+      const connectPromise = client.connect();
+      client.ws.readyState = WebSocket.OPEN;
+      client.ws.onopen();
+      await connectPromise;
+
+      expect(openSpy).toHaveBeenCalledWith({ isReconnect: false });
+      expect(reconnectSpy).not.toHaveBeenCalled();
+      expect(client.isConnected()).toBe(true);
+
+      // Simulate network close
+      client.ws.readyState = WebSocket.CLOSED;
+      client.ws.onclose();
+      expect(client.isConnected()).toBe(false);
+
+      // Fast-forward past reconnect delay
+      vi.advanceTimersByTime(1500);
+
+      // Socket reconnects
+      client.ws.readyState = WebSocket.OPEN;
+      client.ws.onopen();
+
+      expect(openSpy).toHaveBeenCalledWith({ isReconnect: true });
+      expect(reconnectSpy).toHaveBeenCalledTimes(1);
+      expect(client.isConnected()).toBe(true);
+    });
   });
 });

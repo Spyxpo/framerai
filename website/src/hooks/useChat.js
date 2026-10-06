@@ -554,14 +554,30 @@ export function useChat(settings) {
           };
           if (convId === activeConversationRef.current) {
             setMessages(applyClose);
-          } else {
-            setConversations((prev) =>
-              prev.map((c) => (c.id === convId ? { ...c, messages: applyClose(c.messages || []) } : c))
-            );
           }
+          setConversations((prev) =>
+            prev.map((c) => (c.id === convId ? { ...c, messages: applyClose(c.messages || []) } : c))
+          );
         }
         activeAssistantIdByConvRef.current.delete(convId);
+        inFlightTurnsByConvRef.current.delete(convId);
         markStreamingEnd(convId);
+      }
+      activeAssistantIdByConvRef.current.clear();
+      inFlightTurnsByConvRef.current.clear();
+    });
+
+    ws.on("reconnect", () => {
+      // Reconnection restores the socket; ensure in-flight turns and streaming sets are clean
+      activeAssistantIdByConvRef.current.clear();
+      inFlightTurnsByConvRef.current.clear();
+      streamingConversationIdsRef.current.clear();
+      setStreaming(false);
+
+      // Re-establish active conversation subscription state
+      const currentActiveId = activeConversationRef.current;
+      if (currentActiveId && !deletedConversationIdsRef.current.has(currentActiveId)) {
+        messagesConversationIdRef.current = currentActiveId;
       }
     });
 
@@ -997,7 +1013,7 @@ export function useChat(settings) {
       );
 
       // Try WebSocket streaming first
-      if (wsRef.current?.ws?.readyState === 1 || wsRef.current?.ws?.readyState === WebSocket?.OPEN) {
+      if (wsRef.current?.isConnected?.() || wsRef.current?.ws?.readyState === 1 || wsRef.current?.ws?.readyState === WebSocket?.OPEN) {
         markStreamingStart(convId);
         wsRef.current.send({
           type: "chat",
