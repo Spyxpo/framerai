@@ -113,24 +113,62 @@ router.post(
     const conv = getConversation(conversationId(req));
 
     const v = validator(req.body);
-    const content = v.string("content", { required: true, max: modelLimits.messageChars() });
+    const isRegenerate = Boolean(req.body.regenerateMessageId || req.body.regenerate);
+    const content = v.string("content", { required: !isRegenerate, max: modelLimits.messageChars() });
     const type = v.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
     const attachments = v.array("attachments", { max: 10 });
     const settings = readSettings(v);
+    let editMessageId;
+    if (req.body.editMessageId !== undefined) {
+      editMessageId = v.uuid("editMessageId");
+    }
+    let regenerateMessageId;
+    if (req.body.regenerateMessageId !== undefined) {
+      regenerateMessageId = v.uuid("regenerateMessageId");
+    }
     v.done();
 
-    const userMessage = {
-      id: randomUUID(),
-      role: "user",
-      content,
-      type,
-      attachments,
-      timestamp: new Date().toISOString(),
-    };
-    conversations.append(conv.id, userMessage);
+    let userMessage;
+    if (editMessageId) {
+      const editIdx = conv.messages ? conv.messages.findIndex((m) => m.id === editMessageId) : -1;
+      if (editIdx !== -1) {
+        conv.messages[editIdx] = {
+          ...conv.messages[editIdx],
+          content,
+          type,
+          attachments,
+          timestamp: new Date().toISOString(),
+        };
+        conversations.truncateAfter(conv.id, editMessageId);
+        userMessage = conv.messages[editIdx];
+      }
+    } else if (regenerateMessageId) {
+      const regenIdx = conv.messages ? conv.messages.findIndex((m) => m.id === regenerateMessageId) : -1;
+      if (regenIdx !== -1) {
+        conversations.truncateFrom(conv.id, regenerateMessageId);
+        for (let i = conv.messages.length - 1; i >= 0; i--) {
+          if (conv.messages[i]?.role === "user") {
+            userMessage = conv.messages[i];
+            break;
+          }
+        }
+      }
+    }
+
+    if (!userMessage) {
+      userMessage = {
+        id: randomUUID(),
+        role: "user",
+        content,
+        type,
+        attachments,
+        timestamp: new Date().toISOString(),
+      };
+      conversations.append(conv.id, userMessage);
+    }
 
     // Update title from first message
-    if (conv.messages.length === 1) {
+    if (conv.messages.length === 1 && content) {
       conv.title = content.substring(0, 50) + (content.length > 50 ? "..." : "");
     }
 

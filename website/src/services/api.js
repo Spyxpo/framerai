@@ -38,10 +38,20 @@ export const api = {
     }),
 
   // Messages
-  sendMessage: (conversationId, content, type = "text", attachments = [], settings) =>
+  sendMessage: (conversationId, content, type = "text", attachments = [], settings, options = {}) =>
     request(`/chat/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, type, attachments, settings }),
+      body: JSON.stringify({ content, type, attachments, settings, ...options }),
+    }),
+  editMessage: (conversationId, messageId, content, type = "text", attachments = [], settings) =>
+    request(`/chat/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content, type, attachments, settings, editMessageId: messageId }),
+    }),
+  regenerateResponse: (conversationId, messageId, settings, content = "") =>
+    request(`/chat/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content, regenerateMessageId: messageId, settings }),
     }),
 
   // Generation
