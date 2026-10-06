@@ -4,7 +4,8 @@
  * Spawns a pool of FramerAI inference workers (model/serve.py) and distributes
  * requests across them to avoid head-of-line blocking. Each worker loads the
  * model once and reuses it for multiple requests. When workers exit, they are
- * automatically replaced.
+ * automatically replaced. A pool that failed to start is started again by a later
+ * request, once a cool-down has passed.
  */
 
 const path = require("path");
@@ -43,6 +44,13 @@ const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BACKOFF_BASE_MS = 500;
 const RESTART_BACKOFF_MAX_MS = 8000;
 const WORKER_STABILITY_MS = Number(process.env.MODEL_WORKER_STABILITY_MS || 30000);
+
+// A pool that failed to start may be started again, by a request and only once a
+// cool-down has passed: 30 s after the first failure, doubling with every
+// consecutive one up to 5 minutes. No timer runs behind this, so a model that stays
+// broken costs one start-up per cool-down at most, and nothing while nobody asks.
+const START_RETRY_BASE_MS = 30000;
+const START_RETRY_MAX_MS = 300000;
 
 // Replaceable timer for testing
 let _setTimeout = (fn, ms) => setTimeout(fn, ms);
@@ -604,6 +612,17 @@ class Worker {
 let pool = null;
 let disabled = false;
 let poolInitialized = false;
+// Set with `disabled` when the pool failed to start: when a request may start it again,
+// on the monotonic clock so that a wall-clock step cannot end the cool-down early or
+// stretch it, and how many start-ups in a row have failed. retryAt stays 0 when nothing
+// is to be retried: a model that is not configured, and a pool that did start and whose
+// workers then crashed too often, which handleWorkerExit gives up on as it always has.
+let retryAt = 0;
+let startFailures = 0;
+
+function retryDue() {
+  return disabled && retryAt > 0 && performance.now() >= retryAt;
+}
 
 class WorkerPool {
   constructor(size) {
@@ -772,6 +791,8 @@ class WorkerPool {
     }
     if (success) {
       disabled = false;
+      retryAt = 0;
+      startFailures = 0;
       this.scheduleStabilityTimer(workerId);
       this.poolLog.info("replacement worker ready", { workerId });
       this.dispatch();
@@ -880,12 +901,14 @@ function isConfigured() {
 }
 
 let poolInitPromise = null;
+const poolLog = createLogger({ route: "bridge-pool" });
 
 async function ensurePool() {
-  if (disabled) throw new Error("model disabled");
+  if (disabled && !retryDue()) throw new Error("model disabled");
 
   if (!isConfigured()) {
     disabled = true;
+    retryAt = 0;
     throw new Error("model not configured");
   }
 
@@ -902,15 +925,35 @@ async function ensurePool() {
     return poolInitPromise;
   }
 
+  if (disabled) {
+    // The cool-down after a failed start-up is over and a request is asking: start
+    // again. The pool that failed is retired first, since its own restart chain may
+    // still be running and must not spawn workers beside the new pool's.
+    poolLog.info("retrying model pool start-up", { failures: startFailures });
+    if (pool) pool.shutdown();
+    disabled = false;
+    retryAt = 0;
+  }
+
   pool = new WorkerPool(WORKER_COUNT);
   poolInitPromise = (async () => {
     try {
       await pool.start();
       poolInitialized = true;
+      if (startFailures > 0) poolLog.info("model pool recovered", { failures: startFailures });
+      startFailures = 0;
       return pool;
     } catch (err) {
       disabled = true;
       poolInitialized = false;
+      startFailures += 1;
+      const retryInMs = Math.min(START_RETRY_BASE_MS * 2 ** (startFailures - 1), START_RETRY_MAX_MS);
+      retryAt = performance.now() + retryInMs;
+      poolLog.warn("model pool failed to start", {
+        error: err instanceof Error ? err.message : String(err),
+        failures: startFailures,
+        retryInMs,
+      });
       throw err;
     } finally {
       poolInitPromise = null;
@@ -926,7 +969,7 @@ async function request(op, params = {}, optionsOrRequestId = null, operatorCtx =
 }
 
 function available() {
-  return isConfigured() && !disabled;
+  return isConfigured() && (!disabled || retryDue());
 }
 
 /**
@@ -950,7 +993,7 @@ function modelInfo() {
 }
 
 async function start() {
-  if (disabled) return false;
+  if (disabled && !retryDue()) return false;
   if (poolInitialized && pool && pool.workers.some((w) => w.ready)) return true;
   try {
     await ensurePool();
