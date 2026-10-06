@@ -21,6 +21,15 @@ const { notFoundHandler, errorHandler } = require("./middleware/errors");
 const { apiLimiter, generationLimiter } = require("./middleware/limiters");
 const { requestIdMiddleware } = require("./middleware/requestId");
 
+/**
+ * The one browser origin the API is for: CORS_ORIGIN, or the Vite dev server when
+ * it is not set. The CORS middleware and the WebSocket handshake both read it
+ * here, so the two cannot disagree about who is allowed in.
+ */
+function allowedOrigin() {
+  return process.env.CORS_ORIGIN || "http://localhost:5173";
+}
+
 function createApp() {
   const app = express();
 
@@ -29,7 +38,7 @@ function createApp() {
   app.set("trust proxy", config.trustProxy);
 
   // Middleware
-  app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
+  app.use(cors({ origin: allowedOrigin() }));
   app.use(express.json({ limit: config.jsonBodyLimit }));
   app.use(requestIdMiddleware);
   // Uploads are user-controlled bytes served from the app's own origin, and an
@@ -78,12 +87,37 @@ function createApp() {
 }
 
 /**
+ * Hold a WebSocket handshake to the origin CORS allows (Issue #425).
+ *
+ * CORS only tells a browser what it may read, and a browser never applies it to
+ * a WebSocket, so without this any web page could open /ws on a locally running
+ * backend and drive it. The comparison is the one a browser makes against
+ * Access-Control-Allow-Origin: exact, with "*" meaning every origin, so another
+ * spelling of the allowed origin is another origin.
+ *
+ * No Origin header means the client is not a browser, which always sends one on
+ * a WebSocket handshake. CORS lets those clients through and so does this. A
+ * header that is present but empty is not absent, and is refused.
+ */
+function verifyWebSocketOrigin(allowed) {
+  return ({ origin }, done) => {
+    if (origin === undefined || allowed === "*" || origin === allowed) return done(true);
+    done(false, 403, "Origin not allowed");
+  };
+}
+
+/**
  * An HTTP server with the app mounted and the WebSocket endpoint attached.
  */
 function createServer() {
   const app = createApp();
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: "/ws", maxPayload: config.maxWsPayload });
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    maxPayload: config.maxWsPayload,
+    verifyClient: verifyWebSocketOrigin(allowedOrigin()),
+  });
   setupWebSocket(wss);
   return { app, server, wss };
 }
