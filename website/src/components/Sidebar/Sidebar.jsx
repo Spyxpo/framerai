@@ -1,5 +1,5 @@
 import { useRef, useEffect } from "react";
-import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings, GitBranch, Search } from "lucide-react";
+import { Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, Settings, GitBranch, Search, Download, Upload, Archive } from "lucide-react";
 
 export default function Sidebar({
   open,
@@ -13,6 +13,9 @@ export default function Sidebar({
   onClearAll,
   onOpenSettings,
   onOpenSearch,
+  onOpenBackup,
+  onExportAll,
+  onImportBackup,
   onFocusChat,
   onFocusChatSettings,
   focusRef,
@@ -22,6 +25,21 @@ export default function Sidebar({
   const newChatBtnRef = useRef(null);
   const toggleBtnRef = useRef(null);
   const footerSettingsBtnRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const handleImportClick = (e) => {
+    e?.stopPropagation();
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    onImportBackup?.(file);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
 
   const handleClearAll = (e) => {
     e?.stopPropagation();
@@ -251,6 +269,40 @@ export default function Sidebar({
           <div className="model-badge">FramerAI v1.0</div>
         </div>
         <div className="sidebar-footer-actions" style={{ display: "flex", gap: "4px" }}>
+          {conversations.length > 0 && (
+            <button
+              className="icon-btn export-backup-btn"
+              onClick={onExportAll}
+              aria-label="Export all conversations"
+              title="Export all conversations"
+            >
+              <Download size={18} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            className="icon-btn import-backup-btn"
+            onClick={handleImportClick}
+            aria-label="Import conversations backup"
+            title="Import conversations backup"
+          >
+            <Upload size={18} aria-hidden="true" />
+          </button>
+          <button
+            className="icon-btn backup-dialog-btn"
+            onClick={onOpenBackup}
+            aria-label="Backup and restore"
+            title="Backup & Restore"
+          >
+            <Archive size={18} aria-hidden="true" />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+            data-testid="sidebar-backup-file-input"
+          />
           {conversations.length > 0 && (
             <button
               className="icon-btn clear-history-btn"
