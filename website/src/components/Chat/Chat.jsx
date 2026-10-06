@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal, FileText, Search } from "lucide-react";
+import { Send, PanelLeft, Image, Video, Code, AudioLines, Mic, MicOff, Paperclip, Loader2, X, AlertTriangle, SlidersHorizontal, FileText, Search, Download, CheckCircle2 } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import { api } from "../../services/api";
 
@@ -36,6 +36,9 @@ export default function Chat({
   onDismissError,
   onOpenSettings,
   onOpenSearch,
+  onExportConversation,
+  successMessage,
+  onDismissSuccess,
   highlightedMessageId,
   focusRef,
   textareaFocusRef,
@@ -445,6 +448,14 @@ export default function Chat({
           <Search size={18} aria-hidden="true" />
         </button>
         <button
+          className="icon-btn chat-export-btn"
+          onClick={() => onExportConversation?.()}
+          title="Export active conversation"
+          aria-label="Export conversation"
+        >
+          <Download size={18} aria-hidden="true" />
+        </button>
+        <button
           className="icon-btn chat-settings-btn"
           ref={chatSettingsBtnRef}
           onClick={onOpenSettings}
@@ -468,6 +479,17 @@ export default function Chat({
           <SlidersHorizontal size={18} aria-hidden="true" />
         </button>
       </header>
+
+      {/* Success notification banner */}
+      {successMessage && (
+        <div className="success-banner" role="status" aria-live="polite">
+          <CheckCircle2 size={15} className="success-banner-icon" aria-hidden="true" />
+          <span>{successMessage}</span>
+          <button className="success-banner-dismiss" onClick={onDismissSuccess} aria-label="Dismiss message">
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {/* Global error banner */}
       {error && (

@@ -96,6 +96,8 @@ export function sanitizeMessage(msg) {
     content: typeof content === "string" ? content : "",
     type: typeof type === "string" ? type : "text",
     timestamp: typeof timestamp === "string" ? timestamp : new Date().toISOString(),
+    ...(Array.isArray(msg.attachments) && msg.attachments.length > 0 ? { attachments: msg.attachments } : {}),
+    ...(typeof msg.completed === "boolean" ? { completed: msg.completed } : {}),
     ...(sanitizedMetadata !== undefined ? { metadata: sanitizedMetadata } : {}),
   };
 }
@@ -110,7 +112,12 @@ export function sanitizeConversation(conv) {
 
   const title = typeof conv.title === "string" && conv.title.trim() ? conv.title : "New Chat";
   const updatedAt = typeof conv.updatedAt === "string" ? conv.updatedAt : new Date().toISOString();
-  const createdAt = typeof conv.createdAt === "string" && conv.createdAt ? conv.createdAt : undefined;
+  const createdAt =
+    typeof conv.createdAt === "string" && conv.createdAt
+      ? conv.createdAt
+      : typeof conv.updatedAt === "string"
+      ? conv.updatedAt
+      : new Date().toISOString();
   const parentConversationId =
     typeof conv.parentConversationId === "string" && conv.parentConversationId ? conv.parentConversationId : undefined;
   const branchedFromMessageId =
@@ -132,7 +139,7 @@ export function sanitizeConversation(conv) {
     id,
     title,
     updatedAt,
-    ...(createdAt ? { createdAt } : {}),
+    createdAt,
     ...(parentConversationId ? { parentConversationId } : {}),
     ...(branchedFromMessageId ? { branchedFromMessageId } : {}),
     messages,

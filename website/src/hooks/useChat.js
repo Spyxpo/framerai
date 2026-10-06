@@ -7,6 +7,13 @@ import {
   clearConversationsFromStorage,
 } from "../utils/storage";
 import { dedupeMessages } from "../utils/dedupe";
+import {
+  createBackup,
+  exportConversationToMarkdown,
+  exportConversationToPlainText,
+  restoreBackup,
+  downloadFile,
+} from "../utils/backup";
 
 /**
  * Give a message the id the server stored it under (Issue #394).
@@ -932,6 +939,87 @@ export function useChat(settings) {
     );
   }, []);
 
+  const exportConversation = useCallback((convId, format = "json") => {
+    const targetId = convId || activeConversationRef.current;
+    const conv = conversationsRef.current.find((c) => c.id === targetId);
+    if (!conv) {
+      throw new Error("Conversation not found to export.");
+    }
+    const safeTitle = (conv.title || "conversation").replace(/[^a-z0-9_-]/gi, "_");
+    if (format === "markdown" || format === "md") {
+      const md = exportConversationToMarkdown(conv);
+      downloadFile(md, `${safeTitle}.md`, "text/markdown");
+      return md;
+    }
+    if (format === "text" || format === "txt") {
+      const txt = exportConversationToPlainText(conv);
+      downloadFile(txt, `${safeTitle}.txt`, "text/plain");
+      return txt;
+    }
+    const backup = createBackup([conv]);
+    const jsonStr = JSON.stringify(backup, null, 2);
+    downloadFile(jsonStr, `framerai-conversation-${safeTitle}-${conv.id}.json`, "application/json");
+    return backup;
+  }, []);
+
+  const exportAllConversations = useCallback(() => {
+    const currentList = conversationsRef.current;
+    if (!currentList || currentList.length === 0) {
+      throw new Error("No conversations to export.");
+    }
+    const backup = createBackup(currentList);
+    const dateStr = new Date().toISOString().split("T")[0];
+    const jsonStr = JSON.stringify(backup, null, 2);
+    downloadFile(jsonStr, `framerai-backup-${dateStr}.json`, "application/json");
+    return backup;
+  }, []);
+
+  const importBackup = useCallback(async (backupDataOrFile) => {
+    setError(null);
+    try {
+      let rawData = backupDataOrFile;
+      if (typeof File !== "undefined" && backupDataOrFile instanceof File) {
+        rawData = await backupDataOrFile.text();
+      }
+      const result = restoreBackup(rawData, conversationsRef.current);
+      if (!result.success) {
+        setError(`Import failed: ${result.error}`);
+        return result;
+      }
+
+      const restored = result.conversations;
+      if (!restored || restored.length === 0) {
+        setError("Import failed: No valid conversations found in backup.");
+        return { success: false, error: "No valid conversations found in backup." };
+      }
+
+      // Atomically update state
+      setConversations((prev) => {
+        return [...restored, ...prev];
+      });
+
+      const firstId = restored[0].id;
+      activeConversationRef.current = firstId;
+      messagesConversationIdRef.current = firstId;
+      setActiveConversation(firstId);
+      setMessages(restored[0].messages || []);
+
+      // Persist to storage immediately
+      saveConversationsToStorage([...restored, ...conversationsRef.current], firstId);
+
+      return {
+        success: true,
+        count: restored.length,
+        activeId: firstId,
+        conversations: restored,
+      };
+    } catch (err) {
+      const errMsg = err?.message || "Unknown error during import.";
+      setError(`Import failed: ${errMsg}`);
+      return { success: false, error: errMsg };
+    }
+  }, []);
+
   const dismissError = useCallback(() => setError(null), []);
 
   const sendMessage = useCallback(
@@ -1142,6 +1230,9 @@ export function useChat(settings) {
     sendMessage,
     branchConversation,
     renameConversation,
+    exportConversation,
+    exportAllConversations,
+    importBackup,
     dismissError,
     approveCommand,
     denyCommand,

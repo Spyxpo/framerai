@@ -3,6 +3,7 @@ import Sidebar from "./components/Sidebar/Sidebar";
 import Chat from "./components/Chat/Chat";
 import SettingsPanel from "./components/Settings/SettingsPanel";
 import SearchModal from "./components/Search/SearchModal";
+import BackupModal from "./components/Backup/BackupModal";
 import { useChat } from "./hooks/useChat";
 import { useSettings } from "./hooks/useSettings";
 import { api } from "./services/api";
@@ -11,6 +12,9 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [successMessage, setSuccessMessage] = useState(null);
+  const successTimeoutRef = useRef(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState(null);
   const highlightTimeoutRef = useRef(null);
   const [model, setModel] = useState(null);
@@ -38,6 +42,9 @@ export default function App() {
     clearAllConversations,
     sendMessage,
     branchConversation,
+    exportConversation,
+    exportAllConversations,
+    importBackup,
     dismissError,
     approveCommand,
     denyCommand,
@@ -131,6 +138,42 @@ export default function App() {
     setTimeout(() => textareaFocusRef.current?.(), 0);
   }, [dismissError]);
 
+  const showNotification = useCallback((message) => {
+    if (successTimeoutRef.current) {
+      clearTimeout(successTimeoutRef.current);
+    }
+    setSuccessMessage(message);
+    successTimeoutRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+    }, 4000);
+  }, []);
+
+  const handleExportConversation = useCallback((convId, format = "json") => {
+    try {
+      exportConversation(convId, format);
+      showNotification("Conversation exported successfully.");
+    } catch {
+      // Error is set in useChat or can be handled here
+    }
+  }, [exportConversation, showNotification]);
+
+  const handleExportAll = useCallback(() => {
+    try {
+      exportAllConversations();
+      showNotification("All conversations exported successfully.");
+    } catch {
+      // Handled
+    }
+  }, [exportAllConversations, showNotification]);
+
+  const handleImportBackup = useCallback(async (fileOrData) => {
+    const result = await importBackup(fileOrData);
+    if (result && result.success) {
+      showNotification(`Successfully restored ${result.count} conversation${result.count === 1 ? "" : "s"}.`);
+    }
+    return result;
+  }, [importBackup, showNotification]);
+
   return (
     <div className="app">
       <a href="#chat-input" className="skip-link">Skip to chat input</a>
@@ -146,6 +189,9 @@ export default function App() {
         onClearAll={clearAllConversations}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenSearch={() => setSearchOpen(true)}
+        onOpenBackup={() => setBackupOpen(true)}
+        onExportAll={handleExportAll}
+        onImportBackup={handleImportBackup}
         onFocusChat={focusChatArea}
         onFocusChatSettings={focusChatSettings}
         focusRef={sidebarFocusRef}
@@ -168,6 +214,9 @@ export default function App() {
         onDismissError={handleDismissError}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenSearch={() => setSearchOpen(true)}
+        onExportConversation={handleExportConversation}
+        successMessage={successMessage}
+        onDismissSuccess={() => setSuccessMessage(null)}
         highlightedMessageId={highlightedMessageId}
         focusRef={chatFocusRef}
         textareaFocusRef={textareaFocusRef}
@@ -189,6 +238,15 @@ export default function App() {
         activeConversationId={activeConversation}
         onClose={() => setSearchOpen(false)}
         onNavigate={handleNavigateToResult}
+      />
+      <BackupModal
+        open={backupOpen}
+        conversations={conversations}
+        activeConversationId={activeConversation}
+        onClose={() => setBackupOpen(false)}
+        onExportConversation={handleExportConversation}
+        onExportAll={handleExportAll}
+        onImportBackup={handleImportBackup}
       />
     </div>
   );
