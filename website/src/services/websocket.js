@@ -7,17 +7,43 @@ export class WebSocketClient {
     this.maxReconnectDelay = 30000;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
+    this.hasConnected = false;
+  }
+
+  isConnected() {
+    return (
+      this.ws !== null &&
+      (this.ws.readyState === 1 ||
+        this.ws.readyState === (typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1))
+    );
   }
 
   connect() {
     // Clear intentional disconnect flag when explicitly connecting
     this.intentionalDisconnect = false;
 
+    // Clear any pending reconnect timer so multiple connects don't race
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
+        const isReconnect = this.hasConnected;
+        this.hasConnected = true;
         this.reconnectDelay = 1000;
+
+        const openHandlers = this.listeners.get("open") || [];
+        openHandlers.forEach((handler) => handler({ isReconnect }));
+
+        if (isReconnect) {
+          const reconnectHandlers = this.listeners.get("reconnect") || [];
+          reconnectHandlers.forEach((handler) => handler());
+        }
+
         resolve();
       };
 
@@ -38,7 +64,9 @@ export class WebSocketClient {
 
         // Only reconnect if this was NOT an intentional disconnect
         if (!this.intentionalDisconnect) {
-          this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
+          this.reconnectTimer = setTimeout(() => {
+            this.connect().catch(() => {});
+          }, this.reconnectDelay);
           this.reconnectDelay = Math.min(
             this.reconnectDelay * 2,
             this.maxReconnectDelay
@@ -63,9 +91,11 @@ export class WebSocketClient {
   }
 
   send(data) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.isConnected()) {
       this.ws.send(JSON.stringify(data));
+      return true;
     }
+    return false;
   }
 
   sendApprovalResponse(approvalId, approved, denyEverything = false) {
@@ -80,6 +110,7 @@ export class WebSocketClient {
   disconnect() {
     // Set flag to prevent automatic reconnect
     this.intentionalDisconnect = true;
+    this.hasConnected = false;
 
     // Cancel any pending reconnect timer
     if (this.reconnectTimer) {
