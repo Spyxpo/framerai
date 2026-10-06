@@ -4199,3 +4199,563 @@ describe("Issue #399: stdin error after the worker is running", { concurrency: 1
     assert.strictEqual(outcome, "rejected: worker exited");
   });
 });
+
+
+// ============================================================================
+// Issue #427 Regression Tests: a pool that failed to start can start again
+// ============================================================================
+
+// The first request starts the pool. When that start-up failed (a worker that never reported
+// ready within the start-up timeout, one that could not be spawned, workers that kept exiting
+// before they were ready) the pool set `disabled` and kept it for the life of the process: no
+// request ever started it again, so a cold start that was merely slow, or a dependency that was
+// down for a minute, meant placeholder answers until the backend was restarted. The restart path
+// (#152) only helps a worker that exits; a start-up that times out or cannot spawn has no exit to
+// restart from, and one that exits is restarted just MAX_RESTART_ATTEMPTS times.
+//
+// A pool that failed to start is now unavailable, not gone: a request that arrives once the
+// cool-down has passed starts it again. The cool-down doubles with every consecutive failure up
+// to a ceiling, and nothing runs while nobody asks, so a start-up that keeps failing is retried
+// rarely and never in a loop of its own. A model that is not configured is not a start-up
+// failure, and stays disabled.
+describe("Issue #427: a pool that failed to start can start again", { concurrency: 1 }, () => {
+  let bridge = null;
+  let savedEnv = null;
+  let originalExistsSync = null;
+  let modelFileExists = true;
+  let spawnsFail = false;
+
+  const MANAGED_ENV = {
+    MODEL_ENABLED: "true",
+    MODEL_PATH: "/fake/model.pt",
+    TOKENIZER_PATH: "/fake/tokenizer",
+    MODEL_WORKERS: "1",
+    PYTHON_BIN: undefined,
+    MODEL_TOOLS: undefined,
+    MODEL_CLI_MODE: undefined,
+    MODEL_CLI_ROOT: undefined,
+    MODEL_TIMEOUT_MS: undefined,
+    MODEL_STARTUP_TIMEOUT_MS: undefined,
+    MODEL_WORKER_STABILITY_MS: undefined,
+    MODEL_KILL_GRACE_MS: undefined,
+    MODEL_HEARTBEAT_TIMEOUT_MS: undefined,
+    MODEL_HEARTBEAT_STARTUP_GRACE_MS: undefined,
+  };
+
+  const enoent = (command) =>
+    Object.assign(new Error(`spawn ${command} ENOENT`), { code: "ENOENT", errno: -2, syscall: `spawn ${command}` });
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+    modelFileExists = true;
+    spawnsFail = false;
+
+    savedEnv = {};
+    for (const [key, value] of Object.entries(MANAGED_ENV)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (path) => {
+      if (path && path.includes("model.pt")) return modelFileExists;
+      return originalExistsSync ? originalExistsSync(path) : false;
+    };
+
+    // A worker that cannot be spawned reports it afterwards, as an 'error' event on the child.
+    mockSpawn = (command, args, options) => {
+      const child = new MockChildProcess(command, args, options);
+      if (spawnsFail) process.nextTick(() => child.emit("error", enoent(command)));
+      return child;
+    };
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  // Resolves to "STILL PENDING" instead of hanging the run when a request is never settled.
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([
+      promise.then(
+        (val) => (val === undefined ? "resolved: undefined" : val),
+        (err) => `rejected: ${err.message}`
+      ),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
+  };
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  // With the timers below unset, restart backoffs (500 ms doubling to 8 s) are the only timers
+  // the bridge arms in this range, and the start-up timeout is the one at 60 s.
+  const isBackoff = (timer) => timer.ms >= 500 && timer.ms <= 8000;
+  const isStartupTimeout = (timer) => timer.ms === 60000;
+
+  // Records every timer the bridge arms instead of running it, so a test decides which restart
+  // backoff or start-up timeout fires and when. Needs the bridge to be loaded already.
+  const recordTimers = (t) => {
+    const armed = [];
+    const cleared = [];
+    const prev = bridge._setTimerImpl(
+      (fn, ms) => {
+        const timer = { fn, ms };
+        armed.push(timer);
+        return timer;
+      },
+      (timer) => {
+        cleared.push(timer);
+      }
+    );
+    t.after(() => bridge._setTimerImpl(prev.set, prev.clear));
+    return { armed, cleared };
+  };
+
+  // The bridge measures the cool-down on performance.now(), which a wall-clock step cannot move.
+  // A test steps that clock by hand, so "30 seconds later" is instant and cannot be made flaky by
+  // a slow machine.
+  const stepClock = (t) => {
+    let now = 1000000;
+    Object.defineProperty(performance, "now", { value: () => now, configurable: true, writable: true });
+    t.after(() => {
+      delete performance.now;
+    });
+    return {
+      advance(ms) {
+        now += ms;
+      },
+    };
+  };
+
+  // The cool-down after the Nth consecutive failed start-up: 30 s, doubling, 5 minutes at most.
+  const cooldown = (failures) => Math.min(30000 * 2 ** (failures - 1), 300000);
+
+  // One request, and what it did: how it settled and how many workers it had spawned by then.
+  const attempt = async (prompt = "attempt") => {
+    const before = spawnedProcesses.length;
+    const outcome = await settlesWithin(bridge.request("chat", { prompt }), 1000);
+    return { outcome, spawned: spawnedProcesses.length - before };
+  };
+
+  // Makes a worker answer every request written to it, so a recovered pool can be asked things.
+  const answerAll = (child, content = "served by the new pool") => {
+    child.onStdinWrite = (data) => child.simulateResponse(JSON.parse(data).id, true, { content });
+  };
+
+  // The ways a start-up fails. Each one makes the first request's start-up fail and returns what
+  // that request settled to. None of them leaves a worker that exits and can be restarted, except
+  // the last, whose restarts run out.
+  const FAILURES = {
+    "a worker that never reports ready (start-up timeout)": async (timers) => {
+      const first = settlesWithin(bridge.request("chat", { prompt: "first" }), 1000);
+      await tick();
+      const startupTimeouts = timers.armed.filter(isStartupTimeout);
+      assert.strictEqual(startupTimeouts.length, 1, "the worker should have armed one start-up timeout");
+      startupTimeouts[0].fn();
+      return first;
+    },
+    "a worker that cannot be spawned": async () => {
+      spawnsFail = true;
+      return settlesWithin(bridge.request("chat", { prompt: "first" }), 1000);
+    },
+    "workers that keep exiting before they report ready": async (timers) => {
+      const first = settlesWithin(bridge.request("chat", { prompt: "first" }), 1000);
+      // Kill each worker as soon as it spawns and run each restart backoff, until the pool stops
+      // scheduling restarts: the first worker plus MAX_RESTART_ATTEMPTS replacements.
+      let killed = 0;
+      while (killed < 20) {
+        await tick();
+        spawnedProcesses[killed].simulateExit(1);
+        killed += 1;
+        await tick();
+        const next = timers.armed.filter(isBackoff)[killed - 1];
+        if (!next) break;
+        next.fn();
+      }
+      assert.strictEqual(spawnedProcesses.length, 6, "the first worker and every replacement the pool is allowed");
+      return first;
+    },
+  };
+
+  // Loads the bridge, makes its first start-up fail and checks what callers see. That part
+  // is how the bridge behaved before #427 and must not change: the request that started the pool
+  // is rejected, and what follows is turned away at once.
+  const failFirstStartup = async (t, fail) => {
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers(t);
+
+    assert.strictEqual(await fail(timers), "rejected: no workers available");
+    assert.strictEqual(bridge.available(), false, "the bridge should fall back after a failed start-up");
+    const spawned = spawnedProcesses.length;
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: model disabled", spawned: 0 });
+    assert.strictEqual(spawnedProcesses.length, spawned);
+    return { clock, timers, spawned };
+  };
+
+  for (const [name, fail] of Object.entries(FAILURES)) {
+    it(`REGRESSION #427: ${name} does not disable the pool for good`, async (t) => {
+      const { clock, spawned } = await failFirstStartup(t, fail);
+
+      // Cooling down: the pool is unavailable and nothing is started on anyone's behalf.
+      clock.advance(cooldown(1) - 1);
+      assert.strictEqual(bridge.available(), false, "still cooling down one millisecond before the end");
+      assert.deepStrictEqual(await attempt(), { outcome: "rejected: model disabled", spawned: 0 });
+
+      // Cool-down over: a request may start the pool again, so the model is worth asking for again.
+      clock.advance(1);
+      assert.strictEqual(bridge.available(), true, "the bridge must not stay disabled after a start-up failure");
+      assert.strictEqual(spawnedProcesses.length, spawned, "becoming eligible must not start anything by itself");
+    });
+
+    it(`REGRESSION #427: after ${name} the pool starts again and serves requests once the condition clears`, async (t) => {
+      const { clock, spawned } = await failFirstStartup(t, fail);
+      const failedPool = bridge._pool();
+
+      spawnsFail = false; // whatever was wrong is fixed
+      clock.advance(cooldown(1));
+
+      const served = settlesWithin(bridge.request("chat", { prompt: "after the cool-down" }), 1000);
+      await tick();
+      assert.strictEqual(spawnedProcesses.length, spawned + 1, "the request should have started one new worker");
+      assert.notStrictEqual(bridge._pool(), failedPool, "the pool that failed is replaced, not reused");
+
+      const worker = spawnedProcesses[spawnedProcesses.length - 1];
+      answerAll(worker);
+      worker.simulateReady(true);
+      assert.deepStrictEqual(await served, { content: "served by the new pool" });
+      assert.strictEqual(bridge.available(), true);
+
+      // The pool is up for good: more requests are served with no further start-up.
+      assert.deepStrictEqual(await attempt("again"), { outcome: { content: "served by the new pool" }, spawned: 0 });
+    });
+  }
+
+  it("REGRESSION #427: a start-up that keeps failing is retried at most once per cool-down, and the cool-down grows to a ceiling", async (t) => {
+    spawnsFail = true;
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    recordTimers(t);
+
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: no workers available", spawned: 1 });
+
+    // 30 s, 60 s, 120 s, 240 s, then 300 s however long it keeps failing.
+    for (let failures = 1; failures <= 8; failures += 1) {
+      clock.advance(cooldown(failures) - 1);
+      for (let i = 0; i < 3; i += 1) {
+        assert.deepStrictEqual(await attempt(), { outcome: "rejected: model disabled", spawned: 0 }, `inside cool-down ${failures}`);
+      }
+      clock.advance(1);
+      assert.deepStrictEqual(
+        await attempt(),
+        { outcome: "rejected: no workers available", spawned: 1 },
+        `exactly one more attempt once cool-down ${failures} is over`
+      );
+    }
+    assert.strictEqual(cooldown(8), 300000, "the cool-down stops growing at the ceiling");
+  });
+
+  it("REGRESSION #427: a burst of requests starts the pool once, and every one of them is settled", async (t) => {
+    process.env.MODEL_WORKERS = "2";
+    spawnsFail = true;
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    recordTimers(t);
+
+    const burst = (size) =>
+      Promise.all(Array.from({ length: size }, (_, i) => settlesWithin(bridge.request("chat", { prompt: `burst ${i}` }), 2000)));
+
+    // The burst that finds no pool starts it once, with the pool's two workers, and all of it is rejected.
+    let outcomes = await burst(200);
+    assert.strictEqual(spawnedProcesses.length, 2, "one start-up for the whole burst");
+    assert.ok(outcomes.every((outcome) => outcome === "rejected: no workers available"), "no request may be left pending");
+
+    // While cooling down a burst starts nothing.
+    outcomes = await burst(500);
+    assert.strictEqual(spawnedProcesses.length, 2);
+    assert.ok(outcomes.every((outcome) => outcome === "rejected: model disabled"), "no request may be left pending");
+
+    // Once it is over, a burst starts the pool once more, no matter how many arrive at the same time.
+    clock.advance(cooldown(1));
+    outcomes = await burst(500);
+    assert.strictEqual(spawnedProcesses.length, 4, "one more start-up for the whole burst");
+    assert.ok(outcomes.every((outcome) => outcome === "rejected: no workers available"), "no request may be left pending");
+
+    // And the next cool-down is longer.
+    clock.advance(cooldown(2) - 1);
+    outcomes = await burst(500);
+    assert.strictEqual(spawnedProcesses.length, 4);
+    assert.ok(outcomes.every((outcome) => outcome === "rejected: model disabled"));
+  });
+
+  it("REGRESSION #427: nothing retries by itself, however long the pool stays down", async (t) => {
+    spawnsFail = true;
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers(t);
+
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: no workers available", spawned: 1 });
+    await tick();
+
+    // Whatever the failed start-up armed has been cancelled: nothing is waiting to start the pool.
+    const live = timers.armed.filter((timer) => !timers.cleared.includes(timer));
+    assert.deepStrictEqual(
+      live.map((timer) => timer.ms),
+      [],
+      "no timer may be left armed to retry the pool"
+    );
+    const armed = timers.armed.length;
+
+    // An hour of nobody asking: no worker, no timer, no background loop of any kind.
+    clock.advance(3600000);
+    await tick();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(spawnedProcesses.length, 1, "no worker may be started without a request");
+    assert.strictEqual(timers.armed.length, armed, "no timer may be armed to retry");
+  });
+
+  it("REGRESSION #427: a model that is not configured is not retried", async (t) => {
+    modelFileExists = false;
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    recordTimers(t);
+
+    assert.strictEqual(bridge.available(), false);
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: model not configured", spawned: 0 });
+
+    clock.advance(24 * 3600000);
+    assert.strictEqual(bridge.available(), false, "a configuration error is not a start-up failure to retry");
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: model disabled", spawned: 0 });
+    assert.strictEqual(spawnedProcesses.length, 0, "no worker may be started for a model that is not configured");
+  });
+
+  it("REGRESSION #427: start() follows the same rule as request()", async (t) => {
+    spawnsFail = true;
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    recordTimers(t);
+
+    assert.strictEqual(await settlesWithin(bridge.start(), 1000), false);
+    assert.strictEqual(await settlesWithin(bridge.start(), 1000), false, "turned away while cooling down");
+    assert.strictEqual(spawnedProcesses.length, 1);
+
+    spawnsFail = false;
+    clock.advance(cooldown(1));
+    const started = settlesWithin(bridge.start(), 1000);
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, 2, "start() after the cool-down starts the pool again");
+    spawnedProcesses[1].simulateReady(true);
+    assert.strictEqual(await started, true);
+    assert.strictEqual(bridge.available(), true);
+  });
+
+  it("REGRESSION #427: requests that arrive during the new start-up wait for it, and are all served", async (t) => {
+    const { clock, spawned } = await failFirstStartup(t, FAILURES["a worker that cannot be spawned"]);
+
+    spawnsFail = false;
+    clock.advance(cooldown(1));
+    const requests = [1, 2, 3].map((n) => settlesWithin(bridge.request("chat", { prompt: `during ${n}` }), 1000));
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, spawned + 1, "one start-up, not one per request");
+
+    const worker = spawnedProcesses[spawnedProcesses.length - 1];
+    answerAll(worker);
+    worker.simulateReady(true);
+    assert.deepStrictEqual(await Promise.all(requests), Array(3).fill({ content: "served by the new pool" }));
+  });
+
+  it("REGRESSION #427: starting again retires the pool that failed, so its own pending restart cannot start a second set of workers", async (t) => {
+    bridge = require("../src/services/pythonBridge");
+    const clock = stepClock(t);
+    const timers = recordTimers(t);
+
+    const first = settlesWithin(bridge.request("chat", { prompt: "first" }), 1000);
+    await tick();
+    spawnedProcesses[0].simulateExit(1); // dies before it reports ready
+    assert.strictEqual(await first, "rejected: no workers available");
+    await tick();
+    const backoffs = timers.armed.filter(isBackoff);
+    assert.strictEqual(backoffs.length, 1, "the pool that failed still has a restart scheduled for it");
+
+    clock.advance(cooldown(1));
+    const served = settlesWithin(bridge.request("chat", { prompt: "after" }), 1000);
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, 2, "one worker from the new pool");
+    assert.ok(timers.cleared.includes(backoffs[0]), "the retired pool's restart timer must be cancelled");
+
+    // Even if that timer fires anyway, the retired pool must not spawn.
+    backoffs[0].fn();
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, 2, "the retired pool must not start workers of its own");
+
+    answerAll(spawnedProcesses[1]);
+    spawnedProcesses[1].simulateReady(true);
+    assert.deepStrictEqual(await served, { content: "served by the new pool" });
+  });
+
+  it("REGRESSION #427: workers of the pool that started again are replaced the way they always were", async (t) => {
+    const { clock, timers } = await failFirstStartup(t, FAILURES["a worker that cannot be spawned"]);
+
+    spawnsFail = false;
+    clock.advance(cooldown(1));
+    const served = settlesWithin(bridge.request("chat", { prompt: "recover" }), 1000);
+    await tick();
+    const revived = spawnedProcesses[spawnedProcesses.length - 1];
+    answerAll(revived);
+    revived.simulateReady(true);
+    assert.deepStrictEqual(await served, { content: "served by the new pool" });
+
+    // The restart policy is the one #152, #154 and #386 settled on, and it starts from nothing:
+    // the first crash is replaced after the first backoff, not an inherited, longer one.
+    const before = timers.armed.filter(isBackoff).length;
+    revived.simulateExit(1);
+    await tick();
+    const backoffs = timers.armed.filter(isBackoff);
+    assert.strictEqual(backoffs.length, before + 1, "the crash should schedule a replacement");
+    assert.strictEqual(backoffs[backoffs.length - 1].ms, 500, "with the first backoff of the schedule");
+    assert.strictEqual(bridge.available(), true, "a crash alone does not disable the pool, its replacement is on the way");
+
+    const spawnedBefore = spawnedProcesses.length;
+    backoffs[backoffs.length - 1].fn();
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, spawnedBefore + 1, "the replacement spawns after its backoff");
+    const replacement = spawnedProcesses[spawnedProcesses.length - 1];
+    answerAll(replacement, "from the replacement");
+    replacement.simulateReady(true);
+    assert.deepStrictEqual(await attempt("after the crash"), { outcome: { content: "from the replacement" }, spawned: 0 });
+  });
+
+  it("REGRESSION #427: a pool that gave up on crashing workers stays down, even after a failed start-up that recovered", async (t) => {
+    const clock = stepClock(t);
+    bridge = require("../src/services/pythonBridge");
+    const timers = recordTimers(t);
+
+    // The first start-up fails, and the replacement the restart path schedules for it comes up:
+    // the pool works again, and the retry the failure called for is spent.
+    const first = settlesWithin(bridge.request("chat", { prompt: "first" }), 1000);
+    await tick();
+    spawnedProcesses[0].simulateExit(1);
+    assert.strictEqual(await first, "rejected: no workers available");
+    await tick();
+    timers.armed.filter(isBackoff)[0].fn();
+    await tick();
+    spawnedProcesses[1].simulateReady(true);
+    await tick();
+    assert.strictEqual(bridge.available(), true, "the replacement made the pool usable again");
+
+    // Then its workers keep crashing until the restart limit gives up on them. By now the
+    // cool-down of that first failure is over, and still it must not bring the pool back: giving
+    // up on crashing workers is not a failed start-up, and the restart limit is what bounds it.
+    clock.advance(cooldown(1));
+    let crashed = 1;
+    while (crashed < 20) {
+      spawnedProcesses[crashed].simulateExit(1);
+      crashed += 1;
+      await tick();
+      const next = timers.armed.filter(isBackoff)[crashed - 1];
+      if (!next) break;
+      next.fn();
+      await tick();
+    }
+    assert.strictEqual(spawnedProcesses.length, 6, "the first worker and every replacement the pool is allowed");
+    assert.strictEqual(bridge.available(), false, "the pool gave up on its workers");
+    clock.advance(24 * 3600000);
+    assert.strictEqual(bridge.available(), false, "giving up on crashing workers is not a failed start-up to retry");
+    assert.deepStrictEqual(await attempt(), { outcome: "rejected: model disabled", spawned: 0 });
+  });
+
+  it("REGRESSION #427: a wall-clock step does not move the cool-down", async (t) => {
+    const { clock } = await failFirstStartup(t, FAILURES["a worker that cannot be spawned"]);
+    const realNow = Date.now;
+    t.after(() => {
+      Date.now = realNow;
+    });
+
+    // A week forward does not end it early, and a week back does not stretch it.
+    Date.now = () => realNow() + 7 * 24 * 3600000;
+    assert.strictEqual(bridge.available(), false, "a week of wall-clock time is not 30 seconds of cool-down");
+    Date.now = () => realNow() - 7 * 24 * 3600000;
+    clock.advance(cooldown(1));
+    assert.strictEqual(bridge.available(), true, "the cool-down ends on the monotonic clock, whatever the wall clock says");
+  });
+
+  it("REGRESSION #427: the failure and the retry are logged, so a start-up that keeps failing is not hidden", async (t) => {
+    // The logger reads its level and format when it loads, so load it fresh with known ones.
+    const saved = { LOG_LEVEL: process.env.LOG_LEVEL, LOG_FORMAT: process.env.LOG_FORMAT };
+    process.env.LOG_LEVEL = "info";
+    process.env.LOG_FORMAT = "json";
+    delete require.cache[require.resolve("../src/services/logger")];
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+
+    const lines = [];
+    const originalLog = console.log;
+    try {
+      const clock = stepClock(t);
+      spawnsFail = true;
+      bridge = require("../src/services/pythonBridge");
+      recordTimers(t);
+      console.log = (...args) => lines.push(args.join(" "));
+
+      await attempt();
+      spawnsFail = false;
+      clock.advance(cooldown(1));
+      const served = settlesWithin(bridge.request("chat", { prompt: "after" }), 1000);
+      await tick();
+      const revived = spawnedProcesses[spawnedProcesses.length - 1];
+      answerAll(revived);
+      revived.simulateReady(true);
+      await served;
+    } finally {
+      console.log = originalLog;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      delete require.cache[require.resolve("../src/services/logger")];
+    }
+
+    const entries = lines
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    const failed = entries.find((e) => e.message === "model pool failed to start");
+    assert.ok(failed, "the failed start-up should be logged");
+    assert.strictEqual(failed.level, "warn");
+    assert.strictEqual(failed.failures, 1);
+    assert.strictEqual(failed.retryInMs, cooldown(1));
+    assert.match(failed.error, /no workers available/);
+    assert.ok(entries.some((e) => e.message === "retrying model pool start-up"), "the retry should be logged");
+    assert.ok(entries.some((e) => e.message === "model pool recovered"), "the recovery should be logged");
+  });
+});
