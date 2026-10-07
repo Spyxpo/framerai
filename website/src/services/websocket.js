@@ -1,6 +1,13 @@
+// The WebSocket endpoint on the host the page came from. A page served over HTTPS has to use wss://:
+// the browser blocks a plain ws:// connection from a secure page as mixed content.
+function defaultUrl() {
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${scheme}//${window.location.host}/ws`;
+}
+
 export class WebSocketClient {
   constructor(url) {
-    this.url = url || `ws://${window.location.host}/ws`;
+    this.url = url || defaultUrl();
     this.ws = null;
     this.listeners = new Map();
     this.reconnectDelay = 1000;

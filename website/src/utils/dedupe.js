@@ -172,3 +172,60 @@ export function mergeMessages(localMsgs = [], remoteMsgs = []) {
 
   return dedupeMessages(merged);
 }
+
+/**
+ * Reconciles an existing local conversation with an incoming remote snapshot.
+ * Preserves the newest valid title according to local modification timestamps,
+ * deterministically dedupes messages, and retains local fields.
+ *
+ * @param {Object} existingConv - Existing local conversation state
+ * @param {Object} incomingConv - Incoming conversation snapshot (e.g. from backend API)
+ * @param {number} [localTitleUpdatedAt=0] - Monotonic timestamp of local title modification
+ * @returns {Object} Reconciled conversation object
+ */
+export function reconcileConversation(existingConv, incomingConv, localTitleUpdatedAt = 0) {
+  if (!existingConv && !incomingConv) return null;
+  if (!existingConv) {
+    return {
+      ...incomingConv,
+      messages: dedupeMessages(incomingConv?.messages),
+    };
+  }
+  if (!incomingConv) return existingConv;
+
+  const dedupedMessages = dedupeMessages(
+    Array.isArray(incomingConv.messages) && incomingConv.messages.length > 0
+      ? incomingConv.messages
+      : existingConv.messages || []
+  );
+
+  const effectiveTitleUpdatedAt = Math.max(
+    localTitleUpdatedAt || 0,
+    existingConv.titleUpdatedAt || 0
+  );
+  const incomingTitleUpdatedAt = incomingConv.titleUpdatedAt || 0;
+
+  // The latest valid conversation title must win:
+  // If local modification is newer than remote or remote has no title update timestamp,
+  // preserve existingConv.title.
+  let title;
+  let titleUpdatedAt;
+  if (effectiveTitleUpdatedAt > incomingTitleUpdatedAt && existingConv.title) {
+    title = existingConv.title;
+    titleUpdatedAt = effectiveTitleUpdatedAt;
+  } else if (incomingConv.title) {
+    title = incomingConv.title;
+    titleUpdatedAt = incomingTitleUpdatedAt || effectiveTitleUpdatedAt;
+  } else {
+    title = existingConv.title || "New Chat";
+    titleUpdatedAt = effectiveTitleUpdatedAt;
+  }
+
+  return {
+    ...existingConv,
+    ...incomingConv,
+    title,
+    ...(titleUpdatedAt > 0 ? { titleUpdatedAt } : {}),
+    messages: dedupedMessages,
+  };
+}

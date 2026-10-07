@@ -30,6 +30,9 @@ export default function Chat({
   onDenyCommand,
   branching,
   onBranch,
+  onEdit,
+  onRegenerate,
+  onContinue,
   sidebarOpen,
   onSend,
   onToggleSidebar,
@@ -637,6 +640,9 @@ export default function Chat({
                   isStreaming={streaming && isLastMsg}
                   onRetry={isErrorMsg && isLastMsg ? handleRetry : undefined}
                   onBranch={onBranch}
+                  onEdit={onEdit}
+                  onRegenerate={onRegenerate}
+                  onContinue={onContinue}
                   isBranching={branching}
                   isHighlighted={Boolean(highlightedMessageId && (msg.id === highlightedMessageId || msg.clientId === highlightedMessageId))}
                 />

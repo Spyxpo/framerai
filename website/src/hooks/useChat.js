@@ -6,7 +6,7 @@ import {
   saveConversationsToStorage,
   clearConversationsFromStorage,
 } from "../utils/storage";
-import { dedupeMessages, mergeMessages } from "../utils/dedupe";
+import { dedupeMessages, mergeMessages, reconcileConversation } from "../utils/dedupe";
 import {
   createBackup,
   exportConversationToMarkdown,
@@ -111,8 +111,14 @@ export function useChat(settings) {
   const operationSeqRef = useRef(new Map());
   // Track deleted conversation IDs so pending asynchronous responses cannot resurrect them (#404)
   const deletedConversationIdsRef = useRef(new Set());
-  // Track timestamp/flag of local title modifications so older fetches cannot overwrite renames (#404)
-  const titleUpdatedAtByConvRef = useRef(new Map());
+  // Track timestamp/flag of local title modifications so older fetches cannot overwrite renames (#404, #431)
+  const titleUpdatedAtByConvRef = useRef(
+    new Map(
+      (initialStorage.conversations || [])
+        .filter((c) => c && c.id && (c.titleUpdatedAt || (c.title && c.title !== "New Chat")))
+        .map((c) => [c.id, c.titleUpdatedAt || 1])
+    )
+  );
   // Track the conversation ID that current `messages` state actually belongs to (#404)
   const messagesConversationIdRef = useRef(initialStorage.activeConversationId);
 
@@ -779,17 +785,11 @@ export function useChat(settings) {
           if (deletedConversationIdsRef.current.has(id)) return prev;
           const idx = prev.findIndex((c) => c.id === id);
           if (idx === -1) {
-            return [{ ...conv, messages: deduped }, ...prev];
+            return [reconcileConversation(null, conv, titleUpdatedAtByConvRef.current.get(id) || 0), ...prev];
           }
           const c = prev[idx];
           const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(id) || 0;
-          const title = (localTitleUpdatedAt > 0 && c.title) ? c.title : (conv.title || c.title);
-          const updatedConv = {
-            ...c,
-            ...conv,
-            title,
-            messages: deduped,
-          };
+          const updatedConv = reconcileConversation(c, conv, localTitleUpdatedAt);
           const updatedList = [...prev];
           updatedList[idx] = updatedConv;
           saveConversationsToStorage(updatedList, activeConversationRef.current);
@@ -879,7 +879,9 @@ export function useChat(settings) {
                     setMessages(deduped);
                     setConversations((prev) =>
                       prev.map((c) =>
-                        c.id === nextId ? { ...c, ...conv, messages: deduped, title: conv.title || c.title } : c
+                        c.id === nextId
+                          ? reconcileConversation(c, conv, titleUpdatedAtByConvRef.current.get(nextId) || 0)
+                          : c
                       )
                     );
                   }
@@ -933,8 +935,15 @@ export function useChat(settings) {
 
       try {
         const branch = await api.branchConversation(convId, messageId);
+        const parentConv = currentConv || conversationsRef.current.find((c) => c.id === convId);
+        const parentTitle = parentConv?.title;
+        const branchTitle = parentTitle && parentTitle !== "New Chat"
+          ? `${parentTitle} (Branch)`
+          : branch.title;
+
         const newBranchConv = {
           ...branch,
+          title: branchTitle,
           messages: branch.messages || historyPrefix,
           parentConversationId: branch.parentConversationId || convId,
           branchedFromMessageId: branch.branchedFromMessageId || messageId,
@@ -943,7 +952,11 @@ export function useChat(settings) {
         activeConversationRef.current = newBranchConv.id;
         messagesConversationIdRef.current = newBranchConv.id;
         setConversations((prev) => {
-          const updated = [newBranchConv, ...prev.filter((c) => c.id !== newBranchConv.id)];
+          const existing = prev.find((c) => c.id === newBranchConv.id);
+          const reconciled = existing
+            ? reconcileConversation(existing, newBranchConv, titleUpdatedAtByConvRef.current.get(newBranchConv.id) || 0)
+            : newBranchConv;
+          const updated = [reconciled, ...prev.filter((c) => c.id !== newBranchConv.id)];
           saveConversationsToStorage(updated, newBranchConv.id);
           return updated;
         });
@@ -1028,18 +1041,23 @@ export function useChat(settings) {
     const trimmed = newTitle.trim();
     if (!trimmed) return;
 
-    titleUpdatedAtByConvRef.current.set(id, Date.now());
+    const prevTimestamp = titleUpdatedAtByConvRef.current.get(id) || 0;
+    const timestamp = Math.max(Date.now(), prevTimestamp + 1);
+    titleUpdatedAtByConvRef.current.set(id, timestamp);
 
-    setConversations((prev) =>
-      prev.map((c) => {
+    setConversations((prev) => {
+      const updated = prev.map((c) => {
         if (c.id !== id) return c;
         return {
           ...c,
           title: trimmed,
+          titleUpdatedAt: Math.max(c.titleUpdatedAt || 0, timestamp),
           updatedAt: new Date().toISOString(),
         };
-      })
-    );
+      });
+      saveConversationsToStorage(updated, activeConversationRef.current);
+      return updated;
+    });
   }, []);
 
   const exportConversation = useCallback((convId, format = "json") => {
@@ -1152,11 +1170,16 @@ export function useChat(settings) {
         }
       } else {
         setConversations((prev) =>
-          prev.map((c) =>
-            c.id === convId && (c.title === "New Chat" || !c.title)
-              ? { ...c, title: content.length > 30 ? content.slice(0, 30) + "..." : content }
-              : c
-          )
+          prev.map((c) => {
+            if (c.id !== convId) return c;
+            const isExplicitlyTitled =
+              (titleUpdatedAtByConvRef.current.get(convId) || 0) > 0 ||
+              (c.titleUpdatedAt || 0) > 0;
+            if (!isExplicitlyTitled && (c.title === "New Chat" || !c.title)) {
+              return { ...c, title: content.length > 30 ? content.slice(0, 30) + "..." : content };
+            }
+            return c;
+          })
         );
       }
 
@@ -1314,6 +1337,558 @@ export function useChat(settings) {
     setPendingApproval((prev) => (prev?.approvalId === approvalId ? null : prev));
   }, []);
 
+  const editMessage = useCallback(
+    async (messageId, newContent, options = {}) => {
+      if (!newContent || typeof newContent !== "string" || !newContent.trim()) {
+        setError("Message content cannot be empty.");
+        return null;
+      }
+      setError(null);
+
+      const convId = options?.conversationId || activeConversationRef.current;
+      if (!convId || deletedConversationIdsRef.current.has(convId)) return null;
+
+      const currentConvs = conversationsRef.current;
+      const currentConv = currentConvs.find((c) => c.id === convId);
+      const convMessages =
+        convId === activeConversationRef.current && messages.length > 0
+          ? messages
+          : currentConv?.messages || [];
+
+      const messageIndex = convMessages.findIndex(
+        (m) => m.id === messageId || m.clientId === messageId
+      );
+      if (messageIndex === -1) {
+        setError("Message not found in conversation");
+        return null;
+      }
+
+      const targetMsg = convMessages[messageIndex];
+      if (targetMsg.role !== "user") {
+        setError("Only user messages can be edited");
+        return null;
+      }
+
+      if (options?.branch === true) {
+        if (messageIndex === 0) {
+          // Branching from the root user message
+          let newBranchConv;
+          try {
+            const branch = await api.branchConversation(convId, messageId);
+            newBranchConv = {
+              ...branch,
+              messages: [],
+            };
+          } catch {
+            const branchId = crypto.randomUUID();
+            newBranchConv = {
+              id: branchId,
+              title: `${currentConv?.title || "New Chat"} (Branch)`,
+              parentConversationId: convId,
+              branchedFromMessageId: messageId,
+              messages: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+          }
+          deletedConversationIdsRef.current.delete(newBranchConv.id);
+          activeConversationRef.current = newBranchConv.id;
+          messagesConversationIdRef.current = newBranchConv.id;
+          setConversations((prev) => {
+            const updated = [newBranchConv, ...prev.filter((c) => c.id !== newBranchConv.id)];
+            saveConversationsToStorage(updated, newBranchConv.id);
+            return updated;
+          });
+          setActiveConversation(newBranchConv.id);
+          setMessages([]);
+          await sendMessage(newContent.trim(), targetMsg.type || "text", targetMsg.attachments || []);
+          return newBranchConv;
+        }
+
+        const parentMsg = convMessages[messageIndex - 1];
+        const newBranch = await branchConversation(parentMsg.id, convId);
+        if (!newBranch) return null;
+        await sendMessage(newContent.trim(), targetMsg.type || "text", targetMsg.attachments || []);
+        return newBranch;
+      }
+
+      // In-place edit:
+      // Clean up in-flight generation on this conversation
+      const inFlightIds = activeAssistantIdByConvRef.current.get(convId);
+      if (inFlightIds) {
+        const ids = Array.isArray(inFlightIds) ? inFlightIds : [inFlightIds];
+        ids.forEach((id) => completedMessageIdsRef.current.add(id));
+      }
+      markStreamingEnd(convId);
+      markLoadingEnd(convId);
+      activeAssistantIdByConvRef.current.delete(convId);
+      inFlightTurnsByConvRef.current.delete(convId);
+
+      const opSeq = (operationSeqRef.current.get(convId) || 0) + 1;
+      operationSeqRef.current.set(convId, opSeq);
+
+      const prefix = convMessages.slice(0, messageIndex);
+      const updatedUserMsg = {
+        ...targetMsg,
+        content: newContent.trim(),
+        timestamp: new Date().toISOString(),
+      };
+      const assistantMsg = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "",
+        type: "text",
+        timestamp: new Date().toISOString(),
+        completed: false,
+      };
+      const newMessages = [...prefix, updatedUserMsg, assistantMsg];
+
+      inFlightTurnsByConvRef.current.set(convId, [
+        { userMsgId: updatedUserMsg.id, assistantId: assistantMsg.id, acknowledged: false },
+      ]);
+      addActiveAssistantId(convId, assistantMsg.id);
+
+      if (convId === activeConversationRef.current) {
+        setMessages(newMessages);
+      }
+      setConversations((prev) => {
+        const updated = prev.map((c) =>
+          c.id === convId
+            ? {
+                ...c,
+                messages: newMessages,
+                updatedAt: new Date().toISOString(),
+              }
+            : c
+        );
+        saveConversationsToStorage(updated, activeConversationRef.current);
+        return updated;
+      });
+
+      if (
+        wsRef.current?.isConnected?.() ||
+        wsRef.current?.ws?.readyState === 1 ||
+        wsRef.current?.ws?.readyState === WebSocket?.OPEN
+      ) {
+        markStreamingStart(convId);
+        wsRef.current.send({
+          type: "chat",
+          content: updatedUserMsg.content,
+          conversationId: convId,
+          editMessageId: updatedUserMsg.id,
+          messageType: updatedUserMsg.type || "text",
+          attachments: updatedUserMsg.attachments || [],
+          settings: settingsRef.current,
+        });
+        return {
+          id: convId,
+          messages: newMessages,
+        };
+      }
+
+      markLoadingStart(convId);
+      try {
+        const response = await api.sendMessage(
+          convId,
+          updatedUserMsg.content,
+          updatedUserMsg.type || "text",
+          updatedUserMsg.attachments || [],
+          settingsRef.current,
+          { editMessageId: updatedUserMsg.id }
+        );
+        if (deletedConversationIdsRef.current.has(convId)) return null;
+        if (operationSeqRef.current.get(convId) !== opSeq) return null;
+
+        completedMessageIdsRef.current.add(assistantMsg.id);
+        removeActiveAssistantId(convId, assistantMsg.id);
+
+        const applyRestSuccess = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
+          const targetIdx =
+            idx !== -1
+              ? idx
+              : msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed
+              ? msgs.length - 1
+              : -1;
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...assistantMsg,
+            content: response.content,
+            type: response.type,
+            metadata: response.metadata,
+            completed: true,
+          };
+          return adoptServerId(
+            adoptServerId(updated, assistantMsg.id, response.id),
+            updatedUserMsg.id,
+            response.userMessageId
+          );
+        };
+
+        if (convId === activeConversationRef.current) {
+          setMessages(applyRestSuccess);
+        } else {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId
+                ? {
+                    ...c,
+                    messages: applyRestSuccess(c.messages || []),
+                    updatedAt: new Date().toISOString(),
+                  }
+                : c
+            )
+          );
+        }
+      } catch (err) {
+        if (deletedConversationIdsRef.current.has(convId)) return null;
+        if (operationSeqRef.current.get(convId) !== opSeq) return null;
+
+        completedMessageIdsRef.current.add(assistantMsg.id);
+        removeActiveAssistantId(convId, assistantMsg.id);
+
+        const applyRestError = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
+          const targetIdx =
+            idx !== -1
+              ? idx
+              : msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed
+              ? msgs.length - 1
+              : -1;
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...assistantMsg,
+            content: err.message || "Something went wrong. Please try again.",
+            type: "error",
+            completed: true,
+          };
+          return updated;
+        };
+
+        if (convId === activeConversationRef.current) {
+          setMessages(applyRestError);
+        } else {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId ? { ...c, messages: applyRestError(c.messages || []) } : c
+            )
+          );
+        }
+      } finally {
+        markLoadingEnd(convId);
+      }
+
+      return {
+        id: convId,
+        messages: newMessages,
+      };
+    },
+    [branchConversation, sendMessage, messages]
+  );
+
+  const regenerateResponse = useCallback(
+    async (assistantMessageId, options = {}) => {
+      setError(null);
+      const convId = options?.conversationId || activeConversationRef.current;
+      if (!convId || deletedConversationIdsRef.current.has(convId)) return null;
+
+      const currentConvs = conversationsRef.current;
+      const currentConv = currentConvs.find((c) => c.id === convId);
+      const convMessages =
+        convId === activeConversationRef.current && messages.length > 0
+          ? messages
+          : currentConv?.messages || [];
+
+      let assistantIndex = -1;
+      if (assistantMessageId) {
+        assistantIndex = convMessages.findIndex(
+          (m) => m.id === assistantMessageId || m.clientId === assistantMessageId
+        );
+      } else {
+        for (let i = convMessages.length - 1; i >= 0; i--) {
+          if (convMessages[i]?.role === "assistant") {
+            assistantIndex = i;
+            break;
+          }
+        }
+      }
+
+      if (assistantIndex === -1) {
+        setError("Assistant message not found to regenerate");
+        return null;
+      }
+      const targetAssistant = convMessages[assistantIndex];
+      if (targetAssistant.role !== "assistant") {
+        setError("Only assistant responses can be regenerated");
+        return null;
+      }
+
+      let userMessage = null;
+      for (let i = assistantIndex - 1; i >= 0; i--) {
+        if (convMessages[i]?.role === "user") {
+          userMessage = convMessages[i];
+          break;
+        }
+      }
+      if (!userMessage) {
+        setError("No preceding user message found for regeneration");
+        return null;
+      }
+
+      if (options?.branch === true) {
+        const newBranch = await branchConversation(userMessage.id, convId);
+        if (!newBranch) return null;
+        await sendMessage(
+          userMessage.content,
+          userMessage.type || "text",
+          userMessage.attachments || []
+        );
+        return newBranch;
+      }
+
+      // In-place regeneration
+      const inFlightIds = activeAssistantIdByConvRef.current.get(convId);
+      if (inFlightIds) {
+        const ids = Array.isArray(inFlightIds) ? inFlightIds : [inFlightIds];
+        ids.forEach((id) => completedMessageIdsRef.current.add(id));
+      }
+      completedMessageIdsRef.current.add(targetAssistant.id);
+      if (targetAssistant.clientId) completedMessageIdsRef.current.add(targetAssistant.clientId);
+
+      markStreamingEnd(convId);
+      markLoadingEnd(convId);
+      activeAssistantIdByConvRef.current.delete(convId);
+      inFlightTurnsByConvRef.current.delete(convId);
+
+      const opSeq = (operationSeqRef.current.get(convId) || 0) + 1;
+      operationSeqRef.current.set(convId, opSeq);
+
+      const prefix = convMessages.slice(0, assistantIndex);
+      const newAssistantMsg = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "",
+        type: "text",
+        timestamp: new Date().toISOString(),
+        completed: false,
+      };
+      const newMessages = [...prefix, newAssistantMsg];
+
+      inFlightTurnsByConvRef.current.set(convId, [
+        { userMsgId: userMessage.id, assistantId: newAssistantMsg.id, acknowledged: false },
+      ]);
+      addActiveAssistantId(convId, newAssistantMsg.id);
+
+      if (convId === activeConversationRef.current) {
+        setMessages(newMessages);
+      }
+      setConversations((prev) => {
+        const updated = prev.map((c) =>
+          c.id === convId
+            ? {
+                ...c,
+                messages: newMessages,
+                updatedAt: new Date().toISOString(),
+              }
+            : c
+        );
+        saveConversationsToStorage(updated, activeConversationRef.current);
+        return updated;
+      });
+
+      if (
+        wsRef.current?.isConnected?.() ||
+        wsRef.current?.ws?.readyState === 1 ||
+        wsRef.current?.ws?.readyState === WebSocket?.OPEN
+      ) {
+        markStreamingStart(convId);
+        wsRef.current.send({
+          type: "chat",
+          content: userMessage.content,
+          conversationId: convId,
+          regenerateMessageId: targetAssistant.id,
+          messageType: userMessage.type || "text",
+          attachments: userMessage.attachments || [],
+          settings: settingsRef.current,
+        });
+        return {
+          id: convId,
+          messages: newMessages,
+        };
+      }
+
+      markLoadingStart(convId);
+      try {
+        const response = await api.sendMessage(
+          convId,
+          userMessage.content,
+          userMessage.type || "text",
+          userMessage.attachments || [],
+          settingsRef.current,
+          { regenerateMessageId: targetAssistant.id }
+        );
+        if (deletedConversationIdsRef.current.has(convId)) return null;
+        if (operationSeqRef.current.get(convId) !== opSeq) return null;
+
+        completedMessageIdsRef.current.add(newAssistantMsg.id);
+        removeActiveAssistantId(convId, newAssistantMsg.id);
+
+        const applyRestSuccess = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === newAssistantMsg.id);
+          const targetIdx =
+            idx !== -1
+              ? idx
+              : msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed
+              ? msgs.length - 1
+              : -1;
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...newAssistantMsg,
+            content: response.content,
+            type: response.type,
+            metadata: response.metadata,
+            completed: true,
+          };
+          return adoptServerId(updated, newAssistantMsg.id, response.id);
+        };
+
+        if (convId === activeConversationRef.current) {
+          setMessages(applyRestSuccess);
+        } else {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId
+                ? {
+                    ...c,
+                    messages: applyRestSuccess(c.messages || []),
+                    updatedAt: new Date().toISOString(),
+                  }
+                : c
+            )
+          );
+        }
+      } catch (err) {
+        if (deletedConversationIdsRef.current.has(convId)) return null;
+        if (operationSeqRef.current.get(convId) !== opSeq) return null;
+
+        completedMessageIdsRef.current.add(newAssistantMsg.id);
+        removeActiveAssistantId(convId, newAssistantMsg.id);
+
+        const applyRestError = (msgs) => {
+          const idx = msgs.findIndex((m) => m.id === newAssistantMsg.id);
+          const targetIdx =
+            idx !== -1
+              ? idx
+              : msgs[msgs.length - 1]?.role === "assistant" && !msgs[msgs.length - 1]?.completed
+              ? msgs.length - 1
+              : -1;
+          if (targetIdx === -1) return msgs;
+          if (msgs[targetIdx].completed) return msgs;
+          const updated = [...msgs];
+          updated[targetIdx] = {
+            ...updated[targetIdx],
+            ...newAssistantMsg,
+            content: err.message || "Something went wrong. Please try again.",
+            type: "error",
+            completed: true,
+          };
+          return updated;
+        };
+
+        if (convId === activeConversationRef.current) {
+          setMessages(applyRestError);
+        } else {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId ? { ...c, messages: applyRestError(c.messages || []) } : c
+            )
+          );
+        }
+      } finally {
+        markLoadingEnd(convId);
+      }
+
+      return {
+        id: convId,
+        messages: newMessages,
+      };
+    },
+    [branchConversation, sendMessage, messages]
+  );
+
+  const continueFromMessage = useCallback(
+    async (messageId, promptOrOptions, explicitOptions) => {
+      let prompt = "";
+      let opts = {};
+      if (typeof promptOrOptions === "string") {
+        prompt = promptOrOptions;
+        opts = explicitOptions || {};
+      } else if (promptOrOptions && typeof promptOrOptions === "object") {
+        opts = promptOrOptions;
+        prompt = opts.prompt || opts.content || "";
+      }
+
+      const convId = opts.conversationId || activeConversationRef.current;
+      if (!convId || !messageId) return null;
+
+      const currentConvs = conversationsRef.current;
+      const currentConv = currentConvs.find((c) => c.id === convId);
+      const convMessages =
+        convId === activeConversationRef.current && messages.length > 0
+          ? messages
+          : currentConv?.messages || [];
+
+      const messageIndex = convMessages.findIndex(
+        (m) => m.id === messageId || m.clientId === messageId
+      );
+      if (messageIndex === -1) {
+        setError("Message not found in conversation");
+        return null;
+      }
+
+      if (opts.branch !== false) {
+        const branchConv = await branchConversation(messageId, convId);
+        if (branchConv && typeof prompt === "string" && prompt.trim()) {
+          await sendMessage(prompt.trim());
+        }
+        return branchConv;
+      }
+
+      // In-place continue:
+      const sliced = convMessages.slice(0, messageIndex + 1);
+      if (convId === activeConversationRef.current) {
+        setMessages(sliced);
+      }
+      setConversations((prev) => {
+        const updated = prev.map((c) =>
+          c.id === convId
+            ? { ...c, messages: sliced, updatedAt: new Date().toISOString() }
+            : c
+        );
+        saveConversationsToStorage(updated, activeConversationRef.current);
+        return updated;
+      });
+
+      if (typeof prompt === "string" && prompt.trim()) {
+        await sendMessage(prompt.trim());
+      }
+      return {
+        ...currentConv,
+        messages: sliced,
+      };
+    },
+    [branchConversation, sendMessage, messages]
+  );
+
   return {
     conversations,
     activeConversation,
@@ -1332,6 +1907,9 @@ export function useChat(settings) {
     clearAllConversations,
     sendMessage,
     branchConversation,
+    editMessage,
+    regenerateResponse,
+    continueFromMessage,
     renameConversation,
     exportConversation,
     exportAllConversations,
