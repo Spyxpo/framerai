@@ -16,46 +16,79 @@ const config = require("../config");
 
 const GENERATED_URL = "/uploads/generated";
 
+// "function" and "program" are everyday nouns ("the function of the liver", "an exercise
+// program"), so they mean code only when one is being asked for: after a verb that makes or
+// changes one ("write a fibonacci function"), or when the message goes on to say what it
+// should do ("a program that prints primes", "a function to reverse a string"). Anything
+// between the verb and the noun stays inside one sentence and one short noun phrase. "function
+// of" is the role sense, and "to me" or "to the class" is a person, not a purpose: neither asks.
+const CODE_NOUN = "(?:functions?|programs?)";
+const CODE_VERB =
+  "(?:write|create|make|build|generate|code|develop|define|add|fix|debug|refactor|rewrite|optimi[sz]e|convert)";
+
+// What each intent is asked for, in the order they are tried: the first intent with a match wins.
+//
+// A trigger is a whole word, with the endings of its own word and none of another's. Matching
+// inside words made "withdraw", "drawer", "essay", "invoice", "speaker" and "functionality"
+// requests for an image, audio or code (Issue #429); "drawing" and "animated" are still the
+// words they were. "say" names no output at all, so it asks for audio only together with
+// "aloud" or "out loud": "say hello", "let's say" and "what did she say" are messages to the
+// assistant, and any other say-request that wants a voice says "voice" or "speak" as well.
+const INTENT_TRIGGERS = [
+  [
+    "image",
+    [
+      /\b(?:generate|create) images?\b/,
+      /\b(?:re)?draw(?:ing|ings|n)?\b/,
+      /\bpicture of\b/,
+    ],
+  ],
+  [
+    "video",
+    [
+      /\b(?:generate|create) videos?\b/,
+      /\b(?:re)?animate[ds]?\b/,
+      /\bvideo of\b/,
+    ],
+  ],
+  [
+    "audio",
+    [
+      /\bgenerate audio\b/,
+      /\btext to speech\b/,
+      /\bspeak(?:s|ing)?\b/,
+      /\bvoice(?:s|overs?)?\b/,
+      /\bsound of\b/,
+      // the space after "say" is the old rule's, so a "say" before punctuation still matches nothing
+      /\bsay [^.?!\n]{0,80}?\b(?:aloud|out loud)\b/,
+    ],
+  ],
+  [
+    "code",
+    [
+      /```/,
+      /\b(?:re)?write code\b/,
+      /\b(?:re)?implement(?:s|ed|ing|ation|ations)?\b/,
+      /\bcode for\b/,
+      new RegExp(
+        String.raw`\b${CODE_VERB}\s+(?:(?!(?:about|of|on|regarding)\b)[^\s.,;:!?()]+\s+){0,5}?${CODE_NOUN}\b(?!\s+of\b)`
+      ),
+      new RegExp(
+        String.raw`\b${CODE_NOUN}\s+(?:(?:that|which|for|called|named)\b|to\s+(?!(?:me|you|him|her|us|them|it|my|your|his|its|our|their|the|a|an|this|that|these|those)\b))`
+      ),
+    ],
+  ],
+];
+
 /**
- * Detect the intent/type of a user message.
+ * Detect the intent/type of a user message: "image", "video", "audio" or "code" when it asks for
+ * one, and "text" otherwise. processMessage only asks when the client left the type at "text";
+ * a type the client chose is used as it is.
  */
 function detectIntent(content) {
   const lower = content.toLowerCase();
-  if (
-    lower.includes("generate image") ||
-    lower.includes("create image") ||
-    lower.includes("draw") ||
-    lower.includes("picture of")
-  ) {
-    return "image";
-  }
-  if (
-    lower.includes("generate video") ||
-    lower.includes("create video") ||
-    lower.includes("animate") ||
-    lower.includes("video of")
-  ) {
-    return "video";
-  }
-  if (
-    lower.includes("generate audio") ||
-    lower.includes("text to speech") ||
-    lower.includes("speak") ||
-    lower.includes("say ") ||
-    lower.includes("voice") ||
-    lower.includes("sound of")
-  ) {
-    return "audio";
-  }
-  if (
-    lower.includes("write code") ||
-    lower.includes("implement") ||
-    lower.includes("function") ||
-    lower.includes("```") ||
-    lower.includes("code for") ||
-    lower.includes("program")
-  ) {
-    return "code";
+  for (const [intent, triggers] of INTENT_TRIGGERS) {
+    if (triggers.some((trigger) => trigger.test(lower))) return intent;
   }
   return "text";
 }
@@ -704,6 +737,7 @@ module.exports = {
   readDocument,
   resolveAttachments,
   conversationHistory,
+  detectIntent,
   validateTrace,
   traceAllowed,
 };
