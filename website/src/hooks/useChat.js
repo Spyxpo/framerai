@@ -273,21 +273,6 @@ export function useChat(settings) {
         data.id ||
         (isConvStreaming ? getFirstActiveAssistantId(targetConvId) : null);
 
-      // If this message has already completed, ignore duplicate completion/stream events safely (#366)
-      if (targetMsgId && completedMessageIdsRef.current.has(targetMsgId)) {
-        if (data.done && targetConvId) {
-          markStreamingEnd(targetConvId);
-        }
-        return;
-      }
-      // If no target message was found and conversation is not actively streaming, ignore stale frame
-      if (!targetMsgId && !isConvStreaming) {
-        if (data.done && targetConvId) {
-          markStreamingEnd(targetConvId);
-        }
-        return;
-      }
-
       if (data.type === "error" || data.code === "VERSION_CONFLICT") {
         // Server sent an error event mid-stream
         if (targetConvId) markStreamingEnd(targetConvId);
@@ -345,6 +330,21 @@ export function useChat(settings) {
         return;
       }
 
+      // If this message has already completed, ignore duplicate completion/stream events safely (#366)
+      if (targetMsgId && completedMessageIdsRef.current.has(targetMsgId)) {
+        if (data.done && targetConvId) {
+          markStreamingEnd(targetConvId);
+        }
+        return;
+      }
+      // If no target message was found and conversation is not actively streaming, ignore stale frame
+      if (!targetMsgId && !isConvStreaming) {
+        if (data.done && targetConvId) {
+          markStreamingEnd(targetConvId);
+        }
+        return;
+      }
+
       // Handle audio streaming chunks
       if (data.responseType === "audio") {
         if (data.done) {
@@ -376,7 +376,18 @@ export function useChat(settings) {
             return adoptServerId(updated, newMsg.id, data.messageId);
           };
 
-          if (targetConvId) {
+          if (isActiveConv) {
+            setMessages(applyAudioDone);
+            if (data.version) {
+              setConversations((prev) =>
+                prev.map((c) =>
+                  c.id === targetConvId
+                    ? { ...c, version: Math.max(c.version || 1, data.version), updatedAt: new Date().toISOString() }
+                    : c
+                )
+              );
+            }
+          } else if (targetConvId) {
             setConversations((prev) =>
               prev.map((c) =>
                 c.id === targetConvId
@@ -389,9 +400,6 @@ export function useChat(settings) {
                   : c
               )
             );
-          }
-          if (isActiveConv) {
-            setMessages(applyAudioDone);
           }
         } else {
           // Accumulate audio chunks
@@ -455,7 +463,18 @@ export function useChat(settings) {
           return adoptServerId(updated, newMsg.id, data.messageId);
         };
 
-        if (targetConvId) {
+        if (isActiveConv) {
+          setMessages(applyDone);
+          if (data.version) {
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === targetConvId
+                  ? { ...c, version: Math.max(c.version || 1, data.version), updatedAt: new Date().toISOString() }
+                  : c
+              )
+            );
+          }
+        } else if (targetConvId) {
           setConversations((prev) =>
             prev.map((c) =>
               c.id === targetConvId
@@ -468,9 +487,6 @@ export function useChat(settings) {
                 : c
             )
           );
-        }
-        if (isActiveConv) {
-          setMessages(applyDone);
         }
       } else {
         const applyChunk = (msgs) => {
@@ -600,6 +616,31 @@ export function useChat(settings) {
         setConversations((prev) =>
           prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyWsError(c.messages || []) } : c))
         );
+      }
+
+      if (data?.code === "VERSION_CONFLICT") {
+        setError("Conversation version conflict: synchronized with latest state.");
+      }
+
+      if (targetConvId) {
+        api
+          .getConversation(targetConvId)
+          .then((remoteConv) => {
+            if (remoteConv) {
+              setConversations((prev) => {
+                const updatedList = prev.map((c) =>
+                  c.id === targetConvId ? reconcileConversation(c, remoteConv) : c
+                );
+                if (activeConversationRef.current === targetConvId && data?.code === "VERSION_CONFLICT") {
+                  const reconciled = updatedList.find((c) => c.id === targetConvId);
+                  if (reconciled) setMessages(reconciled.messages || []);
+                }
+                saveConversationsToStorage(updatedList, activeConversationRef.current);
+                return updatedList;
+              });
+            }
+          })
+          .catch(() => {});
       }
     });
 
@@ -1023,9 +1064,11 @@ export function useChat(settings) {
           try {
             const remoteConv = await api.getConversation(convId);
             if (remoteConv) {
-              setConversations((prev) =>
-                prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c))
-              );
+              setConversations((prev) => {
+                const updatedList = prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c));
+                saveConversationsToStorage(updatedList, activeConversationRef.current);
+                return updatedList;
+              });
             }
           } catch {
             // Non-fatal if remote get fails during conflict reconciliation
@@ -1137,19 +1180,41 @@ export function useChat(settings) {
     if (typeof api.updateConversation === "function") {
       api
         .updateConversation(id, { title: trimmed, expectedVersion: currentVersion })
-        .catch(async (err) => {
-          if (err?.status === 409 || err?.code === "VERSION_CONFLICT") {
-            try {
-              const remoteConv = await api.getConversation(id);
-              if (remoteConv) {
-                setConversations((prev) =>
-                  prev.map((c) => (c.id === id ? reconcileConversation(c, remoteConv) : c))
-                );
-              }
-            } catch {
-              // Non-fatal if remote get fails during conflict reconciliation
-            }
+        .then((res) => {
+          if (res?.version) {
+            setConversations((prev) => {
+              const updated = prev.map((c) =>
+                c.id === id ? { ...c, version: Math.max(c.version || 1, res.version) } : c
+              );
+              saveConversationsToStorage(updated, activeConversationRef.current);
+              return updated;
+            });
           }
+        })
+        .catch(async (_err) => {
+          try {
+            const remoteConv = await api.getConversation(id);
+            if (remoteConv) {
+              setConversations((prev) => {
+                const updated = prev.map((c) => (c.id === id ? reconcileConversation(c, remoteConv) : c));
+                saveConversationsToStorage(updated, activeConversationRef.current);
+                return updated;
+              });
+              return;
+            }
+          } catch {
+            // Non-fatal if remote get fails
+          }
+          // If remote fetch failed (e.g. offline/network failure), safely roll back optimistic version bump
+          setConversations((prev) => {
+            const updated = prev.map((c) =>
+              c.id === id && c.version === currentVersion + 1
+                ? { ...c, version: currentVersion }
+                : c
+            );
+            saveConversationsToStorage(updated, activeConversationRef.current);
+            return updated;
+          });
         });
     }
   }, []);
@@ -1318,7 +1383,8 @@ export function useChat(settings) {
           const currentMsgs = c.messages || [];
           return {
             ...c,
-            version: Math.max(c.version || 1, nextVersion),
+            // Keep committed version until server confirms mutation (#438 / PR #441 follow-up)
+            version: c.version || 1,
             messages: [...currentMsgs, userMsg, assistantMsg],
             updatedAt: new Date().toISOString(),
           };
@@ -1374,18 +1440,29 @@ export function useChat(settings) {
         const finalVersion = response?.version || nextVersion;
         if (isActiveConv) {
           setMessages(applyRestSuccess);
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== convId) return c;
+              return {
+                ...c,
+                version: Math.max(c.version || 1, finalVersion),
+                updatedAt: new Date().toISOString(),
+              };
+            })
+          );
+        } else {
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id !== convId) return c;
+              return {
+                ...c,
+                version: Math.max(c.version || 1, finalVersion),
+                messages: applyRestSuccess(c.messages || []),
+                updatedAt: new Date().toISOString(),
+              };
+            })
+          );
         }
-        setConversations((prev) =>
-          prev.map((c) => {
-            if (c.id !== convId) return c;
-            return {
-              ...c,
-              version: Math.max(c.version || 1, finalVersion),
-              messages: applyRestSuccess(c.messages || []),
-              updatedAt: new Date().toISOString(),
-            };
-          })
-        );
       } catch (err) {
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
@@ -1396,9 +1473,11 @@ export function useChat(settings) {
           try {
             const remoteConv = await api.getConversation(convId);
             if (remoteConv) {
-              setConversations((prev) =>
-                prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c))
-              );
+              setConversations((prev) => {
+                const updatedList = prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c));
+                saveConversationsToStorage(updatedList, activeConversationRef.current);
+                return updatedList;
+              });
               if (isActiveConv) {
                 setMessages(remoteConv.messages || []);
               }
@@ -1408,6 +1487,32 @@ export function useChat(settings) {
           }
           setError("Conversation version conflict: updated with latest state.");
           return;
+        }
+
+        // On non-409 errors (rate limit, network fail, 500), reconcile with authoritative server state
+        try {
+          const remoteConv = await api.getConversation(convId);
+          if (remoteConv) {
+            setConversations((prev) => {
+              const updatedList = prev.map((c) =>
+                c.id === convId ? reconcileConversation(c, remoteConv) : c
+              );
+              saveConversationsToStorage(updatedList, activeConversationRef.current);
+              return updatedList;
+            });
+          }
+        } catch {
+          // If offline / remote get fails, ensure local version does not remain bumped beyond currentVersion
+          setConversations((prev) => {
+            const updatedList = prev.map((c) => {
+              if (c.id === convId && c.version > currentVersion) {
+                return { ...c, version: currentVersion };
+              }
+              return c;
+            });
+            saveConversationsToStorage(updatedList, activeConversationRef.current);
+            return updatedList;
+          });
         }
 
         const applyRestError = (msgs) => {

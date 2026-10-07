@@ -199,9 +199,11 @@ export function reconcileConversation(existingConv, incomingConv, localTitleUpda
       : existingConv.messages || []
   );
 
-  const localVersion = Number.isInteger(existingConv.version) && existingConv.version >= 1 ? existingConv.version : 1;
-  const remoteVersion = Number.isInteger(incomingConv.version) && incomingConv.version >= 1 ? incomingConv.version : 1;
-  const authoritativeVersion = Math.max(localVersion, remoteVersion);
+  const localVersion = Number.isInteger(existingConv?.version) && existingConv.version >= 1 ? existingConv.version : 1;
+  const remoteVersion = Number.isInteger(incomingConv?.version) && incomingConv.version >= 1 ? incomingConv.version : null;
+  // The authoritative server version must prevail when synchronizing with a remote snapshot.
+  // A local uncommitted optimistic version bump must not overwrite authoritative server state (#438 / PR #441 follow-up).
+  const authoritativeVersion = remoteVersion !== null ? remoteVersion : localVersion;
 
   const effectiveTitleUpdatedAt = Math.max(
     localTitleUpdatedAt || 0,
