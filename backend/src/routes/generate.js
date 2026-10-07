@@ -130,14 +130,26 @@ function mimeFilter(prefix) {
   };
 }
 
+// `files`/`fileSize` bound the upload itself; without `fields`/`fieldSize`
+// alongside them, the rest of the request — every non-file field — was
+// bounded only by Busboy's own unconfigured defaults (1 MiB per field, and no
+// limit at all on how many of them a request may carry). A request with no
+// file but hundreds of large text fields could still make multer buffer an
+// unbounded amount of memory (Issue #440). Each route below gets exactly the
+// field count its own handler reads, both here and in generate.js's own
+// `req.body` reads, and is otherwise mentioned nowhere else in this file; the
+// shared `fieldSize` only makes explicit the bound Busboy already enforced.
+//
+// `/understand`'s handler reads one field: `prompt`.
 const uploadImage = multer({
   storage,
-  limits: { fileSize: config.maxFileSize, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 1, fieldSize: config.maxMultipartFieldSize },
   fileFilter: mimeFilter("image/"),
 });
+// `/transcribe`'s handler reads one field: `prompt`.
 const uploadAudio = multer({
   storage,
-  limits: { fileSize: config.maxFileSize, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 1, fieldSize: config.maxMultipartFieldSize },
   fileFilter: mimeFilter("audio/"),
 });
 
@@ -150,17 +162,19 @@ function mimeAllowlist(types) {
   };
 }
 
+// `/document`'s handler reads two fields: `prompt` and `max_pages`.
 const uploadDocument = multer({
   storage,
-  limits: { fileSize: config.maxFileSize, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 2, fieldSize: config.maxMultipartFieldSize },
   fileFilter: mimeAllowlist(DOCUMENT_MIME_TYPES),
 });
 
 // Attachments are stored and then referenced by later chat turns, so this
 // uploader takes anything the chat path can carry and runs no model at all.
+// `/upload`'s handler reads no fields of its own — only the file.
 const uploadAttachment = multer({
   storage,
-  limits: { fileSize: config.maxFileSize, files: 1 },
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 0, fieldSize: config.maxMultipartFieldSize },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("image/") || DOCUMENT_MIME_TYPES.includes(file.mimetype)) {
       return cb(null, true);

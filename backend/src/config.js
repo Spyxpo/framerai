@@ -35,6 +35,17 @@ module.exports = {
   // Largest single upload accepted by the image and audio routes.
   maxFileSize: int("MAX_FILE_SIZE", 50 * 1024 * 1024),
 
+  // Largest value accepted for one non-file field (prompt, max_pages, ...) on a
+  // multipart upload route. express.json's jsonBodyLimit never applies to these
+  // requests — Express picks a body parser by Content-Type, and multipart goes
+  // to multer/busboy instead — so this is what bounds them. Busboy's own
+  // unconfigured default is this same 1 MiB, which is why no request that
+  // worked before this limit was added has ever carried more; declaring it
+  // keeps that bound intentional rather than an unstated library default
+  // (Issue #440). The field *count* on each route is bounded separately, in
+  // generate.js, to the smallest number that route's own handler reads.
+  maxMultipartFieldSize: int("MAX_MULTIPART_FIELD_SIZE", 1 * 1024 * 1024),
+
   // How long a stored upload is kept before it is reclaimed. Matched to the
   // conversation TTL: an attachment that has outlived every conversation which
   // could still reference it is only occupying disk.
