@@ -173,6 +173,74 @@
           }
         }
       },
+      "patch": {
+        "summary": "Update conversation",
+        "description": "Updates conversation title with optional expectedVersion check.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Expected conversation version for optimistic concurrency control"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated conversation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Conversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "summary": "Delete conversation",
         "description": "Deletes a conversation by UUID.",
@@ -269,6 +337,11 @@
                     },
                     "maxItems": 10
                   },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Expected conversation version for optimistic concurrency control"
+                  },
                   "settings": {
                     "$ref": "#/components/schemas/GenerationSettings"
                   },
@@ -321,6 +394,16 @@
           },
           "404": {
             "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -386,6 +469,11 @@
                     "type": "string",
                     "format": "uuid",
                     "description": "UUID of the message to branch from"
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Expected parent conversation version for optimistic concurrency control"
                   }
                 }
               }
@@ -415,6 +503,16 @@
           },
           "404": {
             "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -1540,15 +1638,27 @@
           "title": {
             "type": "string"
           },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
           "parentConversationId": {
             "type": "string",
             "format": "uuid"
+          },
+          "parentVersion": {
+            "type": "integer",
+            "minimum": 1
           },
           "branchedFromMessageId": {
             "type": "string",
             "format": "uuid"
           },
           "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
             "type": "string",
             "format": "date-time"
           },
@@ -1573,9 +1683,18 @@
           "title": {
             "type": "string"
           },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
           "parentConversationId": {
             "type": "string",
             "format": "uuid"
+          },
+          "parentVersion": {
+            "type": "integer",
+            "minimum": 1
           },
           "branchedFromMessageId": {
             "type": "string",
@@ -1588,6 +1707,10 @@
             }
           },
           "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
             "type": "string",
             "format": "date-time"
           }

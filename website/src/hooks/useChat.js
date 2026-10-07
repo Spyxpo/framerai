@@ -288,10 +288,33 @@ export function useChat(settings) {
         return;
       }
 
-      if (data.type === "error") {
+      if (data.type === "error" || data.code === "VERSION_CONFLICT") {
         // Server sent an error event mid-stream
-        // Update the correct conversation's messages
         if (targetConvId) markStreamingEnd(targetConvId);
+
+        if (data.code === "VERSION_CONFLICT" && targetConvId) {
+          api
+            .getConversation(targetConvId)
+            .then((remoteConv) => {
+              if (remoteConv) {
+                setConversations((prev) => {
+                  const updatedList = prev.map((c) =>
+                    c.id === targetConvId ? reconcileConversation(c, remoteConv) : c
+                  );
+                  if (activeConversationRef.current === targetConvId) {
+                    const reconciled = updatedList.find((c) => c.id === targetConvId);
+                    if (reconciled) setMessages(reconciled.messages);
+                  }
+                  saveConversationsToStorage(updatedList, activeConversationRef.current);
+                  return updatedList;
+                });
+              }
+            })
+            .catch(() => {});
+          setError("Conversation version conflict: synchronized with latest state.");
+          return;
+        }
+
         const applyError = (msgs) => {
           const idx = findTargetAssistantIndex(msgs, targetMsgId, targetConvId);
           if (idx === -1) return msgs;
@@ -353,12 +376,22 @@ export function useChat(settings) {
             return adoptServerId(updated, newMsg.id, data.messageId);
           };
 
+          if (targetConvId) {
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === targetConvId
+                  ? {
+                      ...c,
+                      messages: applyAudioDone(c.messages || []),
+                      ...(data.version ? { version: Math.max(c.version || 1, data.version) } : {}),
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : c
+              )
+            );
+          }
           if (isActiveConv) {
             setMessages(applyAudioDone);
-          } else if (targetConvId) {
-            setConversations((prev) =>
-              prev.map((c) => (c.id === targetConvId ? { ...c, messages: applyAudioDone(c.messages || []) } : c))
-            );
           }
         } else {
           // Accumulate audio chunks
@@ -422,16 +455,22 @@ export function useChat(settings) {
           return adoptServerId(updated, newMsg.id, data.messageId);
         };
 
-        if (isActiveConv) {
-          setMessages(applyDone);
-        } else if (targetConvId) {
+        if (targetConvId) {
           setConversations((prev) =>
             prev.map((c) =>
               c.id === targetConvId
-                ? { ...c, messages: applyDone(c.messages || []), updatedAt: new Date().toISOString() }
+                ? {
+                    ...c,
+                    messages: applyDone(c.messages || []),
+                    ...(data.version ? { version: Math.max(c.version || 1, data.version) } : {}),
+                    updatedAt: new Date().toISOString(),
+                  }
                 : c
             )
           );
+        }
+        if (isActiveConv) {
+          setMessages(applyDone);
         }
       } else {
         const applyChunk = (msgs) => {
@@ -459,6 +498,16 @@ export function useChat(settings) {
     ws.on("ack", (data) => {
       const targetConvId = data?.conversationId || (streamingConversationIdsRef.current.has(activeConversationRef.current) ? activeConversationRef.current : null);
       if (!targetConvId || deletedConversationIdsRef.current.has(targetConvId)) return;
+
+      if (data?.version) {
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === targetConvId
+              ? { ...c, version: Math.max(c.version || 1, data.version) }
+              : c
+          )
+        );
+      }
       const turns = inFlightTurnsByConvRef.current.get(targetConvId) || [];
       const turn = turns.find((t) => !t.acknowledged) || turns[0];
       const inFlightId = turn ? turn.assistantId : getFirstActiveAssistantId(targetConvId);
@@ -726,7 +775,7 @@ export function useChat(settings) {
     try {
       const conv = await api.createConversation();
       deletedConversationIdsRef.current.delete(conv.id);
-      const newConv = { ...conv, messages: conv.messages || [] };
+      const newConv = { ...conv, version: conv.version || 1, messages: conv.messages || [] };
       activeConversationRef.current = newConv.id;
       messagesConversationIdRef.current = newConv.id;
       setConversations((prev) => [newConv, ...prev]);
@@ -736,7 +785,7 @@ export function useChat(settings) {
       // Offline fallback — create locally and let the user keep working
       const id = crypto.randomUUID();
       deletedConversationIdsRef.current.delete(id);
-      const conv = { id, title: "New Chat", messages: [], updatedAt: new Date().toISOString() };
+      const conv = { id, title: "New Chat", version: 1, messages: [], updatedAt: new Date().toISOString() };
       activeConversationRef.current = id;
       messagesConversationIdRef.current = id;
       setConversations((prev) => [conv, ...prev]);
@@ -909,7 +958,7 @@ export function useChat(settings) {
   );
 
   const branchConversation = useCallback(
-    async (messageId, targetConvId) => {
+    async (messageId, targetConvId, expectedVersion) => {
       if (branchingRef.current) return null;
       const convId = targetConvId || activeConversationRef.current;
       if (!convId || !messageId) return null;
@@ -934,7 +983,11 @@ export function useChat(settings) {
       setError(null);
 
       try {
-        const branch = await api.branchConversation(convId, messageId);
+        const branchArgs =
+          expectedVersion !== undefined
+            ? [convId, messageId, expectedVersion]
+            : [convId, messageId];
+        const branch = await api.branchConversation(...branchArgs);
         const parentConv = currentConv || conversationsRef.current.find((c) => c.id === convId);
         const parentTitle = parentConv?.title;
         const branchTitle = parentTitle && parentTitle !== "New Chat"
@@ -944,6 +997,8 @@ export function useChat(settings) {
         const newBranchConv = {
           ...branch,
           title: branchTitle,
+          version: branch.version || 1,
+          parentVersion: branch.parentVersion || currentConv?.version || 1,
           messages: branch.messages || historyPrefix,
           parentConversationId: branch.parentConversationId || convId,
           branchedFromMessageId: branch.branchedFromMessageId || messageId,
@@ -964,6 +1019,21 @@ export function useChat(settings) {
         setMessages(newBranchConv.messages);
         return newBranchConv;
       } catch (err) {
+        if (err?.status === 409 || err?.code === "VERSION_CONFLICT") {
+          try {
+            const remoteConv = await api.getConversation(convId);
+            if (remoteConv) {
+              setConversations((prev) =>
+                prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c))
+              );
+            }
+          } catch {
+            // Non-fatal if remote get fails during conflict reconciliation
+          }
+          setError("Branch failed due to conversation version conflict. Conversation state updated.");
+          return null;
+        }
+
         const isNetworkOffline =
           err instanceof TypeError ||
           err?.name === "TypeError" ||
@@ -981,6 +1051,8 @@ export function useChat(settings) {
           const fallbackConv = {
             id: branchId,
             title: `${currentConv?.title || "New Chat"} (Branch)`,
+            version: 1,
+            parentVersion: currentConv?.version || 1,
             parentConversationId: convId,
             branchedFromMessageId: messageId,
             messages: clonedMessages,
@@ -1045,12 +1117,15 @@ export function useChat(settings) {
     const timestamp = Math.max(Date.now(), prevTimestamp + 1);
     titleUpdatedAtByConvRef.current.set(id, timestamp);
 
+    let currentVersion = 1;
     setConversations((prev) => {
       const updated = prev.map((c) => {
         if (c.id !== id) return c;
+        currentVersion = c.version || 1;
         return {
           ...c,
           title: trimmed,
+          version: currentVersion + 1,
           titleUpdatedAt: Math.max(c.titleUpdatedAt || 0, timestamp),
           updatedAt: new Date().toISOString(),
         };
@@ -1058,6 +1133,25 @@ export function useChat(settings) {
       saveConversationsToStorage(updated, activeConversationRef.current);
       return updated;
     });
+
+    if (typeof api.updateConversation === "function") {
+      api
+        .updateConversation(id, { title: trimmed, expectedVersion: currentVersion })
+        .catch(async (err) => {
+          if (err?.status === 409 || err?.code === "VERSION_CONFLICT") {
+            try {
+              const remoteConv = await api.getConversation(id);
+              if (remoteConv) {
+                setConversations((prev) =>
+                  prev.map((c) => (c.id === id ? reconcileConversation(c, remoteConv) : c))
+                );
+              }
+            } catch {
+              // Non-fatal if remote get fails during conflict reconciliation
+            }
+          }
+        });
+    }
   }, []);
 
   const exportConversation = useCallback((convId, format = "json") => {
@@ -1214,12 +1308,17 @@ export function useChat(settings) {
         setMessages((prev) => [...prev, userMsg, assistantMsg]);
       }
 
+      const currentConv = conversationsRef.current.find((c) => c.id === convId);
+      const currentVersion = currentConv?.version || 1;
+      const nextVersion = currentVersion + 1;
+
       setConversations((prev) =>
         prev.map((c) => {
           if (c.id !== convId) return c;
           const currentMsgs = c.messages || [];
           return {
             ...c,
+            version: Math.max(c.version || 1, nextVersion),
             messages: [...currentMsgs, userMsg, assistantMsg],
             updatedAt: new Date().toISOString(),
           };
@@ -1235,6 +1334,7 @@ export function useChat(settings) {
           conversationId: convId,
           messageType: type,
           attachments,
+          expectedVersion: currentVersion,
           settings: settingsRef.current,
         });
         return;
@@ -1242,7 +1342,7 @@ export function useChat(settings) {
 
       markLoadingStart(convId);
       try {
-        const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current);
+        const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current, currentVersion);
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);
@@ -1271,21 +1371,44 @@ export function useChat(settings) {
           );
         };
 
+        const finalVersion = response?.version || nextVersion;
         if (isActiveConv) {
           setMessages(applyRestSuccess);
-        } else {
-          setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id !== convId) return c;
-              return { ...c, messages: applyRestSuccess(c.messages || []), updatedAt: new Date().toISOString() };
-            })
-          );
         }
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id !== convId) return c;
+            return {
+              ...c,
+              version: Math.max(c.version || 1, finalVersion),
+              messages: applyRestSuccess(c.messages || []),
+              updatedAt: new Date().toISOString(),
+            };
+          })
+        );
       } catch (err) {
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);
         removeActiveAssistantId(convId, assistantMsg.id);
+
+        if (err?.status === 409 || err?.code === "VERSION_CONFLICT") {
+          try {
+            const remoteConv = await api.getConversation(convId);
+            if (remoteConv) {
+              setConversations((prev) =>
+                prev.map((c) => (c.id === convId ? reconcileConversation(c, remoteConv) : c))
+              );
+              if (isActiveConv) {
+                setMessages(remoteConv.messages || []);
+              }
+            }
+          } catch {
+            // Non-fatal if remote get fails during conflict reconciliation
+          }
+          setError("Conversation version conflict: updated with latest state.");
+          return;
+        }
 
         const applyRestError = (msgs) => {
           const idx = msgs.findIndex((m) => m.id === assistantMsg.id);

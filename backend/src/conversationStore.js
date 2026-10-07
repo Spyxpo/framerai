@@ -82,13 +82,34 @@ function _evict() {
 }
 
 function create(conversation) {
-  // If conversation already exists and incoming conversation has fewer messages,
-  // do not let a stale snapshot overwrite newer state.
+  // Ensure versioning safely initialized (#438)
+  if (!Object.prototype.hasOwnProperty.call(conversation, "version")) {
+    let _v = 1;
+    Object.defineProperty(conversation, "version", {
+      get() { return _v; },
+      set(val) { _v = val; },
+      enumerable: false,
+      configurable: true,
+    });
+  } else if (!Number.isInteger(conversation.version) || conversation.version < 1) {
+    conversation.version = 1;
+  }
+
+  // If conversation already exists and incoming conversation has an older version or fewer messages,
+  // do not let a stale snapshot overwrite newer state (#438).
   const existing = conversations.get(conversation.id);
-  if (existing && Array.isArray(existing.messages) && Array.isArray(conversation.messages)) {
-    if (conversation.messages.length < existing.messages.length) {
+  if (existing) {
+    const existingVer = existing.version || 1;
+    const incomingVer = conversation.version || 1;
+    if (incomingVer < existingVer) {
       _touch(existing);
       return existing;
+    }
+    if (incomingVer === existingVer && Array.isArray(existing.messages) && Array.isArray(conversation.messages)) {
+      if (conversation.messages.length < existing.messages.length) {
+        _touch(existing);
+        return existing;
+      }
     }
   }
 
@@ -103,7 +124,9 @@ function create(conversation) {
 
 function get(id) {
   const conv = conversations.get(id) || null;
-  if (conv) _touch(conv);
+  if (conv) {
+    _touch(conv);
+  }
   return conv;
 }
 
@@ -128,10 +151,24 @@ function messages(id) {
 
 /**
  * Record a turn against a conversation, if it exists.
+ * Supports optional expectedVersion for optimistic concurrency control.
  */
 function append(id, message, options = {}) {
   const conv = conversations.get(id);
   if (!conv) return false;
+  if (!Number.isInteger(conv.version) || conv.version < 1) conv.version = 1;
+
+  if (options.expectedVersion !== undefined && conv.version !== options.expectedVersion) {
+    if (options.throwOnConflict) {
+      const err = new Error("Conversation version mismatch");
+      err.code = "VERSION_CONFLICT";
+      err.currentVersion = conv.version;
+      err.expectedVersion = options.expectedVersion;
+      throw err;
+    }
+    return false;
+  }
+
   _touch(conv);
   if (message?.id && conv.messages.some((m) => m.id === message.id)) {
     return true;
@@ -174,6 +211,10 @@ function append(id, message, options = {}) {
       if (conv.messages.length > _maxMessages) {
         conv.messages.splice(0, conv.messages.length - _maxMessages);
       }
+      conv.version = (conv.version || 1) + 1;
+      if (conv.updatedAt !== undefined) {
+        conv.updatedAt = message.timestamp || message.createdAt || new Date().toISOString();
+      }
       return true;
     }
   }
@@ -195,7 +236,39 @@ function append(id, message, options = {}) {
   if (conv.messages.length > _maxMessages) {
     conv.messages.splice(0, conv.messages.length - _maxMessages);
   }
+  conv.version = (conv.version || 1) + 1;
+  if (conv.updatedAt !== undefined) {
+    conv.updatedAt = message.timestamp || message.createdAt || new Date().toISOString();
+  }
   return true;
+}
+
+/**
+ * Update conversation attributes (e.g. title) with optional expectedVersion check.
+ */
+function update(id, fields = {}, options = {}) {
+  const conv = conversations.get(id);
+  if (!conv) return null;
+  if (!Number.isInteger(conv.version) || conv.version < 1) conv.version = 1;
+
+  if (options.expectedVersion !== undefined && conv.version !== options.expectedVersion) {
+    if (options.throwOnConflict) {
+      const err = new Error("Conversation version mismatch");
+      err.code = "VERSION_CONFLICT";
+      err.currentVersion = conv.version;
+      err.expectedVersion = options.expectedVersion;
+      throw err;
+    }
+    return { success: false, conflict: true, currentVersion: conv.version };
+  }
+
+  _touch(conv);
+  if (typeof fields.title === "string") {
+    conv.title = fields.title;
+  }
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
+  return { success: true, conversation: conv, version: conv.version };
 }
 
 function clear() {
@@ -212,6 +285,8 @@ function truncateAfter(id, messageId) {
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
   conv.messages.splice(idx + 1);
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
   return true;
 }
 
@@ -225,6 +300,8 @@ function truncateFrom(id, messageId) {
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
   conv.messages.splice(idx);
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
   return true;
 }
 
@@ -241,6 +318,8 @@ function updateMessage(id, messageId, updates = {}) {
     ...conv.messages[idx],
     ...updates,
   };
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
   return true;
 }
 
@@ -255,7 +334,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 }
 
 module.exports = {
-  create, get, has, remove, list, messages, append, clear,
+  create, get, has, remove, list, messages, append, update, clear,
   truncateAfter, truncateFrom, updateMessage,
   _map: conversations,
   _evict,

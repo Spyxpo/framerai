@@ -176,7 +176,7 @@ export function mergeMessages(localMsgs = [], remoteMsgs = []) {
 /**
  * Reconciles an existing local conversation with an incoming remote snapshot.
  * Preserves the newest valid title according to local modification timestamps,
- * deterministically dedupes messages, and retains local fields.
+ * deterministically dedupes messages, retains local fields, and resolves versioning.
  *
  * @param {Object} existingConv - Existing local conversation state
  * @param {Object} incomingConv - Incoming conversation snapshot (e.g. from backend API)
@@ -195,9 +195,13 @@ export function reconcileConversation(existingConv, incomingConv, localTitleUpda
 
   const dedupedMessages = dedupeMessages(
     Array.isArray(incomingConv.messages) && incomingConv.messages.length > 0
-      ? incomingConv.messages
+      ? mergeMessages(existingConv.messages || [], incomingConv.messages)
       : existingConv.messages || []
   );
+
+  const localVersion = Number.isInteger(existingConv.version) && existingConv.version >= 1 ? existingConv.version : 1;
+  const remoteVersion = Number.isInteger(incomingConv.version) && incomingConv.version >= 1 ? incomingConv.version : 1;
+  const authoritativeVersion = Math.max(localVersion, remoteVersion);
 
   const effectiveTitleUpdatedAt = Math.max(
     localTitleUpdatedAt || 0,
@@ -206,11 +210,15 @@ export function reconcileConversation(existingConv, incomingConv, localTitleUpda
   const incomingTitleUpdatedAt = incomingConv.titleUpdatedAt || 0;
 
   // The latest valid conversation title must win:
-  // If local modification is newer than remote or remote has no title update timestamp,
+  // If remote version is strictly newer (conflict reconciliation), remote title wins.
+  // Otherwise if local modification is newer than remote or remote has no title update timestamp,
   // preserve existingConv.title.
   let title;
   let titleUpdatedAt;
-  if (effectiveTitleUpdatedAt > incomingTitleUpdatedAt && existingConv.title) {
+  if (remoteVersion > localVersion && incomingConv.title) {
+    title = incomingConv.title;
+    titleUpdatedAt = incomingTitleUpdatedAt || effectiveTitleUpdatedAt;
+  } else if (effectiveTitleUpdatedAt > incomingTitleUpdatedAt && existingConv.title) {
     title = existingConv.title;
     titleUpdatedAt = effectiveTitleUpdatedAt;
   } else if (incomingConv.title) {
@@ -226,6 +234,8 @@ export function reconcileConversation(existingConv, incomingConv, localTitleUpda
     ...incomingConv,
     title,
     ...(titleUpdatedAt > 0 ? { titleUpdatedAt } : {}),
+    ...(Number.isInteger(existingConv.version) || Number.isInteger(incomingConv.version) ? { version: authoritativeVersion } : {}),
     messages: dedupedMessages,
+    updatedAt: incomingConv.updatedAt || existingConv.updatedAt || new Date().toISOString(),
   };
 }
