@@ -500,6 +500,73 @@ body {
   border-radius: var(--radius-full);
 }
 
+/* Message editing styles (Issue #430) */
+.message-edit-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.message-edit-input {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.message-edit-input:focus {
+  border-color: var(--accent);
+}
+
+.message-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.submit-edit-btn {
+  background: var(--accent);
+  color: #fff;
+}
+
+.submit-edit-btn:hover {
+  background: var(--accent-hover);
+  color: #fff;
+}
+
+.branch-edit-btn {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.branch-edit-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.cancel-edit-btn {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.cancel-edit-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+
 /* Cognition trace inspector */
 .cognition-trace {
   margin-top: 10px;

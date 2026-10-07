@@ -42,6 +42,9 @@ export default function App() {
     clearAllConversations,
     sendMessage,
     branchConversation,
+    editMessage,
+    regenerateResponse,
+    continueFromMessage,
     exportConversation,
     exportAllConversations,
     importBackup,
@@ -208,6 +211,9 @@ export default function App() {
         onDenyCommand={denyCommand}
         branching={branching}
         onBranch={branchConversation}
+        onEdit={editMessage}
+        onRegenerate={regenerateResponse}
+        onContinue={continueFromMessage}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
