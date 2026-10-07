@@ -34,8 +34,9 @@ const MAX_SIMULATED_FRAMES = 64;
  * frame gets a clear error instead of failing somewhere in the model service.
  */
 function parseChatFrame(message) {
+  const isRegenerate = Boolean(message.regenerateMessageId || message.regenerate);
   const content = typeof message.content === "string" ? message.content.trim() : "";
-  if (!content) throw new Error("content is required");
+  if (!content && !isRegenerate) throw new Error("content is required");
   const maxContent = modelLimits.messageChars();
   if (content.length > maxContent) {
     throw new Error(`content must be at most ${maxContent} characters`);
@@ -58,6 +59,12 @@ function parseChatFrame(message) {
   if (message.conversationId !== undefined && message.conversationId !== null) {
     v.uuid("conversationId");
   }
+  if (message.editMessageId !== undefined && message.editMessageId !== null) {
+    v.uuid("editMessageId");
+  }
+  if (message.regenerateMessageId !== undefined && message.regenerateMessageId !== null) {
+    v.uuid("regenerateMessageId");
+  }
 
   const settings = readSettings(v);
   if (v.errors.length) {
@@ -67,7 +74,15 @@ function parseChatFrame(message) {
 
   const attachments = Array.isArray(message.attachments) ? message.attachments.slice(0, 10) : [];
 
-  return { content, messageType, settings, attachments, conversationId: message.conversationId };
+  return {
+    content,
+    messageType,
+    settings,
+    attachments,
+    conversationId: message.conversationId,
+    editMessageId: message.editMessageId,
+    regenerateMessageId: message.regenerateMessageId,
+  };
 }
 
 /**
@@ -345,8 +360,50 @@ function setupWebSocket(wss) {
           // random id that matched nothing, and the stored turn had none, so the
           // client could not tell which message the server meant, or ask for it
           // again (to branch from it). The ack now says what it is (Issue #394).
-          const userMessageId = randomUUID();
+          let userMessageId = randomUUID();
           const assistantMessageId = randomUUID();
+
+          if (frame.editMessageId && conversationId && conversations.has(conversationId)) {
+            const conv = conversations.get(conversationId);
+            const editIdx = conv.messages ? conv.messages.findIndex((m) => m.id === frame.editMessageId) : -1;
+            if (editIdx !== -1) {
+              userMessageId = frame.editMessageId;
+              conv.messages[editIdx] = {
+                ...conv.messages[editIdx],
+                content,
+                type: messageType,
+                attachments,
+                timestamp: new Date().toISOString(),
+              };
+              conversations.truncateAfter(conversationId, frame.editMessageId);
+            }
+          } else if (frame.regenerateMessageId && conversationId && conversations.has(conversationId)) {
+            const conv = conversations.get(conversationId);
+            const regenIdx = conv.messages ? conv.messages.findIndex((m) => m.id === frame.regenerateMessageId) : -1;
+            if (regenIdx !== -1) {
+              conversations.truncateFrom(conversationId, frame.regenerateMessageId);
+              let prevUser = null;
+              for (let i = conv.messages.length - 1; i >= 0; i--) {
+                if (conv.messages[i]?.role === "user") {
+                  prevUser = conv.messages[i];
+                  break;
+                }
+              }
+              if (prevUser) {
+                userMessageId = prevUser.id;
+              }
+            }
+          } else {
+            const userMessage = {
+              id: userMessageId,
+              role: "user",
+              content,
+              type: messageType,
+              attachments,
+              timestamp: new Date().toISOString(),
+            };
+            conversations.append(conversationId, userMessage);
+          }
 
           // Send acknowledgment
           safeSend(ws, {
@@ -359,21 +416,15 @@ function setupWebSocket(wss) {
           // Send typing indicator
           safeSend(ws, { type: "typing", conversationId });
 
-          // Process and stream response
-          // The turn joins the conversation the REST route records, so the
-          // model sees the exchange rather than only its latest line. An
-          // unknown id keeps the old single-turn behaviour.
-          const userMessage = {
+          const recorded = conversations.messages(conversationId);
+          const messages = recorded.length ? recorded : [{
             id: userMessageId,
             role: "user",
             content,
             type: messageType,
             attachments,
             timestamp: new Date().toISOString(),
-          };
-          conversations.append(conversationId, userMessage);
-          const recorded = conversations.messages(conversationId);
-          const messages = recorded.length ? recorded : [userMessage];
+          }];
           const operatorCtx = { operator: req?.headers?.["x-operator"] === "true" };
           const onApprovalRequest = ({ approvalId, command, argv, root, respond }) => {
             if (denyEverything) {

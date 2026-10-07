@@ -1,14 +1,62 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import { User, Bot, Copy, Check, AlertCircle, RefreshCw, GitBranch, Loader2 } from "lucide-react";
+import { User, Bot, Copy, Check, AlertCircle, RefreshCw, GitBranch, Loader2, Pencil, X } from "lucide-react";
 import CodeBlock from "../CodeBlock/CodeBlock";
 import StreamingAudioPlayer from "../AudioPlayer/StreamingAudioPlayer";
 import CognitionTrace from "./CognitionTrace";
 
-export default function MessageBubble({ message, isStreaming, onRetry, onBranch, isBranching, isHighlighted }) {
+export default function MessageBubble({
+  message,
+  isStreaming,
+  onRetry,
+  onBranch,
+  onEdit,
+  onRegenerate,
+  onContinue,
+  isBranching,
+  isHighlighted,
+}) {
   const [copied, setCopied] = React.useState(false);
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [editContent, setEditContent] = React.useState(message.content || "");
   const isUser = message.role === "user";
   const isError = message.type === "error";
+
+  const handleStartEdit = () => {
+    setEditContent(message.content || "");
+    setIsEditing(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editContent.trim()) return;
+    setIsEditing(false);
+    if (onEdit && message.id) {
+      await onEdit(message.id, editContent, { branch: false });
+    }
+  };
+
+  const handleBranchEdit = async () => {
+    if (!editContent.trim()) return;
+    setIsEditing(false);
+    if (onEdit && message.id) {
+      await onEdit(message.id, editContent, { branch: true });
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditContent(message.content || "");
+  };
+
+  const handleEditKeyDown = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancelEdit();
+    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleSaveEdit();
+    }
+  };
 
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content);
@@ -128,15 +176,61 @@ export default function MessageBubble({ message, isStreaming, onRetry, onBranch,
         {isUser ? <User size={18} /> : isError ? <AlertCircle size={18} /> : <Bot size={18} />}
       </div>
       <div className="message-body">
-        <div
-          className="message-content"
-          role={isError ? "alert" : undefined}
-          aria-live={isError ? "assertive" : undefined}
-        >
-          {renderContent(message.content)}
-        </div>
-        {renderMedia()}
-        {!isUser && message.metadata?.trace && (
+        {isEditing ? (
+          <div className="message-edit-container">
+            <textarea
+              className="message-edit-input"
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              onKeyDown={handleEditKeyDown}
+              aria-label="Edit message content"
+              rows={3}
+              autoFocus
+            />
+            <div className="message-edit-actions">
+              <button
+                type="button"
+                className="action-btn submit-edit-btn"
+                onClick={handleSaveEdit}
+                disabled={!editContent.trim()}
+                aria-label="Save and send"
+              >
+                <Check size={14} aria-hidden="true" />
+                <span>Save & Send</span>
+              </button>
+              <button
+                type="button"
+                className="action-btn branch-edit-btn"
+                onClick={handleBranchEdit}
+                disabled={!editContent.trim()}
+                aria-label="Branch and send"
+                title="Send as a new branch"
+              >
+                <GitBranch size={14} aria-hidden="true" />
+                <span>Branch</span>
+              </button>
+              <button
+                type="button"
+                className="action-btn cancel-edit-btn"
+                onClick={handleCancelEdit}
+                aria-label="Cancel edit"
+              >
+                <X size={14} aria-hidden="true" />
+                <span>Cancel</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div
+            className="message-content"
+            role={isError ? "alert" : undefined}
+            aria-live={isError ? "assertive" : undefined}
+          >
+            {renderContent(message.content)}
+          </div>
+        )}
+        {!isEditing && renderMedia()}
+        {!isUser && !isEditing && message.metadata?.trace && (
           <CognitionTrace trace={message.metadata.trace} />
         )}
         {!isUser && message.content && !isError && (
@@ -148,6 +242,30 @@ export default function MessageBubble({ message, isStreaming, onRetry, onBranch,
             >
               {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
             </button>
+            {onRegenerate && message.id && (
+              <button
+                className="action-btn regenerate-btn"
+                onClick={() => onRegenerate(message.id)}
+                disabled={isStreaming || isBranching}
+                aria-label="Regenerate response"
+                title="Regenerate response"
+              >
+                <RefreshCw size={14} aria-hidden="true" />
+                <span>Regenerate</span>
+              </button>
+            )}
+            {onContinue && message.id && (
+              <button
+                className="action-btn continue-btn"
+                onClick={() => onContinue(message.id)}
+                disabled={isStreaming || isBranching}
+                aria-label="Continue from here"
+                title="Continue from here"
+              >
+                <GitBranch size={14} aria-hidden="true" />
+                <span>Continue</span>
+              </button>
+            )}
             {onBranch && message.id && (
               <button
                 className="action-btn branch-btn"
@@ -169,22 +287,48 @@ export default function MessageBubble({ message, isStreaming, onRetry, onBranch,
             )}
           </div>
         )}
-        {isUser && message.content && !isError && onBranch && message.id && (
+        {isUser && message.content && !isError && !isEditing && (
           <div className="message-actions">
-            <button
-              className="action-btn branch-btn"
-              onClick={() => onBranch(message.id)}
-              disabled={isBranching}
-              aria-label="Branch from here"
-              title="Branch from here"
-            >
-              {isBranching ? (
-                <Loader2 size={14} className="spin" aria-hidden="true" />
-              ) : (
+            {onEdit && message.id && (
+              <button
+                className="action-btn edit-btn"
+                onClick={handleStartEdit}
+                disabled={isStreaming || isBranching}
+                aria-label="Edit message"
+                title="Edit message"
+              >
+                <Pencil size={14} aria-hidden="true" />
+                <span>Edit</span>
+              </button>
+            )}
+            {onContinue && message.id && (
+              <button
+                className="action-btn continue-btn"
+                onClick={() => onContinue(message.id)}
+                disabled={isStreaming || isBranching}
+                aria-label="Continue from here"
+                title="Continue from here"
+              >
                 <GitBranch size={14} aria-hidden="true" />
-              )}
-              <span>Branch</span>
-            </button>
+                <span>Continue</span>
+              </button>
+            )}
+            {onBranch && message.id && (
+              <button
+                className="action-btn branch-btn"
+                onClick={() => onBranch(message.id)}
+                disabled={isBranching}
+                aria-label="Branch from here"
+                title="Branch from here"
+              >
+                {isBranching ? (
+                  <Loader2 size={14} className="spin" aria-hidden="true" />
+                ) : (
+                  <GitBranch size={14} aria-hidden="true" />
+                )}
+                <span>Branch</span>
+              </button>
+            )}
           </div>
         )}
         {isError && onRetry && (
