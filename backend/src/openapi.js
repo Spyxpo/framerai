@@ -219,6 +219,16 @@ function generateOpenApiSpec() {
                       maxItems: 10,
                     },
                     settings: { $ref: "#/components/schemas/GenerationSettings" },
+                    editMessageId: {
+                      type: "string",
+                      format: "uuid",
+                      description: "ID of an earlier user message to edit in place",
+                    },
+                    regenerateMessageId: {
+                      type: "string",
+                      format: "uuid",
+                      description: "ID of an assistant message to regenerate",
+                    },
                   },
                 },
               },

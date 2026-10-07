@@ -203,6 +203,48 @@ function clear() {
 }
 
 /**
+ * Truncate all messages in a conversation strictly after the specified message ID.
+ */
+function truncateAfter(id, messageId) {
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  _touch(conv);
+  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return false;
+  conv.messages.splice(idx + 1);
+  return true;
+}
+
+/**
+ * Truncate all messages from the specified message ID onward (inclusive).
+ */
+function truncateFrom(id, messageId) {
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  _touch(conv);
+  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return false;
+  conv.messages.splice(idx);
+  return true;
+}
+
+/**
+ * Update properties of an existing message in a conversation.
+ */
+function updateMessage(id, messageId, updates = {}) {
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  _touch(conv);
+  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return false;
+  conv.messages[idx] = {
+    ...conv.messages[idx],
+    ...updates,
+  };
+  return true;
+}
+
+/**
  * Override growth limits. Pass no arguments to restore production defaults.
  * For tests only — not part of the public API.
  */
@@ -214,6 +256,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 
 module.exports = {
   create, get, has, remove, list, messages, append, clear,
+  truncateAfter, truncateFrom, updateMessage,
   _map: conversations,
   _evict,
   _resetLimits,
