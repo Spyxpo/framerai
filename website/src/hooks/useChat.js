@@ -6,7 +6,7 @@ import {
   saveConversationsToStorage,
   clearConversationsFromStorage,
 } from "../utils/storage";
-import { dedupeMessages } from "../utils/dedupe";
+import { dedupeMessages, reconcileConversation } from "../utils/dedupe";
 import {
   createBackup,
   exportConversationToMarkdown,
@@ -109,8 +109,14 @@ export function useChat(settings) {
   const operationSeqRef = useRef(new Map());
   // Track deleted conversation IDs so pending asynchronous responses cannot resurrect them (#404)
   const deletedConversationIdsRef = useRef(new Set());
-  // Track timestamp/flag of local title modifications so older fetches cannot overwrite renames (#404)
-  const titleUpdatedAtByConvRef = useRef(new Map());
+  // Track timestamp/flag of local title modifications so older fetches cannot overwrite renames (#404, #431)
+  const titleUpdatedAtByConvRef = useRef(
+    new Map(
+      (initialStorage.conversations || [])
+        .filter((c) => c && c.id && (c.titleUpdatedAt || (c.title && c.title !== "New Chat")))
+        .map((c) => [c.id, c.titleUpdatedAt || 1])
+    )
+  );
   // Track the conversation ID that current `messages` state actually belongs to (#404)
   const messagesConversationIdRef = useRef(initialStorage.activeConversationId);
 
@@ -679,17 +685,11 @@ export function useChat(settings) {
           if (deletedConversationIdsRef.current.has(id)) return prev;
           const idx = prev.findIndex((c) => c.id === id);
           if (idx === -1) {
-            return [{ ...conv, messages: deduped }, ...prev];
+            return [reconcileConversation(null, conv, titleUpdatedAtByConvRef.current.get(id) || 0), ...prev];
           }
           const c = prev[idx];
           const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(id) || 0;
-          const title = (localTitleUpdatedAt > 0 && c.title) ? c.title : (conv.title || c.title);
-          const updatedConv = {
-            ...c,
-            ...conv,
-            title,
-            messages: deduped,
-          };
+          const updatedConv = reconcileConversation(c, conv, localTitleUpdatedAt);
           const updatedList = [...prev];
           updatedList[idx] = updatedConv;
           return updatedList;
@@ -777,7 +777,9 @@ export function useChat(settings) {
                     setMessages(deduped);
                     setConversations((prev) =>
                       prev.map((c) =>
-                        c.id === nextId ? { ...c, ...conv, messages: deduped, title: conv.title || c.title } : c
+                        c.id === nextId
+                          ? reconcileConversation(c, conv, titleUpdatedAtByConvRef.current.get(nextId) || 0)
+                          : c
                       )
                     );
                   }
@@ -831,8 +833,15 @@ export function useChat(settings) {
 
       try {
         const branch = await api.branchConversation(convId, messageId);
+        const parentConv = currentConv || conversationsRef.current.find((c) => c.id === convId);
+        const parentTitle = parentConv?.title;
+        const branchTitle = parentTitle && parentTitle !== "New Chat"
+          ? `${parentTitle} (Branch)`
+          : branch.title;
+
         const newBranchConv = {
           ...branch,
+          title: branchTitle,
           messages: branch.messages || historyPrefix,
           parentConversationId: branch.parentConversationId || convId,
           branchedFromMessageId: branch.branchedFromMessageId || messageId,
@@ -841,7 +850,11 @@ export function useChat(settings) {
         activeConversationRef.current = newBranchConv.id;
         messagesConversationIdRef.current = newBranchConv.id;
         setConversations((prev) => {
-          const updated = [newBranchConv, ...prev.filter((c) => c.id !== newBranchConv.id)];
+          const existing = prev.find((c) => c.id === newBranchConv.id);
+          const reconciled = existing
+            ? reconcileConversation(existing, newBranchConv, titleUpdatedAtByConvRef.current.get(newBranchConv.id) || 0)
+            : newBranchConv;
+          const updated = [reconciled, ...prev.filter((c) => c.id !== newBranchConv.id)];
           saveConversationsToStorage(updated, newBranchConv.id);
           return updated;
         });
@@ -925,18 +938,23 @@ export function useChat(settings) {
     const trimmed = newTitle.trim();
     if (!trimmed) return;
 
-    titleUpdatedAtByConvRef.current.set(id, Date.now());
+    const prevTimestamp = titleUpdatedAtByConvRef.current.get(id) || 0;
+    const timestamp = Math.max(Date.now(), prevTimestamp + 1);
+    titleUpdatedAtByConvRef.current.set(id, timestamp);
 
-    setConversations((prev) =>
-      prev.map((c) => {
+    setConversations((prev) => {
+      const updated = prev.map((c) => {
         if (c.id !== id) return c;
         return {
           ...c,
           title: trimmed,
+          titleUpdatedAt: Math.max(c.titleUpdatedAt || 0, timestamp),
           updatedAt: new Date().toISOString(),
         };
-      })
-    );
+      });
+      saveConversationsToStorage(updated, activeConversationRef.current);
+      return updated;
+    });
   }, []);
 
   const exportConversation = useCallback((convId, format = "json") => {
@@ -1049,11 +1067,16 @@ export function useChat(settings) {
         }
       } else {
         setConversations((prev) =>
-          prev.map((c) =>
-            c.id === convId && (c.title === "New Chat" || !c.title)
-              ? { ...c, title: content.length > 30 ? content.slice(0, 30) + "..." : content }
-              : c
-          )
+          prev.map((c) => {
+            if (c.id !== convId) return c;
+            const isExplicitlyTitled =
+              (titleUpdatedAtByConvRef.current.get(convId) || 0) > 0 ||
+              (c.titleUpdatedAt || 0) > 0;
+            if (!isExplicitlyTitled && (c.title === "New Chat" || !c.title)) {
+              return { ...c, title: content.length > 30 ? content.slice(0, 30) + "..." : content };
+            }
+            return c;
+          })
         );
       }
 
