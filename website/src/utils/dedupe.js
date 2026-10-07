@@ -44,46 +44,130 @@ export function mergeMessages(localMsgs = [], remoteMsgs = []) {
   }
 
   const remoteById = new Map();
+  const remoteByClientId = new Map();
   for (const m of remoteMsgs) {
-    if (m?.id) {
-      remoteById.set(m.id, m);
+    if (m?.id) remoteById.set(m.id, m);
+    if (m?.clientId) remoteByClientId.set(m.clientId, m);
+  }
+
+  const localMatchedToRemote = new Map();
+  const remoteMatchedToLocal = new Map();
+  const matchedRemoteSet = new Set();
+
+  // Pass 1: Match by exact ID or clientId
+  for (const local of localMsgs) {
+    if (!local) continue;
+    let match = null;
+    if (local.id && remoteById.has(local.id)) {
+      match = remoteById.get(local.id);
+    } else if (local.clientId && remoteById.has(local.clientId)) {
+      match = remoteById.get(local.clientId);
+    } else if (local.id && remoteByClientId.has(local.id)) {
+      match = remoteByClientId.get(local.id);
+    }
+    if (match && !matchedRemoteSet.has(match)) {
+      localMatchedToRemote.set(local, match);
+      remoteMatchedToLocal.set(match, local);
+      matchedRemoteSet.add(match);
+    }
+  }
+
+  // Pass 2: Correlate unacknowledged in-flight turns (e.g. disconnected before ack)
+  for (let i = 0; i < localMsgs.length; i++) {
+    const local = localMsgs[i];
+    if (!local || localMatchedToRemote.has(local)) continue;
+
+    if (local.role === "user") {
+      // Find the first unmatched remote user message with same content
+      const match = remoteMsgs.find(
+        (r) => !matchedRemoteSet.has(r) && r.role === "user" && r.content === local.content
+      );
+      if (match) {
+        localMatchedToRemote.set(local, match);
+        remoteMatchedToLocal.set(match, local);
+        matchedRemoteSet.add(match);
+      }
+    } else if (local.role === "assistant" && i > 0) {
+      const prevLocal = localMsgs[i - 1];
+      const prevRemote = localMatchedToRemote.get(prevLocal);
+      if (prevRemote) {
+        const remoteUserIdx = remoteMsgs.indexOf(prevRemote);
+        if (remoteUserIdx !== -1 && remoteUserIdx + 1 < remoteMsgs.length) {
+          const nextRemote = remoteMsgs[remoteUserIdx + 1];
+          if (nextRemote.role === "assistant" && !matchedRemoteSet.has(nextRemote)) {
+            localMatchedToRemote.set(local, nextRemote);
+            remoteMatchedToLocal.set(nextRemote, local);
+            matchedRemoteSet.add(nextRemote);
+          }
+        }
+      }
     }
   }
 
   const merged = [];
   const seenIds = new Set();
 
-  // First, walk through local messages. For any message that also exists in remote,
-  // take the remote message updated with local properties (or remote content if local was placeholder).
-  for (const local of localMsgs) {
-    if (!local?.id) {
-      merged.push(local);
+  // Construct merged array based on remote messages, updated with local details
+  for (const remote of remoteMsgs) {
+    if (!remote?.id) {
+      merged.push(remote);
       continue;
     }
-    if (seenIds.has(local.id)) continue;
-    seenIds.add(local.id);
+    const local = remoteMatchedToLocal.get(remote);
+    if (local) {
+      const isAssistant = remote.role === "assistant";
+      const content =
+        remote.content !== undefined && remote.content !== ""
+          ? remote.content
+          : local.content || "";
+      const type =
+        remote.type && remote.type !== "text"
+          ? remote.type
+          : local.type && local.type !== "error"
+          ? local.type
+          : remote.type || local.type || "text";
+      const completed = isAssistant
+        ? true
+        : remote.completed !== undefined
+        ? remote.completed
+        : local.completed;
+      const clientId =
+        local.clientId || (local.id !== remote.id ? local.id : remote.clientId || remote.id);
 
-    const remote = remoteById.get(local.id);
-    if (remote) {
-      merged.push({
-        ...remote,
+      const combined = {
         ...local,
-        content: remote.content || local.content || "",
-        completed: remote.completed !== undefined ? remote.completed : local.completed,
-        metadata: { ...(remote.metadata || {}), ...(local.metadata || {}) },
-      });
+        ...remote,
+        id: remote.id,
+        clientId,
+        content,
+        type,
+        ...(completed !== undefined ? { completed } : {}),
+        metadata: { ...(local.metadata || {}), ...(remote.metadata || {}) },
+      };
+      seenIds.add(combined.id);
+      if (combined.clientId) seenIds.add(combined.clientId);
+      merged.push(combined);
     } else {
-      // Local message not yet in remote snapshot (e.g., in-flight user or assistant turn)
-      merged.push(local);
+      const isAssistant = remote.role === "assistant";
+      const combined = {
+        ...remote,
+        ...(isAssistant && remote.completed === undefined ? { completed: true } : {}),
+      };
+      seenIds.add(combined.id);
+      merged.push(combined);
     }
   }
 
-  // Then append any remote messages that weren't in local state
-  for (const remote of remoteMsgs) {
-    if (remote?.id && !seenIds.has(remote.id)) {
-      seenIds.add(remote.id);
-      merged.push(remote);
-    }
+  // Preserve any local in-flight messages that have not reached the server yet
+  for (const local of localMsgs) {
+    if (!local) continue;
+    if (localMatchedToRemote.has(local)) continue;
+    if (local.id && seenIds.has(local.id)) continue;
+    if (local.clientId && seenIds.has(local.clientId)) continue;
+
+    if (local.id) seenIds.add(local.id);
+    if (local.clientId) seenIds.add(local.clientId);
+    merged.push(local);
   }
 
   return dedupeMessages(merged);

@@ -6,7 +6,7 @@ import {
   saveConversationsToStorage,
   clearConversationsFromStorage,
 } from "../utils/storage";
-import { dedupeMessages } from "../utils/dedupe";
+import { dedupeMessages, mergeMessages } from "../utils/dedupe";
 import {
   createBackup,
   exportConversationToMarkdown,
@@ -32,7 +32,7 @@ import {
  */
 function adoptServerId(msgs, currentId, serverId) {
   if (!currentId || !serverId || serverId === currentId) return msgs;
-  const idx = msgs.findIndex((m) => m.id === currentId);
+  const idx = msgs.findIndex((m) => m.id === currentId || m.clientId === currentId);
   if (idx === -1) return msgs;
   const updated = [...msgs];
   updated[idx] = { ...updated[idx], id: serverId, clientId: updated[idx].clientId || currentId };
@@ -56,6 +56,8 @@ export function useChat(settings) {
   // Track completed assistant message IDs to guarantee idempotent completion handling (#366)
   const completedMessageIdsRef = useRef(new Set());
   const inFlightTurnsByConvRef = useRef(new Map());
+  // Track conversations whose generation was interrupted by disconnect (#437)
+  const interruptedConversationIdsRef = useRef(new Set());
 
   const addActiveAssistantId = (convId, msgId) => {
     if (!convId || !msgId) return;
@@ -132,9 +134,11 @@ export function useChat(settings) {
       const idx = msgs.findIndex((m) => (m.id === inFlight || m.clientId === inFlight) && !m.completed);
       if (idx !== -1) return idx;
     }
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i]?.role === "assistant" && !msgs[i]?.completed) {
-        return i;
+    if (convId && streamingConversationIdsRef.current.has(convId)) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]?.role === "assistant" && !msgs[i]?.completed) {
+          return i;
+        }
       }
     }
     return -1;
@@ -183,6 +187,12 @@ export function useChat(settings) {
 
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
+
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Read through a ref so sendMessage always sees the current settings without
   // being rebuilt every time a slider moves.
@@ -251,10 +261,21 @@ export function useChat(settings) {
         return;
       }
       const isActiveConv = Boolean(targetConvId && targetConvId === activeConversationRef.current);
-      const targetMsgId = data.messageId || data.id || getFirstActiveAssistantId(targetConvId);
+      const isConvStreaming = streamingConversationIdsRef.current.has(targetConvId);
+      const targetMsgId =
+        data.messageId ||
+        data.id ||
+        (isConvStreaming ? getFirstActiveAssistantId(targetConvId) : null);
 
       // If this message has already completed, ignore duplicate completion/stream events safely (#366)
       if (targetMsgId && completedMessageIdsRef.current.has(targetMsgId)) {
+        if (data.done && targetConvId) {
+          markStreamingEnd(targetConvId);
+        }
+        return;
+      }
+      // If no target message was found and conversation is not actively streaming, ignore stale frame
+      if (!targetMsgId && !isConvStreaming) {
         if (data.done && targetConvId) {
           markStreamingEnd(targetConvId);
         }
@@ -536,6 +557,7 @@ export function useChat(settings) {
     ws.on("close", () => {
       const orphaned = [...streamingConversationIdsRef.current];
       for (const convId of orphaned) {
+        interruptedConversationIdsRef.current.add(convId);
         if (deletedConversationIdsRef.current.has(convId)) {
           markStreamingEnd(convId);
           continue;
@@ -547,16 +569,27 @@ export function useChat(settings) {
             const idx = findTargetAssistantIndex(msgs, inFlightId, convId);
             if (idx === -1) return msgs;
             const target = msgs[idx];
-            if (target.completed || target.content) return msgs;
+            if (target.completed) return msgs;
             const updated = [...msgs];
-            const newMsg = {
-              ...target,
-              content: "Connection lost. Please retry.",
-              type: "error",
-              completed: true,
-            };
-            if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
-            updated[idx] = newMsg;
+            if (!target.content) {
+              const newMsg = {
+                ...target,
+                content: "Connection lost. Please retry.",
+                type: "error",
+                completed: true,
+              };
+              if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+              if (newMsg.clientId) completedMessageIdsRef.current.add(newMsg.clientId);
+              updated[idx] = newMsg;
+            } else {
+              const newMsg = {
+                ...target,
+                completed: true,
+              };
+              if (newMsg.id) completedMessageIdsRef.current.add(newMsg.id);
+              if (newMsg.clientId) completedMessageIdsRef.current.add(newMsg.clientId);
+              updated[idx] = newMsg;
+            }
             return updated;
           };
           if (convId === activeConversationRef.current) {
@@ -585,6 +618,67 @@ export function useChat(settings) {
       const currentActiveId = activeConversationRef.current;
       if (currentActiveId && !deletedConversationIdsRef.current.has(currentActiveId)) {
         messagesConversationIdRef.current = currentActiveId;
+      }
+
+      // Reconcile interrupted or active conversations to recover persisted state (#437)
+      const toRecover = new Set(interruptedConversationIdsRef.current);
+      if (currentActiveId && !deletedConversationIdsRef.current.has(currentActiveId)) {
+        toRecover.add(currentActiveId);
+      }
+      interruptedConversationIdsRef.current.clear();
+
+      for (const convId of toRecover) {
+        if (!convId || deletedConversationIdsRef.current.has(convId)) continue;
+        const opSeq = (operationSeqRef.current.get(convId) || 0) + 1;
+        operationSeqRef.current.set(convId, opSeq);
+
+        api
+          .getConversation(convId)
+          .then((conv) => {
+            if (deletedConversationIdsRef.current.has(convId)) return;
+            if (operationSeqRef.current.get(convId) !== opSeq) return;
+            if (conv && Array.isArray(conv.messages)) {
+              setConversations((prev) => {
+                if (deletedConversationIdsRef.current.has(convId)) return prev;
+                const idx = prev.findIndex((c) => c.id === convId);
+                const currentConv = idx !== -1 ? prev[idx] : null;
+                const localMsgs =
+                  convId === activeConversationRef.current && messagesConversationIdRef.current === convId
+                    ? messagesRef.current
+                    : currentConv?.messages || [];
+                const reconciled = mergeMessages(localMsgs, conv.messages);
+
+                for (const m of reconciled) {
+                  if (m.role === "assistant" && m.completed) {
+                    if (m.id) completedMessageIdsRef.current.add(m.id);
+                    if (m.clientId) completedMessageIdsRef.current.add(m.clientId);
+                  }
+                }
+
+                if (convId === activeConversationRef.current && messagesConversationIdRef.current === convId) {
+                  setMessages(reconciled);
+                }
+
+                const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
+                const title = localTitleUpdatedAt > 0 && currentConv?.title ? currentConv.title : (conv.title || currentConv?.title);
+                const updatedConv = {
+                  ...(currentConv || {}),
+                  ...conv,
+                  title,
+                  messages: reconciled,
+                  updatedAt: new Date().toISOString(),
+                };
+
+                const updatedList = idx !== -1
+                  ? prev.map((c, i) => (i === idx ? updatedConv : c))
+                  : [{ ...updatedConv }, ...prev];
+
+                saveConversationsToStorage(updatedList, activeConversationRef.current);
+                return updatedList;
+              });
+            }
+          })
+          .catch(() => {});
       }
     });
 
@@ -672,6 +766,12 @@ export function useChat(settings) {
 
       if (conv && Array.isArray(conv.messages)) {
         const deduped = dedupeMessages(conv.messages);
+        for (const m of deduped) {
+          if (m.role === "assistant") {
+            if (m.id) completedMessageIdsRef.current.add(m.id);
+            if (m.clientId) completedMessageIdsRef.current.add(m.clientId);
+          }
+        }
         if (activeConversationRef.current === id) {
           setMessages(deduped);
         }
@@ -692,6 +792,7 @@ export function useChat(settings) {
           };
           const updatedList = [...prev];
           updatedList[idx] = updatedConv;
+          saveConversationsToStorage(updatedList, activeConversationRef.current);
           return updatedList;
         });
       }
@@ -720,6 +821,7 @@ export function useChat(settings) {
       deletedConversationIdsRef.current.add(id);
       operationSeqRef.current.delete(id);
       titleUpdatedAtByConvRef.current.delete(id);
+      interruptedConversationIdsRef.current.delete(id);
 
       // Clean up in-flight generation / streaming / loading states immediately
       markStreamingEnd(id);
@@ -903,6 +1005,7 @@ export function useChat(settings) {
     activeAssistantIdByConvRef.current.clear();
     inFlightTurnsByConvRef.current.clear();
     completedMessageIdsRef.current.clear();
+    interruptedConversationIdsRef.current.clear();
     operationSeqRef.current.clear();
     titleUpdatedAtByConvRef.current.clear();
     deletedConversationIdsRef.current.clear();
