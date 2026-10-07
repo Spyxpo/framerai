@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupeMessages, mergeMessages } from "../utils/dedupe";
+import { dedupeMessages, mergeMessages, reconcileConversation } from "../utils/dedupe";
 
 describe("dedupeMessages utility", () => {
   it("returns empty array for non-array inputs", () => {
@@ -125,5 +125,71 @@ describe("mergeMessages utility", () => {
     const merged = mergeMessages(local, remote);
     expect(merged).toHaveLength(2);
     expect(merged[1].id).toBe("m2");
+  });
+});
+
+describe("reconcileConversation utility", () => {
+  it("handles null / undefined / single-sided inputs", () => {
+    expect(reconcileConversation(null, null)).toBeNull();
+    const conv = { id: "c1", title: "Chat 1", messages: [{ id: "m1" }] };
+    expect(reconcileConversation(conv, null)).toBe(conv);
+    expect(reconcileConversation(null, conv)).toEqual({
+      id: "c1",
+      title: "Chat 1",
+      messages: [{ id: "m1" }],
+    });
+  });
+
+  it("preserves newer local title when localTitleUpdatedAt > incoming.titleUpdatedAt", () => {
+    const existing = { id: "c1", title: "Renamed Title", messages: [] };
+    const incoming = { id: "c1", title: "Stale Backend Title", messages: [] };
+    const reconciled = reconcileConversation(existing, incoming, 100);
+    expect(reconciled.title).toBe("Renamed Title");
+    expect(reconciled.titleUpdatedAt).toBe(100);
+  });
+
+  it("preserves newer local title when existingConv.titleUpdatedAt > incoming", () => {
+    const existing = { id: "c1", title: "Local Custom Title", titleUpdatedAt: 200, messages: [] };
+    const incoming = { id: "c1", title: "Stale Remote", messages: [] };
+    const reconciled = reconcileConversation(existing, incoming, 0);
+    expect(reconciled.title).toBe("Local Custom Title");
+    expect(reconciled.titleUpdatedAt).toBe(200);
+  });
+
+  it("adopts incoming title when incoming title is newer", () => {
+    const existing = { id: "c1", title: "Older Title", titleUpdatedAt: 50, messages: [] };
+    const incoming = { id: "c1", title: "Newer Remote Title", titleUpdatedAt: 150, messages: [] };
+    const reconciled = reconcileConversation(existing, incoming, 0);
+    expect(reconciled.title).toBe("Newer Remote Title");
+    expect(reconciled.titleUpdatedAt).toBe(150);
+  });
+
+  it("adopts incoming title when local conversation has never been updated", () => {
+    const existing = { id: "c1", title: "New Chat", messages: [] };
+    const incoming = { id: "c1", title: "First Message Generated Title", messages: [] };
+    const reconciled = reconcileConversation(existing, incoming, 0);
+    expect(reconciled.title).toBe("First Message Generated Title");
+  });
+
+  it("deduplicates messages and preserves combined properties", () => {
+    const existing = {
+      id: "c1",
+      title: "Chat",
+      messages: [{ id: "m1", role: "user", content: "Hi" }],
+      parentConversationId: "p1",
+    };
+    const incoming = {
+      id: "c1",
+      title: "Chat",
+      messages: [
+        { id: "m1", role: "user", content: "Hi" },
+        { id: "m2", role: "assistant", content: "Hello" },
+      ],
+      createdAt: "2026-10-01T00:00:00.000Z",
+    };
+    const reconciled = reconcileConversation(existing, incoming, 0);
+    expect(reconciled.messages).toHaveLength(2);
+    expect(reconciled.parentConversationId).toBe("p1");
+    expect(reconciled.createdAt).toBe("2026-10-01T00:00:00.000Z");
   });
 });
