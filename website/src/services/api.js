@@ -7,7 +7,11 @@ async function request(path, options = {}) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "Request failed");
+    const error = new Error(err.error || err.message || "Request failed");
+    error.status = res.status;
+    error.code = err.code;
+    error.details = err.details;
+    throw error;
   }
   return res.json();
 }
@@ -29,29 +33,59 @@ export const api = {
   createConversation: () => request("/chat/conversations", { method: "POST" }),
   listConversations: () => request("/chat/conversations"),
   getConversation: (id) => request(`/chat/conversations/${id}`),
+  updateConversation: (id, updates = {}) =>
+    request(`/chat/conversations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(updates),
+    }),
   deleteConversation: (id) =>
     request(`/chat/conversations/${id}`, { method: "DELETE" }),
-  branchConversation: (conversationId, messageId) =>
+  branchConversation: (conversationId, messageId, expectedVersion) =>
     request(`/chat/conversations/${conversationId}/branch`, {
       method: "POST",
-      body: JSON.stringify({ messageId }),
+      body: JSON.stringify({
+        messageId,
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      }),
     }),
 
   // Messages
-  sendMessage: (conversationId, content, type = "text", attachments = [], settings, options = {}) =>
+  sendMessage: (conversationId, content, type = "text", attachments = [], settings, optionsOrExpectedVersion = {}) => {
+    const options = typeof optionsOrExpectedVersion === "number"
+      ? { expectedVersion: optionsOrExpectedVersion }
+      : (optionsOrExpectedVersion || {});
+    return request(`/chat/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content,
+        type,
+        attachments,
+        settings,
+        ...options,
+      }),
+    });
+  },
+  editMessage: (conversationId, messageId, content, type = "text", attachments = [], settings, expectedVersion) =>
     request(`/chat/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, type, attachments, settings, ...options }),
+      body: JSON.stringify({
+        content,
+        type,
+        attachments,
+        settings,
+        editMessageId: messageId,
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      }),
     }),
-  editMessage: (conversationId, messageId, content, type = "text", attachments = [], settings) =>
+  regenerateResponse: (conversationId, messageId, settings, content = "", expectedVersion) =>
     request(`/chat/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, type, attachments, settings, editMessageId: messageId }),
-    }),
-  regenerateResponse: (conversationId, messageId, settings, content = "") =>
-    request(`/chat/conversations/${conversationId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content, regenerateMessageId: messageId, settings }),
+      body: JSON.stringify({
+        content,
+        regenerateMessageId: messageId,
+        settings,
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      }),
     }),
 
   // Generation
