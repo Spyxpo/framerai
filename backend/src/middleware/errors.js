@@ -32,6 +32,10 @@ class ApiError extends Error {
   static payloadTooLarge(message) {
     return new ApiError(413, message, "PAYLOAD_TOO_LARGE");
   }
+
+  static conflict(message, details) {
+    return new ApiError(409, message, "VERSION_CONFLICT", details);
+  }
 }
 
 /**
@@ -63,6 +67,8 @@ function errorHandler(err, req, res, next) {
 
   const body = { error: normalized.message, code: normalized.code };
   if (normalized.details) body.details = normalized.details;
+  if (normalized.details?.currentVersion !== undefined) body.currentVersion = normalized.details.currentVersion;
+  if (normalized.details?.expectedVersion !== undefined) body.expectedVersion = normalized.details.expectedVersion;
   if (req.requestId) body.requestId = req.requestId;
 
   res.status(normalized.status).json(body);

@@ -159,6 +159,41 @@ function generateOpenApiSpec() {
             "404": errorResponseRef(404, "Conversation not found"),
           },
         },
+        patch: {
+          summary: "Update conversation",
+          description: "Updates conversation title with optional expectedVersion check.",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    title: { type: "string", minLength: 1, maxLength: 200 },
+                    expectedVersion: {
+                      type: "integer",
+                      minimum: 1,
+                      description: "Expected conversation version for optimistic concurrency control",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Updated conversation",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Conversation" },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error"),
+            "404": errorResponseRef(404, "Conversation not found"),
+            "409": errorResponseRef(409, "Version conflict"),
+          },
+        },
         delete: {
           summary: "Delete conversation",
           description: "Deletes a conversation by UUID.",
@@ -218,6 +253,11 @@ function generateOpenApiSpec() {
                       items: { type: "object", additionalProperties: true },
                       maxItems: 10,
                     },
+                    expectedVersion: {
+                      type: "integer",
+                      minimum: 1,
+                      description: "Expected conversation version for optimistic concurrency control",
+                    },
                     settings: { $ref: "#/components/schemas/GenerationSettings" },
                     editMessageId: {
                       type: "string",
@@ -246,6 +286,7 @@ function generateOpenApiSpec() {
             },
             "400": errorResponseRef(400, "Validation error"),
             "404": errorResponseRef(404, "Conversation not found"),
+            "409": errorResponseRef(409, "Version conflict"),
             "429": errorResponseRef(429, "Rate limit exceeded"),
           },
         },
@@ -276,6 +317,11 @@ function generateOpenApiSpec() {
                       format: "uuid",
                       description: "UUID of the message to branch from",
                     },
+                    expectedVersion: {
+                      type: "integer",
+                      minimum: 1,
+                      description: "Expected parent conversation version for optimistic concurrency control",
+                    },
                   },
                 },
               },
@@ -292,6 +338,7 @@ function generateOpenApiSpec() {
             },
             "400": errorResponseRef(400, "Validation error or message not in conversation"),
             "404": errorResponseRef(404, "Conversation not found"),
+            "409": errorResponseRef(409, "Version conflict"),
           },
         },
       },
@@ -840,9 +887,12 @@ function generateOpenApiSpec() {
           properties: {
             id: { type: "string", format: "uuid" },
             title: { type: "string" },
+            version: { type: "integer", minimum: 1 },
             parentConversationId: { type: "string", format: "uuid" },
+            parentVersion: { type: "integer", minimum: 1 },
             branchedFromMessageId: { type: "string", format: "uuid" },
             createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" },
             messageCount: { type: "integer", minimum: 0 },
           },
         },
@@ -852,13 +902,16 @@ function generateOpenApiSpec() {
           properties: {
             id: { type: "string", format: "uuid" },
             title: { type: "string" },
+            version: { type: "integer", minimum: 1, default: 1 },
             parentConversationId: { type: "string", format: "uuid" },
+            parentVersion: { type: "integer", minimum: 1 },
             branchedFromMessageId: { type: "string", format: "uuid" },
             messages: {
               type: "array",
               items: { $ref: "#/components/schemas/ChatMessage" },
             },
             createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" },
           },
         },
         ImageGenerationResponse: {
