@@ -35,24 +35,30 @@ function conversationId(req) {
 // Create new conversation
 router.post("/conversations", (req, res) => {
   const id = randomUUID();
-  conversations.create({
+  const now = new Date().toISOString();
+  const conv = {
     id,
     title: "New Chat",
     messages: [],
-    createdAt: new Date().toISOString(),
-  });
-  res.json({ id, title: "New Chat", messages: [] });
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+  conversations.create(conv);
+  res.json(conv);
 });
 
 // List conversations
 router.get("/conversations", (req, res) => {
   const list = conversations.list()
-    .map(({ id, title, createdAt, messages, parentConversationId, branchedFromMessageId }) => ({
+    .map(({ id, title, createdAt, updatedAt, version, messages, parentConversationId, parentVersion, branchedFromMessageId }) => ({
       id,
       title,
       createdAt,
+      updatedAt: updatedAt || createdAt,
+      version: version || 1,
       messageCount: messages.length,
-      ...(parentConversationId ? { parentConversationId, branchedFromMessageId } : {}),
+      ...(parentConversationId ? { parentConversationId, branchedFromMessageId, ...(parentVersion ? { parentVersion } : {}) } : {}),
     }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   res.json(list);
@@ -63,6 +69,30 @@ router.get("/conversations/:id", (req, res) => {
   res.json(getConversation(conversationId(req)));
 });
 
+// Update conversation (e.g. rename) with optimistic concurrency support
+router.patch("/conversations/:id", (req, res) => {
+  const id = conversationId(req);
+  const conv = getConversation(id);
+
+  const v = validator(req.body);
+  const title = v.string("title", { min: 1, max: 200, optional: true });
+  const expectedVersion = req.body.expectedVersion !== undefined ? Number(req.body.expectedVersion) : undefined;
+  v.done();
+
+  if (expectedVersion !== undefined && (conv.version || 1) !== expectedVersion) {
+    throw ApiError.conflict("Conversation version mismatch", {
+      currentVersion: conv.version || 1,
+      expectedVersion,
+      conversation: conv,
+    });
+  }
+
+  const updates = {};
+  if (title) updates.title = title;
+  const result = conversations.update(id, updates);
+  res.json(result.conversation);
+});
+
 // Branch conversation
 router.post("/conversations/:id/branch", (req, res) => {
   const parentId = conversationId(req);
@@ -70,7 +100,16 @@ router.post("/conversations/:id/branch", (req, res) => {
 
   const v = validator(req.body);
   const messageId = v.uuid("messageId");
+  const expectedVersion = req.body.expectedVersion !== undefined ? Number(req.body.expectedVersion) : undefined;
   v.done();
+
+  if (expectedVersion !== undefined && (conv.version || 1) !== expectedVersion) {
+    throw ApiError.conflict("Conversation version mismatch", {
+      currentVersion: conv.version || 1,
+      expectedVersion,
+      conversation: conv,
+    });
+  }
 
   const messageIndex = conv.messages.findIndex((m) => m.id === messageId);
   if (messageIndex === -1) {
@@ -86,13 +125,17 @@ router.post("/conversations/:id/branch", (req, res) => {
 
   const branchId = randomUUID();
   const branchTitle = `${conv.title} (Branch)`;
+  const now = new Date().toISOString();
   const branchConv = {
     id: branchId,
     title: branchTitle,
     parentConversationId: parentId,
+    parentVersion: conv.version || 1,
     branchedFromMessageId: messageId,
     messages: branchedMessages,
-    createdAt: new Date().toISOString(),
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
   };
 
   conversations.create(branchConv);
@@ -117,6 +160,7 @@ router.post(
     const content = v.string("content", { required: !isRegenerate, max: modelLimits.messageChars() });
     const type = v.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
     const attachments = v.array("attachments", { max: 10 });
+    const expectedVersion = req.body.expectedVersion !== undefined ? Number(req.body.expectedVersion) : undefined;
     const settings = readSettings(v);
     let editMessageId;
     if (req.body.editMessageId !== undefined) {
@@ -127,6 +171,14 @@ router.post(
       regenerateMessageId = v.uuid("regenerateMessageId");
     }
     v.done();
+
+    if (expectedVersion !== undefined && (conv.version || 1) !== expectedVersion) {
+      throw ApiError.conflict("Conversation version mismatch", {
+        currentVersion: conv.version || 1,
+        expectedVersion,
+        conversation: conv,
+      });
+    }
 
     let userMessage;
     if (editMessageId) {
@@ -201,7 +253,7 @@ router.post(
     // learn the id it was stored under, and a client holding a different one
     // could not ask for it again (branching). Added to the response only: the
     // stored reply stays a plain message.
-    res.json({ ...assistantMessage, userMessageId: userMessage.id });
+    res.json({ ...assistantMessage, userMessageId: userMessage.id, version: conv.version });
   })
 );
 
