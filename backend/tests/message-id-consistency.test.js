@@ -327,7 +327,7 @@ test("the audio reply is named by its last frame, chunked or not", async (t) => 
   assert.equal(last.done, true);
   assert.match(last.messageId, UUID);
   for (const chunk of chunks.slice(0, -1)) {
-    assert.ok(!chunk.messageId || chunk.messageId === last.messageId);
+    assert.equal(chunk.messageId, last.messageId);
   }
 
   const stored = await storedMessages(server.app, conversationId);

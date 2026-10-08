@@ -188,7 +188,10 @@ function safeSend(ws, payload) {
 /**
  * Stream audio in chunks over WebSocket.
  * Reads the generated WAV file, extracts PCM data, and sends it in time-based chunks.
- * The last frame carries messageId, the id the reply is stored under (Issue #394).
+ * Every frame carries messageId, the id the reply is stored under (Issue #394).
+ * Not just the last one: a client that abandons this reply (edit, regenerate)
+ * keeps receiving its chunks until the loop ends, and only the id lets it tell
+ * them apart from the replacement reply's.
  */
 async function streamAudio(ws, response, conversationId, wsLog, messageId) {
   const audioUrl = response.metadata?.url;
@@ -247,7 +250,7 @@ async function streamAudio(ws, response, conversationId, wsLog, messageId) {
         conversationId,
         content: i === 0 ? response.content : "",
         done: isLast,
-        ...(isLast ? { messageId } : {}),
+        messageId,
         responseType: "audio",
         metadata: {
           chunk: i,
