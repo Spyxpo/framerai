@@ -120,6 +120,8 @@ export function sanitizeConversation(conv) {
       : new Date().toISOString();
   const parentConversationId =
     typeof conv.parentConversationId === "string" && conv.parentConversationId ? conv.parentConversationId : undefined;
+  const parentVersion =
+    Number.isInteger(conv.parentVersion) && conv.parentVersion >= 1 ? conv.parentVersion : undefined;
   const branchedFromMessageId =
     typeof conv.branchedFromMessageId === "string" && conv.branchedFromMessageId ? conv.branchedFromMessageId : undefined;
   const titleUpdatedAt =
@@ -130,6 +132,9 @@ export function sanitizeConversation(conv) {
     typeof conv.messageCount === "number" && isFinite(conv.messageCount) && conv.messageCount >= 0
       ? conv.messageCount
       : undefined;
+
+  // Monotonically increasing version, backward-compatible default to 1 (#438)
+  const version = Number.isInteger(conv.version) && conv.version >= 1 ? conv.version : 1;
 
   const rawMessages = Array.isArray(conv.messages) ? conv.messages : [];
   const messages = [];
@@ -148,7 +153,9 @@ export function sanitizeConversation(conv) {
     title,
     updatedAt,
     createdAt,
+    version,
     ...(parentConversationId ? { parentConversationId } : {}),
+    ...(parentVersion ? { parentVersion } : {}),
     ...(branchedFromMessageId ? { branchedFromMessageId } : {}),
     ...(titleUpdatedAt ? { titleUpdatedAt } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),

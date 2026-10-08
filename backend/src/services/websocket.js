@@ -73,6 +73,10 @@ function parseChatFrame(message) {
   }
 
   const attachments = Array.isArray(message.attachments) ? message.attachments.slice(0, 10) : [];
+  const expectedVersion =
+    message.expectedVersion !== undefined && message.expectedVersion !== null
+      ? Number(message.expectedVersion)
+      : undefined;
 
   return {
     content,
@@ -80,6 +84,7 @@ function parseChatFrame(message) {
     settings,
     attachments,
     conversationId: message.conversationId,
+    expectedVersion,
     editMessageId: message.editMessageId,
     regenerateMessageId: message.regenerateMessageId,
   };
@@ -190,7 +195,7 @@ function safeSend(ws, payload) {
  * Reads the generated WAV file, extracts PCM data, and sends it in time-based chunks.
  * The last frame carries messageId, the id the reply is stored under (Issue #394).
  */
-async function streamAudio(ws, response, conversationId, wsLog, messageId) {
+async function streamAudio(ws, response, conversationId, wsLog, messageId, version) {
   const audioUrl = response.metadata?.url;
   if (!audioUrl) {
     // No audio file available, send non-streaming response
@@ -202,6 +207,7 @@ async function streamAudio(ws, response, conversationId, wsLog, messageId) {
       messageId,
       responseType: "audio",
       metadata: response.metadata,
+      ...(version !== undefined ? { version } : {}),
     });
     return;
   }
@@ -248,6 +254,7 @@ async function streamAudio(ws, response, conversationId, wsLog, messageId) {
         content: i === 0 ? response.content : "",
         done: isLast,
         ...(isLast ? { messageId } : {}),
+        ...(version !== undefined ? { version } : {}),
         responseType: "audio",
         metadata: {
           chunk: i,
@@ -281,6 +288,7 @@ async function streamAudio(ws, response, conversationId, wsLog, messageId) {
       messageId,
       responseType: "audio",
       metadata: response.metadata,
+      ...(version !== undefined ? { version } : {}),
     });
   }
 }
@@ -339,7 +347,23 @@ function setupWebSocket(wss) {
           // Known from here on, so a throw anywhere later in the turn still
           // reports which conversation it belonged to.
           conversationId = frame.conversationId;
-          const { content, messageType, settings, attachments } = frame;
+          const { content, messageType, settings, attachments, expectedVersion } = frame;
+
+          // Check optimistic concurrency / version conflict if conversation exists and expectedVersion was provided (#438)
+          if (conversationId && conversations.has(conversationId)) {
+            const existingConv = conversations.get(conversationId);
+            if (expectedVersion !== undefined && (existingConv.version || 1) !== expectedVersion) {
+              safeSend(ws, {
+                type: "error",
+                conversationId,
+                code: "VERSION_CONFLICT",
+                currentVersion: existingConv.version || 1,
+                expectedVersion,
+                message: "Conversation version mismatch",
+              });
+              return;
+            }
+          }
 
           // Shares buckets with the REST generation routes, so the limit
           // cannot be sidestepped by switching transport.
@@ -405,12 +429,16 @@ function setupWebSocket(wss) {
             conversations.append(conversationId, userMessage);
           }
 
+          const currentConv = conversationId ? conversations.get(conversationId) : null;
+          const currentVersion = currentConv ? currentConv.version : 1;
+
           // Send acknowledgment
           safeSend(ws, {
             type: "ack",
             messageId: userMessageId,
             assistantMessageId,
             conversationId,
+            version: currentVersion,
           });
 
           // Send typing indicator
@@ -461,6 +489,7 @@ function setupWebSocket(wss) {
                 content: accumulated,
                 done: false,
                 responseType: "text",
+                version: currentVersion,
               });
             }
           };
@@ -500,6 +529,7 @@ function setupWebSocket(wss) {
             },
             { replyToId: userMessageId }
           );
+          const finalVersion = currentConv ? currentConv.version : currentVersion + 1;
 
           // Privacy: validate and strip trace from response if not allowed (defense in depth)
           if (response.metadata?.trace) {
@@ -513,7 +543,7 @@ function setupWebSocket(wss) {
 
           // Special handling for audio: stream PCM chunks
           if (response.type === "audio") {
-            await streamAudio(ws, response, conversationId, wsLog, assistantMessageId);
+            await streamAudio(ws, response, conversationId, wsLog, assistantMessageId, finalVersion);
             return;
           }
 
@@ -526,6 +556,7 @@ function setupWebSocket(wss) {
               messageId: assistantMessageId,
               responseType: response.type,
               metadata: response.metadata,
+              version: finalVersion,
             });
           } else {
             // Fallback: simulated streaming for mock mode or non-streamed worker responses
@@ -554,6 +585,7 @@ function setupWebSocket(wss) {
                 messageId: assistantMessageId,
                 responseType: response.type,
                 metadata: isDone ? response.metadata : undefined,
+                version: isDone ? finalVersion : currentVersion,
               });
 
               if (!sent || isDone) break;
