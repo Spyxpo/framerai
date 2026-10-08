@@ -22,6 +22,7 @@ extras, exactly like ``opencv-python`` and ``sounddevice`` in the cognition
 layer: the module imports and its pure functions run without either.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 # Markers written between pages. These live in the tokenizer's fixed-capacity
@@ -45,6 +46,25 @@ COLUMN_GAP_RATIO = 0.045
 
 # Fraction of the median line height within which two spans are the same line.
 LINE_TOLERANCE_RATIO = 0.6
+
+# Touching ``reader.pages`` at all makes pypdf flatten the whole ``/Pages``
+# tree to learn the page count, before `max_pages` below ever runs - so a
+# request for 3 pages of a file whose tree has 100,000 entries paid for all
+# 100,000 regardless (Issue #443). Pypdf's own page_tree_maximum_entries
+# configuration is what that flatten is bounded by, default 100,000; read_pdf
+# lowers it for its own call, so the flatten - and an attacker's cost per
+# request - stays well short of that.
+#
+# This is deliberately a flat ceiling, not scaled to the caller's own
+# max_pages: a request for 3 pages of a genuine 500-page report still has to
+# flatten all 500 entries first, the same as a request for every page of it
+# does, so scaling down with max_pages would reject that legitimate document
+# (confirmed - it does, with a naive max_pages-scaled bound). Ten times
+# MAX_DOCUMENT_PAGES/MAX_ATTACHMENT_PAGES - the largest page count either
+# caller's own request validation ever allows - comfortably covers any
+# document either would legitimately reference, however many of its pages are
+# actually requested, while remaining a fifth of pypdf's own default.
+PAGE_TREE_ENTRY_LIMIT = 20_000
 
 
 class DocumentError(RuntimeError):
@@ -287,6 +307,16 @@ def _page_overhead(number: int) -> int:
     return len(PAGE_TOKEN) + len(str(number)) + 2
 
 
+def _page_tree_limit(pypdf_default: int) -> int:
+    """How many ``/Pages`` tree entries a read_pdf call lets pypdf flatten.
+
+    Never above pypdf's own current default (whatever that is, e.g. in a test
+    that has already lowered it), and never above PAGE_TREE_ENTRY_LIMIT - a
+    caller cannot raise it by deploying a newer pypdf with a larger one.
+    """
+    return min(PAGE_TREE_ENTRY_LIMIT, pypdf_default)
+
+
 def read_pdf(
     path: str, max_pages: int | None = None, max_chars: int | None = None
 ) -> Document:
@@ -301,6 +331,13 @@ def read_pdf(
     is not free. The page that crosses the line is cut to fit and no page after
     it is opened, so what a limit saves is the work of reading what it leaves
     out. Either way ``Document.truncated`` records that the file held more.
+
+    Reading also stops short, before either limit above ever runs, when the
+    file's page *tree* itself is larger than ``PAGE_TREE_ENTRY_LIMIT`` (Issue
+    #443): touching ``reader.pages`` at all, even for page 0, makes pypdf
+    flatten the whole tree first, so a request for a handful of pages used to
+    still pay for a file's entire declared page count. That raises
+    :class:`DocumentError`, the same as any other unreadable file.
     """
     reader_cls = _load_pdf_reader()
     try:
@@ -317,31 +354,60 @@ def read_pdf(
 
     document = Document(path=path, title=title)
     room = max_chars
-    for index, page in enumerate(reader.pages):
-        if (max_pages is not None and index >= max_pages) or (room is not None and room <= 0):
-            document.truncated = True
-            break
-        try:
-            box = page.mediabox
-            width, height = float(box.width), float(box.height)
-        except Exception:  # noqa: BLE001 - fall back to a common page size
-            width, height = 612.0, 792.0
 
-        spans = _page_spans(page)
-        if spans:
-            text = spans_to_text(spans, width)
-        else:
-            try:
-                text = page.extract_text() or ""
-            except Exception:  # noqa: BLE001 - a damaged page yields no text
-                text = ""
-        text = text.strip()
-        if room is not None:
-            room -= _page_overhead(index + 1)
-            if len(text) > max(room, 0):
-                text, document.truncated = text[: max(room, 0)], True
-            room -= len(text)
-        document.pages.append(Page(number=index + 1, text=text, width=width, height=height))
+    # Scopes pypdf's own page-tree-walk ceiling down (see PAGE_TREE_ENTRY_LIMIT
+    # above), and converts pypdf's own resource/parse errors into
+    # DocumentError, same as a file that fails to open at all, above. Real
+    # production use always has pypdf importable here - _load_pdf_reader()
+    # above only succeeds once it already is - but a test that replaces
+    # _load_pdf_reader() with a stub reader never needs it to be, so this
+    # stays as optional as the rest of this module when it genuinely is not.
+    # The configuration API itself only exists from pypdf 6.18; an older pypdf
+    # keeps its own built-in ceiling and still gets the error conversion below.
+    try:
+        import pypdf as _pypdf
+    except ImportError:
+        _pypdf = None
+
+    page_tree_scope = nullcontext()
+    resource_errors = ()
+    if _pypdf is not None:
+        resource_errors = _pypdf.errors.PyPdfError
+        if hasattr(_pypdf, "apply_configuration") and hasattr(_pypdf, "get_configuration"):
+            page_tree_limit = _page_tree_limit(_pypdf.get_configuration().page_tree_maximum_entries)
+            page_tree_scope = _pypdf.apply_configuration(page_tree_maximum_entries=page_tree_limit)
+
+    try:
+        with page_tree_scope:
+            for index, page in enumerate(reader.pages):
+                if (max_pages is not None and index >= max_pages) or (room is not None and room <= 0):
+                    document.truncated = True
+                    break
+                try:
+                    box = page.mediabox
+                    width, height = float(box.width), float(box.height)
+                except Exception:  # noqa: BLE001 - fall back to a common page size
+                    width, height = 612.0, 792.0
+
+                spans = _page_spans(page)
+                if spans:
+                    text = spans_to_text(spans, width)
+                else:
+                    try:
+                        text = page.extract_text() or ""
+                    except Exception:  # noqa: BLE001 - a damaged page yields no text
+                        text = ""
+                text = text.strip()
+                if room is not None:
+                    room -= _page_overhead(index + 1)
+                    if len(text) > max(room, 0):
+                        text, document.truncated = text[: max(room, 0)], True
+                    room -= len(text)
+                document.pages.append(Page(number=index + 1, text=text, width=width, height=height))
+    except resource_errors as exc:
+        # LimitReachedError (the tree is bigger than page_tree_limit allows) and
+        # any other resource/parse error pypdf itself raises while walking it.
+        raise DocumentError(f"'{path}' could not be read: {exc}") from exc
     return document
 
 

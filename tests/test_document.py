@@ -17,10 +17,12 @@ from model.document import (
     DOC_END_TOKEN,
     DOC_TOKEN,
     PAGE_TOKEN,
+    PAGE_TREE_ENTRY_LIMIT,
     Document,
     DocumentError,
     Page,
     TextSpan,
+    _page_tree_limit,
     available_raster_backends,
     detect_columns,
     needs_raster,
@@ -469,3 +471,130 @@ def test_the_page_ceiling_is_shared_across_a_requests_documents(monkeypatch):
     assert f"{PAGE_TOKEN}3" in documents[0] and f"{PAGE_TOKEN}4" not in documents[0]
     assert "truncated" in documents[0]
     assert "skipped" in documents[1]
+
+
+# ---------------------------------------------------------------------------
+# Issue #443: touching ``reader.pages`` at all makes pypdf flatten the whole
+# page tree before max_pages ever runs, so a request for a handful of pages
+# used to cost the same as a file's entire declared page count regardless.
+# Every test below needs pypdf's own page-tree flattening, which the stub
+# reader above cannot exercise, so each calls pytest.importorskip for itself
+# rather than at module level - these are the only tests in this file that
+# are not optional the way the rest of the module is, and the existing tests
+# above must keep running without pypdf installed, exactly as before.
+# ---------------------------------------------------------------------------
+
+def _real_pdf(tmp_path, pages, name="real.pdf"):
+    """A real PDF with this many real pages, built fast - never a bomb-sized fixture."""
+    pypdf = pytest.importorskip("pypdf")
+    writer = pypdf.PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=72, height=72)
+    path = tmp_path / name
+    with open(path, "wb") as handle:
+        writer.write(handle)
+    return str(path)
+
+
+def test_443_the_page_tree_limit_never_exceeds_the_flat_ceiling():
+    assert _page_tree_limit(100_000) == PAGE_TREE_ENTRY_LIMIT
+    assert _page_tree_limit(1_000_000) == PAGE_TREE_ENTRY_LIMIT, "a larger pypdf default must not raise it"
+    assert _page_tree_limit(5) == 5, "a lower current default (e.g. one a test has scoped down) is kept"
+
+
+def test_443_a_page_tree_bigger_than_the_limit_is_a_document_error(tmp_path):
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
+    path = _real_pdf(tmp_path, pages=10)
+
+    # Scopes pypdf's own default down to 5 entries for this call only, so a
+    # real but tiny (10-page) file stands in for a bomb-sized one -
+    # deterministic and fast, rather than actually building and reading a
+    # file with more than PAGE_TREE_ENTRY_LIMIT real pages.
+    with pypdf.apply_configuration(page_tree_maximum_entries=5):
+        with pytest.raises(DocumentError, match="could not be read"):
+            read_pdf(path, max_pages=3, max_chars=500)
+
+
+def test_443_the_page_tree_limit_does_not_leak_into_the_next_read(tmp_path):
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
+    path = _real_pdf(tmp_path, pages=10)
+
+    with pypdf.apply_configuration(page_tree_maximum_entries=5):
+        with pytest.raises(DocumentError):
+            read_pdf(path, max_pages=3)
+
+    # Back outside the scope, the exact same file and request must succeed:
+    # the override above must not have changed anything beyond its own call.
+    assert pypdf.get_configuration().page_tree_maximum_entries != 5
+    doc = read_pdf(path, max_pages=3, max_chars=500)
+    assert len(doc.pages) == 3
+    assert doc.truncated
+
+
+def test_443_a_legitimately_large_document_is_not_rejected_for_a_small_max_pages(tmp_path):
+    # Unlike the bomb-sized files Issue #443 is about, a genuine report or
+    # book can run to hundreds of pages, and asking for just its first few
+    # must still work. (The first fix attempted here scaled the tree limit
+    # down with max_pages itself, and that rejected exactly this case - see
+    # PAGE_TREE_ENTRY_LIMIT's own comment for why it is a flat ceiling instead.)
+    path = _real_pdf(tmp_path, pages=500)
+    doc = read_pdf(path, max_pages=3, max_chars=500)
+    assert len(doc.pages) == 3
+    assert doc.truncated
+
+
+def test_443_max_pages_still_truncates_a_real_pdf_correctly(tmp_path):
+    path = _real_pdf(tmp_path, pages=5)
+    doc = read_pdf(path, max_pages=2)
+    assert len(doc.pages) == 2
+    assert doc.truncated
+
+
+def test_443_a_real_pdf_within_every_limit_is_read_whole(tmp_path):
+    path = _real_pdf(tmp_path, pages=5)
+
+    doc = read_pdf(path, max_pages=2000, max_chars=None)
+    assert len(doc.pages) == 5
+    assert not doc.truncated
+
+    doc_no_limits = read_pdf(path)
+    assert len(doc_no_limits.pages) == 5
+    assert not doc_no_limits.truncated
+
+
+def test_443_read_document_reports_an_oversized_page_tree_the_same_way(tmp_path):
+    # /api/generate/document's own op handler (model/serve.py) calls
+    # read_document, not read_pdf directly - confirm the DocumentError survives
+    # that one extra layer of dispatch, unchanged from how it already handled
+    # a file that fails to open at all.
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
+    path = _real_pdf(tmp_path, pages=10)
+
+    with pypdf.apply_configuration(page_tree_maximum_entries=5):
+        with pytest.raises(DocumentError, match="could not be read"):
+            read_document(path, max_pages=3)
+
+
+def test_443_an_oversized_attachment_does_not_lose_the_rest_of_the_turn(tmp_path):
+    # Mirrors test_an_unreadable_attachment_does_not_lose_the_turn above, for
+    # Issue #443's own failure mode: a page-tree-oversized PDF attachment must
+    # degrade to a note, not raise out of _read_attachments and fail the whole
+    # chat turn, and a good attachment listed after it must still be read.
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
+    from model.serve import _read_attachments
+
+    bad = _real_pdf(tmp_path, pages=10, name="bad.pdf")
+    good = tmp_path / "good.txt"
+    good.write_text("readable")
+
+    with pypdf.apply_configuration(page_tree_maximum_entries=5):
+        _, documents = _read_attachments(
+            _StubGen(),
+            [
+                {"kind": "document", "path": bad},
+                {"kind": "document", "path": str(good)},
+            ],
+        )
+    assert len(documents) == 2
+    assert "could not be read" in documents[0]
+    assert "readable" in documents[1]
