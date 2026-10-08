@@ -282,3 +282,153 @@ test("WebSocket: regenerating an assistant response truncates from target and st
   assert.notEqual(conv.messages[1].id, ast1.id);
   assert.equal(conv.messages[1].id, doneFrame.messageId);
 });
+
+// ---------------------------------------------------------------------------
+// 4. Editing a message the server never stored (Issue #447)
+//
+// A send can fail before the server stores it (rate limited, lost with the
+// socket) while the client keeps the message under its own temporary id, with
+// Edit still offered on it. Over REST that id matches nothing and the edited
+// text is stored as a new turn. Over WebSocket the edit branch was entered
+// anyway: nothing was stored, the ack named an id that was never stored, and
+// the model was handed the last stored turn instead of the edit.
+//
+// The stub answers "reply to: <last turn it was given>", and the stored turns
+// below read differently, so the reply says which turn reached the model.
+// ---------------------------------------------------------------------------
+
+const FRANCE = "What is the capital of France?";
+const PARIS = "The capital of France is Paris.";
+const PORTUGAL = "What is the capital of Portugal?";
+
+function seedConversation() {
+  const convId = randomUUID();
+  const user1 = { id: randomUUID(), role: "user", content: FRANCE };
+  const ast1 = { id: randomUUID(), role: "assistant", content: PARIS };
+  store.create({ id: convId, title: "Unknown edit target", messages: [user1, ast1] });
+  return { convId, user1, ast1 };
+}
+
+function sendChat(ws, frame) {
+  const frames = collectFrames(ws, null, (f) => (f.type === "stream" && f.done) || f.type === "error");
+  ws.send(JSON.stringify({ type: "chat", ...frame }));
+  return frames;
+}
+
+test("WebSocket: editing a stored message still rewrites it in place (Issue #447)", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const ws = await connectWebSocket(server.wsUrl);
+  t.after(() => ws.close());
+  const { convId, user1 } = seedConversation();
+
+  const frames = await sendChat(ws, { conversationId: convId, editMessageId: user1.id, content: PORTUGAL });
+
+  const ack = frames.find((f) => f.type === "ack");
+  const done = frames.find((f) => f.type === "stream" && f.done);
+  assert.equal(ack.messageId, user1.id);
+  assert.equal(done.content, `reply to: ${PORTUGAL}`);
+  const stored = store.get(convId).messages;
+  assert.deepEqual(stored.map((m) => [m.role, m.content]), [
+    ["user", PORTUGAL],
+    ["assistant", `reply to: ${PORTUGAL}`],
+  ]);
+  assert.equal(stored[0].id, user1.id);
+  assert.equal(stored[1].id, done.messageId);
+});
+
+test("WebSocket: editing a message the server never stored answers the edit, not the last stored turn (Issue #447)", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const ws = await connectWebSocket(server.wsUrl);
+  t.after(() => ws.close());
+  const { convId, user1, ast1 } = seedConversation();
+
+  const frames = await sendChat(ws, { conversationId: convId, editMessageId: randomUUID(), content: PORTUGAL });
+
+  const done = frames.find((f) => f.type === "stream" && f.done);
+  assert.ok(done, `expected a reply, got ${JSON.stringify(frames)}`);
+  assert.equal(done.content, `reply to: ${PORTUGAL}`, "the edit reached the model, not the stored assistant turn");
+
+  const stored = store.get(convId).messages;
+  assert.deepEqual(stored.map((m) => [m.role, m.content]), [
+    ["user", FRANCE],
+    ["assistant", PARIS],
+    ["user", PORTUGAL],
+    ["assistant", `reply to: ${PORTUGAL}`],
+  ]);
+  assert.equal(stored[0].id, user1.id, "the stored turns are left as they were");
+  assert.equal(stored[1].id, ast1.id);
+  assert.equal(stored[3].id, done.messageId);
+});
+
+test("WebSocket: the ack for an unknown edit target names the stored message, which can then be branched and edited (Issue #447)", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const ws = await connectWebSocket(server.wsUrl);
+  t.after(() => ws.close());
+  const { convId } = seedConversation();
+  const clientOnlyId = randomUUID();
+
+  const frames = await sendChat(ws, { conversationId: convId, editMessageId: clientOnlyId, content: PORTUGAL });
+
+  const ack = frames.find((f) => f.type === "ack");
+  assert.notEqual(ack.messageId, clientOnlyId, "an id the server never stored is not adopted");
+  const stored = store.get(convId).messages;
+  const named = stored.filter((m) => m.id === ack.messageId);
+  assert.equal(named.length, 1, "the ack names a message the server stored");
+  assert.equal(named[0].role, "user");
+  assert.equal(named[0].content, PORTUGAL);
+
+  const branch = await request(app).post(`/api/chat/conversations/${convId}/branch`).send({ messageId: ack.messageId });
+  assert.equal(branch.status, 200, JSON.stringify(branch.body));
+
+  // The acknowledged id is a real edit target from now on.
+  const again = await sendChat(ws, { conversationId: convId, editMessageId: ack.messageId, content: "What is the capital of Spain?" });
+  assert.equal(again.find((f) => f.type === "ack").messageId, ack.messageId);
+  assert.deepEqual(store.get(convId).messages.map((m) => m.content), [
+    FRANCE,
+    PARIS,
+    "What is the capital of Spain?",
+    "reply to: What is the capital of Spain?",
+  ]);
+});
+
+test("REST: editing a message the server never stored stores the edit as a new turn (the contract WebSocket now follows)", async () => {
+  const { convId, user1, ast1 } = seedConversation();
+
+  const res = await request(app)
+    .post(`/api/chat/conversations/${convId}/messages`)
+    .send({ editMessageId: randomUUID(), content: PORTUGAL });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.content, `reply to: ${PORTUGAL}`);
+  const stored = store.get(convId).messages;
+  assert.deepEqual(stored.map((m) => [m.role, m.content]), [
+    ["user", FRANCE],
+    ["assistant", PARIS],
+    ["user", PORTUGAL],
+    ["assistant", `reply to: ${PORTUGAL}`],
+  ]);
+  assert.equal(stored[0].id, user1.id);
+  assert.equal(stored[1].id, ast1.id);
+  assert.equal(res.body.userMessageId, stored[2].id);
+});
+
+// Regenerate has its own unknown-target case. It is out of scope here and left
+// as it was; this only checks the change above did not reach it.
+test("WebSocket: an unknown regenerate target still leaves the stored turns alone", async (t) => {
+  const server = await startServer();
+  t.after(() => server.stop());
+  const ws = await connectWebSocket(server.wsUrl);
+  t.after(() => ws.close());
+  const { convId, user1, ast1 } = seedConversation();
+
+  await sendChat(ws, { conversationId: convId, regenerateMessageId: randomUUID(), content: FRANCE });
+
+  const stored = store.get(convId).messages;
+  assert.equal(stored[0].id, user1.id);
+  assert.equal(stored[0].content, FRANCE);
+  assert.equal(stored[1].id, ast1.id);
+  assert.equal(stored[1].content, PARIS);
+});
