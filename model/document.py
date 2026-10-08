@@ -362,18 +362,20 @@ def read_pdf(
     # above only succeeds once it already is - but a test that replaces
     # _load_pdf_reader() with a stub reader never needs it to be, so this
     # stays as optional as the rest of this module when it genuinely is not.
+    # The configuration API itself only exists from pypdf 6.18; an older pypdf
+    # keeps its own built-in ceiling and still gets the error conversion below.
     try:
         import pypdf as _pypdf
     except ImportError:
         _pypdf = None
 
+    page_tree_scope = nullcontext()
+    resource_errors = ()
     if _pypdf is not None:
-        page_tree_limit = _page_tree_limit(_pypdf.get_configuration().page_tree_maximum_entries)
-        page_tree_scope = _pypdf.apply_configuration(page_tree_maximum_entries=page_tree_limit)
         resource_errors = _pypdf.errors.PyPdfError
-    else:
-        page_tree_scope = nullcontext()
-        resource_errors = ()
+        if hasattr(_pypdf, "apply_configuration") and hasattr(_pypdf, "get_configuration"):
+            page_tree_limit = _page_tree_limit(_pypdf.get_configuration().page_tree_maximum_entries)
+            page_tree_scope = _pypdf.apply_configuration(page_tree_maximum_entries=page_tree_limit)
 
     try:
         with page_tree_scope:

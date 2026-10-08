@@ -503,7 +503,7 @@ def test_443_the_page_tree_limit_never_exceeds_the_flat_ceiling():
 
 
 def test_443_a_page_tree_bigger_than_the_limit_is_a_document_error(tmp_path):
-    pypdf = pytest.importorskip("pypdf")
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
     path = _real_pdf(tmp_path, pages=10)
 
     # Scopes pypdf's own default down to 5 entries for this call only, so a
@@ -516,7 +516,7 @@ def test_443_a_page_tree_bigger_than_the_limit_is_a_document_error(tmp_path):
 
 
 def test_443_the_page_tree_limit_does_not_leak_into_the_next_read(tmp_path):
-    pypdf = pytest.importorskip("pypdf")
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
     path = _real_pdf(tmp_path, pages=10)
 
     with pypdf.apply_configuration(page_tree_maximum_entries=5):
@@ -567,7 +567,7 @@ def test_443_read_document_reports_an_oversized_page_tree_the_same_way(tmp_path)
     # read_document, not read_pdf directly - confirm the DocumentError survives
     # that one extra layer of dispatch, unchanged from how it already handled
     # a file that fails to open at all.
-    pypdf = pytest.importorskip("pypdf")
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
     path = _real_pdf(tmp_path, pages=10)
 
     with pypdf.apply_configuration(page_tree_maximum_entries=5):
@@ -580,7 +580,7 @@ def test_443_an_oversized_attachment_does_not_lose_the_rest_of_the_turn(tmp_path
     # Issue #443's own failure mode: a page-tree-oversized PDF attachment must
     # degrade to a note, not raise out of _read_attachments and fail the whole
     # chat turn, and a good attachment listed after it must still be read.
-    pypdf = pytest.importorskip("pypdf")
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
     from model.serve import _read_attachments
 
     bad = _real_pdf(tmp_path, pages=10, name="bad.pdf")

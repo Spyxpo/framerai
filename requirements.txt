@@ -11,7 +11,7 @@ soundfile>=0.14.0
 #   onnx / onnxruntime - ONNX export & runtime validation (build.py --mode export)
 #   flash-attn   - faster attention on supported CUDA GPUs (SDPA already uses
 #                  flash/mem-efficient kernels where available without it)
-#   pypdf        - PDF text-layer extraction for model/document (read_document
+#   pypdf>=6.18  - PDF text-layer extraction for model/document (read_document
 #                  raises a DocumentError naming it when a PDF is opened without
 #                  it; page rasterisation stays a pluggable backend so no
 #                  copyleft renderer becomes a dependency)
