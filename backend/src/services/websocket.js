@@ -363,21 +363,22 @@ function setupWebSocket(wss) {
           let userMessageId = randomUUID();
           const assistantMessageId = randomUUID();
 
-          if (frame.editMessageId && conversationId && conversations.has(conversationId)) {
-            const conv = conversations.get(conversationId);
-            const editIdx = conv.messages ? conv.messages.findIndex((m) => m.id === frame.editMessageId) : -1;
-            if (editIdx !== -1) {
-              userMessageId = frame.editMessageId;
-              conv.messages[editIdx] = {
-                ...conv.messages[editIdx],
-                content,
-                type: messageType,
-                attachments,
-                timestamp: new Date().toISOString(),
-              };
-              conversations.truncateAfter(conversationId, frame.editMessageId);
-            }
-          } else if (frame.regenerateMessageId && conversationId && conversations.has(conversationId)) {
+          // An edit of a message the server never stored has nothing to rewrite, so the
+          // edited text is stored as a new turn below, as it is over REST (Issue #447).
+          const editConv = frame.editMessageId && conversationId ? conversations.get(conversationId) : null;
+          const editIdx = editConv?.messages ? editConv.messages.findIndex((m) => m.id === frame.editMessageId) : -1;
+
+          if (editIdx !== -1) {
+            userMessageId = frame.editMessageId;
+            editConv.messages[editIdx] = {
+              ...editConv.messages[editIdx],
+              content,
+              type: messageType,
+              attachments,
+              timestamp: new Date().toISOString(),
+            };
+            conversations.truncateAfter(conversationId, frame.editMessageId);
+          } else if (!frame.editMessageId && frame.regenerateMessageId && conversationId && conversations.has(conversationId)) {
             const conv = conversations.get(conversationId);
             const regenIdx = conv.messages ? conv.messages.findIndex((m) => m.id === frame.regenerateMessageId) : -1;
             if (regenIdx !== -1) {
