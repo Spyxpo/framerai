@@ -275,6 +275,8 @@ function clear() {
   conversations.clear();
 }
 
+const conversationSync = require("./conversationSync");
+
 /**
  * Truncate all messages in a conversation strictly after the specified message ID.
  */
@@ -284,7 +286,15 @@ function truncateAfter(id, messageId) {
   _touch(conv);
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
-  conv.messages.splice(idx + 1);
+  const removed = conv.messages.splice(idx + 1);
+  if (removed.length > 0) {
+    if (!Array.isArray(conv.deletedMessageIds)) conv.deletedMessageIds = [];
+    for (const m of removed) {
+      if (m?.id && !conv.deletedMessageIds.includes(m.id)) {
+        conv.deletedMessageIds.push(m.id);
+      }
+    }
+  }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
   return true;
@@ -299,10 +309,82 @@ function truncateFrom(id, messageId) {
   _touch(conv);
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
-  conv.messages.splice(idx);
+  const removed = conv.messages.splice(idx);
+  if (removed.length > 0) {
+    if (!Array.isArray(conv.deletedMessageIds)) conv.deletedMessageIds = [];
+    for (const m of removed) {
+      if (m?.id && !conv.deletedMessageIds.includes(m.id)) {
+        conv.deletedMessageIds.push(m.id);
+      }
+    }
+  }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
   return true;
+}
+
+/**
+ * Delete a specific message from a conversation and track its deletion.
+ */
+function deleteMessage(id, messageId) {
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  _touch(conv);
+  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return false;
+  conv.messages.splice(idx, 1);
+  if (!Array.isArray(conv.deletedMessageIds)) conv.deletedMessageIds = [];
+  if (!conv.deletedMessageIds.includes(messageId)) {
+    conv.deletedMessageIds.push(messageId);
+  }
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
+  return true;
+}
+
+/**
+ * Perform differential synchronization and conflict resolution against stored conversation.
+ */
+function sync(id, clientState = {}, options = {}) {
+  const conv = conversations.get(id);
+  if (!conv) return null;
+  _touch(conv);
+
+  const { diff, reconciled } = conversationSync.reconcileConversationDiff(clientState, conv, options);
+
+  if (diff.hasDifferences) {
+    conv.messages = reconciled.messages;
+    if (conv.messages.length > _maxMessages) {
+      conv.messages.splice(0, conv.messages.length - _maxMessages);
+    }
+    conv.title = reconciled.title;
+    if (reconciled.titleUpdatedAt) {
+      conv.titleUpdatedAt = reconciled.titleUpdatedAt;
+    }
+    conv.version = reconciled.version;
+    conv.updatedAt = new Date().toISOString();
+    if (Array.isArray(reconciled.deletedMessageIds)) {
+      conv.deletedMessageIds = reconciled.deletedMessageIds;
+    }
+  }
+
+  let responseStatus = "synchronized";
+  if (!diff.hasDifferences) {
+    responseStatus = "up_to_date";
+  } else if (diff.status === "server_ahead") {
+    responseStatus = "server_ahead";
+  } else if (diff.status === "client_ahead") {
+    responseStatus = "client_ahead";
+  }
+
+  return {
+    status: responseStatus,
+    version: conv.version,
+    serverVersion: conv.version,
+    clientVersion: clientState.clientVersion,
+    diff,
+    conversation: conv,
+  };
 }
 
 /**
@@ -335,7 +417,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 
 module.exports = {
   create, get, has, remove, list, messages, append, update, clear,
-  truncateAfter, truncateFrom, updateMessage,
+  truncateAfter, truncateFrom, updateMessage, deleteMessage, sync,
   _map: conversations,
   _evict,
   _resetLimits,

@@ -40,6 +40,11 @@ export const api = {
     }),
   deleteConversation: (id) =>
     request(`/chat/conversations/${id}`, { method: "DELETE" }),
+  syncConversation: (id, syncPayload = {}) =>
+    request(`/chat/conversations/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify(syncPayload),
+    }),
   branchConversation: (conversationId, messageId, expectedVersion) =>
     request(`/chat/conversations/${conversationId}/branch`, {
       method: "POST",
@@ -86,6 +91,10 @@ export const api = {
         settings,
         ...(expectedVersion !== undefined ? { expectedVersion } : {}),
       }),
+    }),
+  deleteMessage: (conversationId, messageId) =>
+    request(`/chat/conversations/${conversationId}/messages/${messageId}`, {
+      method: "DELETE",
     }),
 
   // Generation

@@ -1,42 +1,22 @@
 /**
- * Shared message deduplication and differential reconciliation utilities.
+ * Differential Conversation Synchronization and Conflict Resolution engine.
  *
- * Ensures consistent message deduplication across conversation selection,
- * background sync, message merging, and local storage persistence.
+ * Provides deterministic calculation of differences between client and server
+ * conversation states and resolves conflicts according to authoritative versioning,
+ * monotonic ordering, stable message identity, and deletion tracking.
  */
-
-/**
- * Deduplicates an array of message objects by their message ID, preserving
- * the first occurrence of each unique ID. Messages without an ID are preserved.
- *
- * @param {Array<Object>} messages - Array of message objects
- * @returns {Array<Object>} Deduplicated array of message objects
- */
-export function dedupeMessages(messages) {
-  if (!Array.isArray(messages)) return [];
-  const seen = new Set();
-  return messages.filter((m) => {
-    if (!m?.id) return true;
-    if (seen.has(m.id)) return false;
-    seen.add(m.id);
-    return true;
-  });
-}
 
 /**
  * Checks whether two message objects represent identical content and metadata.
- *
- * @param {Object} a - First message
- * @param {Object} b - Second message
- * @returns {boolean} True if messages are functionally identical
  */
-export function isMessageEqual(a, b) {
+function isMessageEqual(a, b) {
   if (!a || !b) return false;
   if (a.role !== b.role) return false;
   if ((a.content || "") !== (b.content || "")) return false;
   if ((a.type || "text") !== (b.type || "text")) return false;
   if (Boolean(a.completed) !== Boolean(b.completed)) return false;
 
+  // Compare attachments length and content
   const aAtt = Array.isArray(a.attachments) ? a.attachments : [];
   const bAtt = Array.isArray(b.attachments) ? b.attachments : [];
   if (aAtt.length !== bAtt.length) return false;
@@ -44,6 +24,7 @@ export function isMessageEqual(a, b) {
     if (aAtt[i] !== bAtt[i]) return false;
   }
 
+  // Compare metadata keys and values
   const aMeta = a.metadata && typeof a.metadata === "object" ? a.metadata : {};
   const bMeta = b.metadata && typeof b.metadata === "object" ? b.metadata : {};
   const aKeys = Object.keys(aMeta);
@@ -57,182 +38,14 @@ export function isMessageEqual(a, b) {
 }
 
 /**
- * Merges local conversation messages with remote backend messages deterministically.
- *
- * - Preserves any in-flight or newly created local messages that the remote snapshot does not yet contain.
- * - Updates existing messages with remote server timestamps/metadata/content without losing local status.
- * - Retains any remote messages that are new to the local conversation.
- * - Filters out deleted message IDs.
- * - Deduplicates the final message list by message ID.
- *
- * @param {Array<Object>} localMsgs - Current messages in local frontend state
- * @param {Array<Object>} remoteMsgs - Messages returned from remote backend API
- * @param {Object} [options={}] - Options such as deletedMessageIds
- * @returns {Array<Object>} Deterministically merged and deduplicated message list
- */
-export function mergeMessages(localMsgs = [], remoteMsgs = [], options = {}) {
-  const deletedIds = new Set();
-  const addDeleted = (list) => {
-    if (Array.isArray(list) || list instanceof Set) {
-      for (const id of list) {
-        if (id && typeof id === "string") deletedIds.add(id);
-      }
-    }
-  };
-  addDeleted(options?.deletedMessageIds);
-
-  const cleanLocal = Array.isArray(localMsgs)
-    ? localMsgs.filter((m) => m && (!m.id || !deletedIds.has(m.id)) && (!m.clientId || !deletedIds.has(m.clientId)))
-    : [];
-  const cleanRemote = Array.isArray(remoteMsgs)
-    ? remoteMsgs.filter((m) => m && (!m.id || !deletedIds.has(m.id)) && (!m.clientId || !deletedIds.has(m.clientId)))
-    : [];
-
-  if (cleanLocal.length === 0) {
-    return dedupeMessages(cleanRemote);
-  }
-  if (cleanRemote.length === 0) {
-    return dedupeMessages(cleanLocal);
-  }
-
-  const remoteById = new Map();
-  const remoteByClientId = new Map();
-  for (const m of cleanRemote) {
-    if (m?.id) remoteById.set(m.id, m);
-    if (m?.clientId) remoteByClientId.set(m.clientId, m);
-  }
-
-  const localMatchedToRemote = new Map();
-  const remoteMatchedToLocal = new Map();
-  const matchedRemoteSet = new Set();
-
-  // Pass 1: Match by exact ID or clientId
-  for (const local of cleanLocal) {
-    if (!local) continue;
-    let match = null;
-    if (local.id && remoteById.has(local.id)) {
-      match = remoteById.get(local.id);
-    } else if (local.clientId && remoteById.has(local.clientId)) {
-      match = remoteById.get(local.clientId);
-    } else if (local.id && remoteByClientId.has(local.id)) {
-      match = remoteByClientId.get(local.id);
-    }
-    if (match && !matchedRemoteSet.has(match)) {
-      localMatchedToRemote.set(local, match);
-      remoteMatchedToLocal.set(match, local);
-      matchedRemoteSet.add(match);
-    }
-  }
-
-  // Pass 2: Correlate unacknowledged in-flight turns (e.g. disconnected before ack)
-  for (let i = 0; i < cleanLocal.length; i++) {
-    const local = cleanLocal[i];
-    if (!local || localMatchedToRemote.has(local)) continue;
-
-    if (local.role === "user") {
-      const match = cleanRemote.find(
-        (r) => !matchedRemoteSet.has(r) && r.role === "user" && r.content === local.content
-      );
-      if (match) {
-        localMatchedToRemote.set(local, match);
-        remoteMatchedToLocal.set(match, local);
-        matchedRemoteSet.add(match);
-      }
-    } else if (local.role === "assistant" && i > 0) {
-      const prevLocal = cleanLocal[i - 1];
-      const prevRemote = localMatchedToRemote.get(prevLocal);
-      if (prevRemote) {
-        const remoteUserIdx = cleanRemote.indexOf(prevRemote);
-        if (remoteUserIdx !== -1 && remoteUserIdx + 1 < cleanRemote.length) {
-          const nextRemote = cleanRemote[remoteUserIdx + 1];
-          if (nextRemote.role === "assistant" && !matchedRemoteSet.has(nextRemote)) {
-            localMatchedToRemote.set(local, nextRemote);
-            remoteMatchedToLocal.set(nextRemote, local);
-            matchedRemoteSet.add(nextRemote);
-          }
-        }
-      }
-    }
-  }
-
-  const merged = [];
-  const seenIds = new Set();
-
-  // Construct merged array based on remote messages, updated with local details
-  for (const remote of cleanRemote) {
-    if (!remote?.id) {
-      merged.push(remote);
-      continue;
-    }
-    const local = remoteMatchedToLocal.get(remote);
-    if (local) {
-      const isAssistant = remote.role === "assistant";
-      const content =
-        remote.content !== undefined && remote.content !== ""
-          ? remote.content
-          : local.content || "";
-      const type =
-        remote.type && remote.type !== "text"
-          ? remote.type
-          : local.type && local.type !== "error"
-          ? local.type
-          : remote.type || local.type || "text";
-      const completed = isAssistant
-        ? true
-        : remote.completed !== undefined
-        ? remote.completed
-        : local.completed;
-      const clientId =
-        local.clientId || (local.id !== remote.id ? local.id : remote.clientId || remote.id);
-
-      const combined = {
-        ...local,
-        ...remote,
-        id: remote.id,
-        clientId,
-        content,
-        type,
-        ...(completed !== undefined ? { completed } : {}),
-        metadata: { ...(local.metadata || {}), ...(remote.metadata || {}) },
-      };
-      seenIds.add(combined.id);
-      if (combined.clientId) seenIds.add(combined.clientId);
-      merged.push(combined);
-    } else {
-      const isAssistant = remote.role === "assistant";
-      const combined = {
-        ...remote,
-        ...(isAssistant && remote.completed === undefined ? { completed: true } : {}),
-      };
-      seenIds.add(combined.id);
-      merged.push(combined);
-    }
-  }
-
-  // Preserve any local in-flight or newly created messages that have not reached the server yet
-  for (const local of cleanLocal) {
-    if (!local) continue;
-    if (localMatchedToRemote.has(local)) continue;
-    if (local.id && seenIds.has(local.id)) continue;
-    if (local.clientId && seenIds.has(local.clientId)) continue;
-
-    if (local.id) seenIds.add(local.id);
-    if (local.clientId) seenIds.add(local.clientId);
-    merged.push(local);
-  }
-
-  return dedupeMessages(merged);
-}
-
-/**
  * Computes deterministic differences between client and server conversation states.
  *
- * @param {Object} clientConv - Client conversation state
- * @param {Object} serverConv - Server conversation state
- * @param {Object} [options={}] - Sync options
+ * @param {Object} clientConv - Client conversation snapshot or state summary
+ * @param {Object} serverConv - Server conversation snapshot
+ * @param {Object} [options={}] - Additional sync options (e.g. deletedMessageIds)
  * @returns {Object} Structured diff representation
  */
-export function computeConversationDiff(clientConv = {}, serverConv = {}, options = {}) {
+function computeConversationDiff(clientConv = {}, serverConv = {}, options = {}) {
   const clientVersion =
     Number.isInteger(clientConv?.version) && clientConv.version >= 1
       ? clientConv.version
@@ -248,9 +61,14 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
   const clientMessages = Array.isArray(clientConv?.messages) ? clientConv.messages : [];
   const serverMessages = Array.isArray(serverConv?.messages) ? serverConv.messages : [];
 
+  // Assemble all deleted message IDs from client, server, and options
   const deletedIds = new Set();
   const addDeleted = (list) => {
-    if (Array.isArray(list) || list instanceof Set) {
+    if (Array.isArray(list)) {
+      for (const id of list) {
+        if (id && typeof id === "string") deletedIds.add(id);
+      }
+    } else if (list instanceof Set) {
       for (const id of list) {
         if (id && typeof id === "string") deletedIds.add(id);
       }
@@ -260,6 +78,7 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
   addDeleted(serverConv?.deletedMessageIds);
   addDeleted(options?.deletedMessageIds);
 
+  // Map server messages by id and clientId for O(N) lookup
   const serverById = new Map();
   const serverByClientId = new Map();
   for (const s of serverMessages) {
@@ -292,6 +111,7 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
       if (isMessageEqual(c, match)) {
         identicalMessageIds.push(match.id);
       } else {
+        // Resolve conflicting fields deterministically
         const isAssistant = match.role === "assistant" || c.role === "assistant";
         const completed = isAssistant
           ? true
@@ -302,6 +122,8 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
         let content = match.content;
         let type = match.type || c.type || "text";
 
+        // Authoritative resolution: if server is strictly newer, server wins.
+        // If client is newer or has uncommitted edit, preserve client content.
         if (clientVersion > serverVersion && c.content !== undefined && c.content !== "") {
           content = c.content;
           type = c.type || type;
@@ -348,6 +170,7 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
     Number(clientConv?.titleUpdatedAt) || 0
   );
   const incomingTitleUpdatedAt = Number(serverConv?.titleUpdatedAt) || 0;
+
   let resolvedTitle;
   let resolvedTitleUpdatedAt;
   if (effectiveTitleUpdatedAt > incomingTitleUpdatedAt && clientTitle) {
@@ -423,7 +246,7 @@ export function computeConversationDiff(clientConv = {}, serverConv = {}, option
  * @param {Object} [options={}] - Sync options
  * @returns {Object} { diff, reconciled }
  */
-export function reconcileConversationDiff(clientConv = {}, serverConv = {}, options = {}) {
+function reconcileConversationDiff(clientConv = {}, serverConv = {}, options = {}) {
   const diff = computeConversationDiff(clientConv, serverConv, options);
   const deletedIds = new Set(diff.messages.deletedIds);
 
@@ -437,7 +260,7 @@ export function reconcileConversationDiff(clientConv = {}, serverConv = {}, opti
   const seenIds = new Set();
   const seenClientIds = new Set();
 
-  // 1. Process server messages in authoritative order, applying updates
+  // 1. Process server messages in their authoritative order, applying updates
   for (const s of serverMessages) {
     if (!s || deletedIds.has(s.id)) continue;
     const msg = updatedMap.has(s.id) ? updatedMap.get(s.id) : s;
@@ -474,33 +297,21 @@ export function reconcileConversationDiff(clientConv = {}, serverConv = {}, opti
       }
     }
 
+    // Default placement: appended at end maintaining arrival order
     reconciledMessages.push(c);
   }
 
-  const clientVersion =
-    Number.isInteger(clientConv?.version) && clientConv.version >= 1
-      ? clientConv.version
-      : Number.isInteger(clientConv?.clientVersion) && clientConv.clientVersion >= 1
-      ? clientConv.clientVersion
-      : 1;
-
-  const remoteVersion =
-    Number.isInteger(serverConv?.version) && serverConv.version >= 1
-      ? serverConv.version
-      : null;
-
-  // Authoritative server version prevails when reconciling with remote snapshot (#438)
-  const authoritativeVersion = remoteVersion !== null ? remoteVersion : clientVersion;
-
+  // Calculate authoritative synchronized version:
+  // If client contributed new changes accepted by the server, advance version.
+  let resolvedVersion = Math.max(diff.serverVersion, diff.clientVersion);
   const clientMadeChanges =
     diff.messages.clientOnly.length > 0 ||
     (diff.title.changed && diff.title.resolved === diff.title.client) ||
     (Array.isArray(clientConv?.deletedMessageIds) && clientConv.deletedMessageIds.length > 0);
 
-  const resolvedVersion =
-    options?.advanceVersionIfChanged && diff.hasDifferences && clientMadeChanges
-      ? Math.max(diff.serverVersion, diff.clientVersion) + 1
-      : authoritativeVersion;
+  if (diff.hasDifferences && clientMadeChanges) {
+    resolvedVersion = Math.max(diff.serverVersion, diff.clientVersion) + 1;
+  }
 
   const baseConv = serverConv?.id ? serverConv : clientConv;
   const reconciled = {
@@ -508,14 +319,14 @@ export function reconcileConversationDiff(clientConv = {}, serverConv = {}, opti
     ...serverConv,
     id: baseConv?.id || clientConv?.id || serverConv?.id,
     title: diff.title.resolved,
-    ...(diff.title.titleUpdatedAt > 0 ? { titleUpdatedAt: diff.title.titleUpdatedAt } : {}),
-    ...(Number.isInteger(clientConv?.version) || Number.isInteger(serverConv?.version) ? { version: resolvedVersion } : {}),
+    titleUpdatedAt: diff.title.titleUpdatedAt > 0 ? diff.title.titleUpdatedAt : undefined,
+    version: resolvedVersion,
     messages: reconciledMessages,
     ...(diff.branch.parentConversationId ? { parentConversationId: diff.branch.parentConversationId } : {}),
     ...(diff.branch.parentVersion ? { parentVersion: diff.branch.parentVersion } : {}),
     ...(diff.branch.branchedFromMessageId ? { branchedFromMessageId: diff.branch.branchedFromMessageId } : {}),
     ...(deletedIds.size > 0 ? { deletedMessageIds: [...deletedIds] } : {}),
-    updatedAt: serverConv?.updatedAt || clientConv?.updatedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     createdAt: baseConv?.createdAt || new Date().toISOString(),
   };
 
@@ -524,42 +335,16 @@ export function reconcileConversationDiff(clientConv = {}, serverConv = {}, opti
 
 /**
  * Applies a diff to a base conversation.
- *
- * @param {Object} baseConv - Base conversation
- * @param {Object} diff - Computed diff
- * @returns {Object} Reconciled conversation
  */
-export function applyConversationDiff(baseConv, diff) {
+function applyConversationDiff(baseConv, diff) {
   if (!baseConv) return null;
   if (!diff || !diff.hasDifferences) return baseConv;
   return reconcileConversationDiff(diff, baseConv).reconciled;
 }
 
-/**
- * Reconciles an existing local conversation with an incoming remote snapshot.
- * Preserves the newest valid title according to local modification timestamps,
- * deterministically dedupes messages, retains local fields, and resolves versioning.
- *
- * @param {Object} existingConv - Existing local conversation state
- * @param {Object} incomingConv - Incoming conversation snapshot (e.g. from backend API)
- * @param {number} [localTitleUpdatedAt=0] - Monotonic timestamp of local title modification
- * @param {Object} [options={}] - Optional reconciliation configuration
- * @returns {Object} Reconciled conversation object
- */
-export function reconcileConversation(existingConv, incomingConv, localTitleUpdatedAt = 0, options = {}) {
-  if (!existingConv && !incomingConv) return null;
-  if (!existingConv) {
-    return {
-      ...incomingConv,
-      messages: dedupeMessages(incomingConv?.messages),
-    };
-  }
-  if (!incomingConv) return existingConv;
-
-  const { reconciled } = reconcileConversationDiff(existingConv, incomingConv, {
-    localTitleUpdatedAt,
-    ...options,
-  });
-
-  return reconciled;
-}
+module.exports = {
+  isMessageEqual,
+  computeConversationDiff,
+  reconcileConversationDiff,
+  applyConversationDiff,
+};

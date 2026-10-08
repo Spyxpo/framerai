@@ -142,6 +142,54 @@ router.post("/conversations/:id/branch", (req, res) => {
   res.json(branchConv);
 });
 
+// Differential conversation synchronization and conflict resolution
+router.post("/conversations/:id/sync", (req, res) => {
+  const id = conversationId(req);
+  getConversation(id);
+
+  const v = validator(req.body);
+  const title = v.string("title", { min: 1, max: 200, optional: true });
+  v.done();
+
+  const clientVersion =
+    req.body.clientVersion !== undefined && req.body.clientVersion !== null
+      ? Number(req.body.clientVersion)
+      : undefined;
+  const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
+  const deletedMessageIds = Array.isArray(req.body.deletedMessageIds) ? req.body.deletedMessageIds : [];
+  const titleUpdatedAt =
+    req.body.titleUpdatedAt !== undefined && req.body.titleUpdatedAt !== null
+      ? Number(req.body.titleUpdatedAt)
+      : undefined;
+
+  const syncResult = conversations.sync(id, {
+    clientVersion,
+    messages,
+    deletedMessageIds,
+    title,
+    titleUpdatedAt,
+  });
+
+  res.json(syncResult);
+});
+
+// Delete message from conversation
+router.delete("/conversations/:id/messages/:messageId", (req, res) => {
+  const id = conversationId(req);
+  getConversation(id);
+
+  const v = validator(req.params);
+  const messageId = v.uuid("messageId");
+  v.done();
+
+  const success = conversations.deleteMessage(id, messageId);
+  if (!success) {
+    throw ApiError.notFound("Message not found in conversation");
+  }
+  const conv = conversations.get(id);
+  res.json({ success: true, version: conv.version, messageId });
+});
+
 // Delete conversation
 router.delete("/conversations/:id", (req, res) => {
   conversations.remove(conversationId(req));
