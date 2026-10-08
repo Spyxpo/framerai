@@ -66,6 +66,34 @@ LINE_TOLERANCE_RATIO = 0.6
 # actually requested, while remaining a fifth of pypdf's own default.
 PAGE_TREE_ENTRY_LIMIT = 20_000
 
+# Reading a page means parsing its content streams, which costs one to two
+# seconds per decoded megabyte whatever they hold (pypdf 6.19, measured for lines
+# of text, kerned text, numbers and bare operators alike), and no limit above
+# bounds it (Issue #451): max_pages counts pages, max_chars counts text only once
+# a page has been parsed, PAGE_TREE_ENTRY_LIMIT bounds the tree, and pypdf itself
+# decodes up to 75 MB per stream. Content compresses about a thousandfold, pages
+# may share one stream, a /Contents array may repeat one, and a form XObject is
+# parsed again at every invocation, so a 14 KB file kept a worker parsing until
+# its request timed out.
+#
+# read_pdf therefore measures each content stream before pypdf parses it and
+# charges the decoded size to two budgets. A page that needs more than
+# PAGE_CONTENT_LIMIT is left empty, as a damaged page is; once
+# DOCUMENT_CONTENT_LIMIT is spent no further page is opened, as with max_chars.
+# Either way Document.truncated says so. Text costs as much to parse as an attack
+# does, so these bound worker time rather than detect malice: at most about 5 s
+# for one page and 20 s for a document, while a page of ordinary text is a few
+# tens of kilobytes of content, so documents of a few hundred pages read whole.
+PAGE_CONTENT_LIMIT = 2 * 1024 * 1024
+DOCUMENT_CONTENT_LIMIT = 8 * 1024 * 1024
+
+# The decoders a content stream may use whose output pypdf can cap.
+_CONTENT_DECODER_CAPS = (
+    "zlib_maximum_output_length",
+    "lzw_maximum_output_length",
+    "run_length_maximum_output_length",
+)
+
 
 class DocumentError(RuntimeError):
     """A document could not be read, with the reason a caller can act on."""
@@ -277,9 +305,143 @@ def _load_pdf_reader():
     return PdfReader
 
 
-def _page_spans(page) -> list[TextSpan]:
-    """Collect positioned text spans from one page via the extraction visitor."""
+class _ContentLimitReached(Exception):
+    """A content budget ran out while a page was being read (Issue #451)."""
+
+
+def _decode_cap(pypdf_module, cap: int):
+    """Scope pypdf's content decoders to stop after ``cap`` bytes of output.
+
+    Never above a cap already in force; pypdf reads 0 as no cap at all. Without
+    pypdf's configuration API (before 6.18) its own built-in caps stay.
+    """
+    if pypdf_module is None or not hasattr(pypdf_module, "apply_configuration"):
+        return nullcontext()
+    current = pypdf_module.get_configuration()
+    caps = {}
+    for name in _CONTENT_DECODER_CAPS:
+        value = getattr(current, name, None)
+        if isinstance(value, int):
+            caps[name] = cap if value <= 0 else min(value, cap)
+    return pypdf_module.apply_configuration(**caps) if caps else nullcontext()
+
+
+def _decoded_length(stream, limit: int, pypdf_module) -> int | None:
+    """Decoded size of a content stream, or None when it is larger than ``limit``.
+
+    Decoding stops one byte past the limit, so measuring a bomb never decodes it.
+    A stream that fits stays decoded in pypdf's cache for the parse that follows.
+    """
+    get_data = getattr(stream, "get_data", None)
+    if get_data is None:
+        return 0
+    limit_error = getattr(getattr(pypdf_module, "errors", None), "LimitReachedError", ())
+    try:
+        with _decode_cap(pypdf_module, limit + 1):
+            data = get_data()
+    except limit_error:
+        return None
+    except Exception:  # noqa: BLE001 - a damaged stream fails again when parsed, as before
+        return 0
+    return len(data) if len(data) <= limit else None
+
+
+class _ContentBudget:
+    """Decoded content a read_pdf call may still hand pypdf to parse (Issue #451)."""
+
+    def __init__(self, pypdf_module):
+        self._pypdf = pypdf_module
+        self.document_left = DOCUMENT_CONTENT_LIMIT
+        self.page_left = PAGE_CONTENT_LIMIT
+        # "page" or "document" once a limit has stopped reading.
+        self.reached = None
+
+    def start_page(self) -> None:
+        self.page_left = PAGE_CONTENT_LIMIT
+        if self.reached == "page":
+            self.reached = None
+
+    def check(self) -> None:
+        if self.reached:
+            raise _ContentLimitReached
+
+    def charge(self, stream) -> None:
+        """Charge one stream about to be parsed, or raise when it does not fit.
+
+        A stream too large to fit costs all the room that was left, so a run of
+        oversized pages spends the document budget too.
+        """
+        self.check()
+        room = min(self.page_left, self.document_left)
+        size = _decoded_length(stream, room, self._pypdf)
+        used = room if size is None else size
+        self.page_left -= used
+        self.document_left -= used
+        if size is None:
+            self.reached = "document" if self.document_left <= 0 else "page"
+            raise _ContentLimitReached
+
+
+def _resolved(obj, key):
+    """``obj[key]`` resolved, or None when absent or ``obj`` is not a pypdf dictionary."""
+    try:
+        value = obj[key]
+    except Exception:  # noqa: BLE001 - absent, malformed, or no dictionary at all
+        return None
+    return value.get_object() if hasattr(value, "get_object") else value
+
+
+def _page_content_streams(page):
+    """The streams of a page's own ``/Contents``: one stream, or each in an array."""
+    contents = _resolved(page, "/Contents")
+    if contents is None:
+        return
+    if hasattr(contents, "get_data"):
+        yield contents
+        return
+    try:
+        items = iter(contents)
+    except TypeError:
+        return
+    for item in items:
+        yield item.get_object() if hasattr(item, "get_object") else item
+
+
+def _page_resources(page):
+    """A page's ``/Resources``, inherited from the page tree as pypdf reads them."""
+    get_inherited = getattr(page, "get_inherited", None)
+    if get_inherited is None:
+        return _resolved(page, "/Resources")
+    try:
+        resources = get_inherited("/Resources", None)
+    except Exception:  # noqa: BLE001 - malformed resources hold no forms
+        return None
+    return resources.get_object() if hasattr(resources, "get_object") else resources
+
+
+def _form_xobject(resources, operands):
+    """The stream a ``Do`` makes pypdf parse, or None for an image or an unknown name."""
+    if not operands or resources is None:
+        return None
+    xobjects = _resolved(resources, "/XObject")
+    form = _resolved(xobjects, operands[0]) if xobjects is not None else None
+    if form is None or not hasattr(form, "get_data") or _resolved(form, "/Subtype") == "/Image":
+        return None
+    return form
+
+
+def _page_text(page, budget: _ContentBudget) -> tuple[list[TextSpan], str]:
+    """Positioned spans and plain text of one page, from one extraction pass.
+
+    The plain text is what pypdf returns from that same pass, so a page without
+    positioned spans is not parsed a second time to get it. Each form XObject a
+    ``Do`` is about to parse is charged to ``budget`` first, at every invocation.
+    pypdf swallows errors raised inside a form, so a spent budget raises again at
+    the next operator until extraction has unwound. What was read before then is
+    kept, the way a page cut by max_chars keeps what fits.
+    """
     spans: list[TextSpan] = []
+    resources = [_page_resources(page)]
 
     def visitor(text, cm, tm, font_dict, font_size):
         if not text or not text.strip():
@@ -291,11 +453,27 @@ def _page_spans(page) -> list[TextSpan]:
         size = float(font_size or 0.0)
         spans.append(TextSpan(text=text, x=x, y=y, size=size))
 
+    def before(operator, operands, cm, tm):
+        budget.check()
+        if operator == b"Do":
+            form = _form_xobject(resources[-1], operands)
+            if form is not None:
+                budget.charge(form)
+            resources.append(_resolved(form, "/Resources") if form is not None else None)
+
+    def after(operator, operands, cm, tm):
+        if operator == b"Do" and len(resources) > 1:
+            resources.pop()
+
     try:
-        page.extract_text(visitor_text=visitor)
+        plain = page.extract_text(
+            visitor_text=visitor, visitor_operand_before=before, visitor_operand_after=after
+        )
+    except _ContentLimitReached:
+        return spans, ""
     except Exception:  # noqa: BLE001 - a damaged page must not fail the document
-        return []
-    return spans
+        return [], ""
+    return spans, plain or ""
 
 
 def _page_overhead(number: int) -> int:
@@ -338,6 +516,12 @@ def read_pdf(
     flatten the whole tree first, so a request for a handful of pages used to
     still pay for a file's entire declared page count. That raises
     :class:`DocumentError`, the same as any other unreadable file.
+
+    What parsing a page costs is bounded too (Issue #451): every content stream
+    is measured before pypdf parses it, a page's own and each form XObject's at
+    each invocation, against ``PAGE_CONTENT_LIMIT`` and
+    ``DOCUMENT_CONTENT_LIMIT``. A page over the first is kept empty, the second
+    stops the read, and either sets ``Document.truncated``.
     """
     reader_cls = _load_pdf_reader()
     try:
@@ -377,6 +561,7 @@ def read_pdf(
             page_tree_limit = _page_tree_limit(_pypdf.get_configuration().page_tree_maximum_entries)
             page_tree_scope = _pypdf.apply_configuration(page_tree_maximum_entries=page_tree_limit)
 
+    budget = _ContentBudget(_pypdf)
     try:
         with page_tree_scope:
             for index, page in enumerate(reader.pages):
@@ -389,14 +574,21 @@ def read_pdf(
                 except Exception:  # noqa: BLE001 - fall back to a common page size
                     width, height = 612.0, 792.0
 
-                spans = _page_spans(page)
-                if spans:
-                    text = spans_to_text(spans, width)
+                budget.start_page()
+                spans, plain = [], ""
+                try:
+                    for stream in _page_content_streams(page):
+                        budget.charge(stream)
+                except _ContentLimitReached:
+                    pass
                 else:
-                    try:
-                        text = page.extract_text() or ""
-                    except Exception:  # noqa: BLE001 - a damaged page yields no text
-                        text = ""
+                    spans, plain = _page_text(page, budget)
+                if budget.reached:
+                    document.truncated = True
+                    if budget.reached == "document" and not spans and not plain.strip():
+                        break
+
+                text = spans_to_text(spans, width) if spans else plain
                 text = text.strip()
                 if room is not None:
                     room -= _page_overhead(index + 1)
@@ -404,6 +596,8 @@ def read_pdf(
                         text, document.truncated = text[: max(room, 0)], True
                     room -= len(text)
                 document.pages.append(Page(number=index + 1, text=text, width=width, height=height))
+                if budget.reached == "document":
+                    break
     except resource_errors as exc:
         # LimitReachedError (the tree is bigger than page_tree_limit allows) and
         # any other resource/parse error pypdf itself raises while walking it.
