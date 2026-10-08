@@ -125,6 +125,45 @@ test("audio streams PCM chunks with metadata over existing WebSocket protocol", 
   }
 });
 
+// Every chunk has to name the reply it belongs to, not only the last. Edit and
+// regenerate abandon a reply on the client while this loop keeps sending its
+// chunks; a chunk without an id was routed to whichever reply the client was
+// then waiting for, so the replacement turned into the abandoned reply's audio.
+test("every audio chunk names the reply it belongs to, not only the last", async (t) => {
+  const testWavPath = path.join(__dirname, "..", "uploads", "generated", "test-audio-stream.wav");
+  fs.mkdirSync(path.dirname(testWavPath), { recursive: true });
+  fs.writeFileSync(testWavPath, createTestWav(1.5, 24000));
+  t.after(() => fs.rmSync(testWavPath, { force: true }));
+
+  const server = await startServer();
+  t.after(() => server.stop());
+
+  const messages = await exchange(server.wsUrl, {
+    type: "chat",
+    content: "generate audio",
+    messageType: "audio",
+    conversationId: AUDIO_CONV_ID,
+  });
+
+  const ack = messages.find((m) => m.type === "ack");
+  assert.ok(ack, "the turn is acknowledged");
+  assert.match(ack.assistantMessageId, /^[0-9a-f-]{36}$/);
+
+  const streams = messages.filter((m) => m.type === "stream");
+  assert.ok(streams.length >= 3, `needs a first, a middle and a last chunk, got ${streams.length}`);
+
+  const [first, middle, last] = [streams[0], streams[1], streams[streams.length - 1]];
+  assert.equal(first.done, false);
+  assert.equal(middle.done, false);
+  assert.equal(last.done, true);
+  for (const [name, chunk] of [["first", first], ["middle", middle], ["last", last]]) {
+    assert.equal(chunk.messageId, ack.assistantMessageId, `the ${name} chunk names the acknowledged reply`);
+  }
+  for (const chunk of streams) {
+    assert.equal(chunk.messageId, ack.assistantMessageId, `chunk ${chunk.metadata.chunk} names the reply`);
+  }
+});
+
 test("audio streaming falls back gracefully when file is missing", async (t) => {
   // For this test, the mock still returns a URL but the file doesn't exist
   const server = await startServer();
