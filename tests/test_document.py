@@ -9,6 +9,7 @@ rather than returning something empty that reads as a blank page.
 """
 
 import json
+import zlib
 
 import pytest
 
@@ -16,6 +17,8 @@ from model.data import iter_document_records, iter_text_records
 from model.document import (
     DOC_END_TOKEN,
     DOC_TOKEN,
+    DOCUMENT_CONTENT_LIMIT,
+    PAGE_CONTENT_LIMIT,
     PAGE_TOKEN,
     PAGE_TREE_ENTRY_LIMIT,
     Document,
@@ -254,7 +257,7 @@ class _StubPage:
     def __init__(self, index, text, opened):
         self.index, self.text, self.opened = index, text, opened
 
-    def extract_text(self, visitor_text=None):
+    def extract_text(self, visitor_text=None, **operand_visitors):
         self.opened.add(self.index)
         if visitor_text is not None:
             visitor_text(self.text, None, [1, 0, 0, 1, 50.0, 700.0], {}, 10.0)
@@ -598,3 +601,276 @@ def test_443_an_oversized_attachment_does_not_lose_the_rest_of_the_turn(tmp_path
     assert len(documents) == 2
     assert "could not be read" in documents[0]
     assert "readable" in documents[1]
+
+
+# ---------------------------------------------------------------------------
+# Issue #451: parsing a page costs one to two seconds per decoded megabyte of
+# its content streams, and nothing bounded that before. A Flate stream
+# compresses about a thousandfold, pages may share one, a /Contents array may
+# repeat one and a form XObject is parsed again at every invocation, so a 14 KB
+# PDF kept a worker parsing until its request timed out.
+#
+# These tests count the bytes pypdf actually parses rather than timing it, so
+# what a limit saves is an exact number. They shrink the limits where a test
+# would otherwise have to parse megabytes; the shipped values are used wherever
+# the bound holds without parsing at all. The files are hand-written, so no PDF
+# library is needed to build them, only to read them.
+# ---------------------------------------------------------------------------
+
+KiB = 1024
+
+
+def _noop(size):
+    """``size`` bytes of bare operators: as costly to parse as text, yielding none."""
+    return b"q Q\n" * (size // 4)
+
+
+def _text(size):
+    """Exactly ``size`` bytes of ordinary text-showing content."""
+    lines = bytearray()
+    n = 0
+    while len(lines) < size:
+        lines += b"BT /F1 11 Tf 72 %d Td (Line %d of an ordinary page.) Tj ET\n" % (700 - (n % 60) * 11, n)
+        n += 1
+    return bytes(lines[: size - 1]).rsplit(b"\n", 1)[0].ljust(size, b" ")
+
+
+def _content_pdf(tmp_path, pages, content, *, repeat=1, xobject=None, distinct=False, name="content.pdf"):
+    """A PDF whose pages draw ``content``: one shared stream unless ``distinct``.
+
+    ``repeat`` makes each page's /Contents an array naming the stream that many
+    times; ``xobject`` adds that content as form /X0 to every page's resources.
+    """
+    objs = []
+
+    def add(body):
+        objs.append(body)
+        return len(objs)
+
+    def stream(data, extra=b""):
+        packed = zlib.compress(data, 9)
+        return add(b"<< /Length %d /Filter /FlateDecode%s >>\nstream\n" % (len(packed), extra) + packed + b"\nendstream")
+
+    catalog, tree = add(b""), add(b"")
+    font = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    form = None
+    if xobject is not None:
+        form = stream(
+            xobject,
+            b" /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 %d 0 R >> >>" % font,
+        )
+    shared = None if distinct else stream(content)
+    kids = []
+    for _ in range(pages):
+        ref = b"%d 0 R" % (stream(content) if distinct else shared)
+        contents = ref if repeat == 1 else b"[" + b" ".join([ref] * repeat) + b"]"
+        xobjects = b" /XObject << /X0 %d 0 R >>" % form if form else b""
+        resources = b"<< /Font << /F1 %d 0 R >>%s >>" % (font, xobjects)
+        kids.append(add(
+            b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources %s /Contents %s >>"
+            % (tree, resources, contents)
+        ))
+    objs[catalog - 1] = b"<< /Type /Catalog /Pages %d 0 R >>" % tree
+    objs[tree - 1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % k for k in kids), pages)
+
+    body = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, obj in enumerate(objs, start=1):
+        offsets.append(len(body))
+        body += b"%d 0 obj\n" % number + obj + b"\nendobj\n"
+    xref = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    body += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    body += b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, catalog, xref)
+    path = tmp_path / name
+    path.write_bytes(bytes(body))
+    return str(path)
+
+
+@pytest.fixture
+def parsed(monkeypatch):
+    """Bytes of content pypdf parses during a test.
+
+    Past ``ceiling`` the spy refuses to parse, so a reader without the limits
+    fails the test at once instead of parsing for minutes first.
+    """
+    pytest.importorskip("pypdf", minversion="6.18")
+    from pypdf.generic import ContentStream
+
+    original = getattr(ContentStream, "_parse_content_stream", None)
+    if original is None:
+        pytest.skip("this pypdf parses content streams some other way")
+    record = {"bytes": 0, "ceiling": None}
+
+    def spy(self, stream):
+        record["bytes"] += stream.getbuffer().nbytes
+        if record["ceiling"] is not None and record["bytes"] > record["ceiling"]:
+            raise RuntimeError("parsed past what the test allows")
+        return original(self, stream)
+
+    monkeypatch.setattr(ContentStream, "_parse_content_stream", spy)
+    return record
+
+
+def _limits(monkeypatch, page, document):
+    import model.document as document_module
+
+    monkeypatch.setattr(document_module, "PAGE_CONTENT_LIMIT", page)
+    monkeypatch.setattr(document_module, "DOCUMENT_CONTENT_LIMIT", document)
+
+
+def test_451_a_page_over_the_page_limit_is_never_parsed(tmp_path, parsed):
+    # A 4 KB file whose one page decodes to more than the shipped page limit.
+    path = _content_pdf(tmp_path, 1, _noop(PAGE_CONTENT_LIMIT + 1024 * KiB))
+    parsed["ceiling"] = 0
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] == 0, "the oversized page must be measured, not parsed"
+    assert len(doc) == 1 and doc.pages[0].text == "", "the page is kept, empty, as a damaged one is"
+    assert doc.truncated
+
+
+def test_451_a_form_xobject_over_the_page_limit_is_never_parsed(tmp_path, parsed):
+    page = b"q /X0 Do Q\n"
+    path = _content_pdf(tmp_path, 1, page, xobject=_noop(PAGE_CONTENT_LIMIT + 1024 * KiB))
+    parsed["ceiling"] = len(page)
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] == len(page), "only the page's own few bytes are parsed"
+    assert doc.truncated
+
+
+def test_451_many_small_pages_cannot_add_up_past_the_document_budget(tmp_path, parsed, monkeypatch):
+    # The audit's file, scaled down: 80 pages sharing one stream, each page well
+    # inside the page limit. Only the document budget can stop it.
+    _limits(monkeypatch, page=64 * KiB, document=256 * KiB)
+    path = _content_pdf(tmp_path, 80, _noop(48 * KiB))
+    parsed["ceiling"] = 256 * KiB
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] <= 256 * KiB
+    assert len(doc) == 5, "five 48 KiB pages fit in 256 KiB, the sixth is never opened"
+    assert doc.truncated
+
+
+def test_451_a_contents_array_cannot_repeat_a_stream_past_the_page_limit(tmp_path, parsed, monkeypatch):
+    # 20 x 16 KiB is far under pypdf's own cap on a concatenated array, so
+    # pypdf alone would parse all of it.
+    _limits(monkeypatch, page=64 * KiB, document=DOCUMENT_CONTENT_LIMIT)
+    path = _content_pdf(tmp_path, 1, _noop(16 * KiB), repeat=20)
+    parsed["ceiling"] = 0
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] == 0
+    assert doc.truncated
+
+
+def test_451_a_form_xobject_is_charged_at_every_invocation(tmp_path, parsed, monkeypatch):
+    # A tiny page invoking one small form hundreds of times; pypdf allows 5000.
+    _limits(monkeypatch, page=64 * KiB, document=DOCUMENT_CONTENT_LIMIT)
+    page = b"q /X0 Do Q\n" * 500
+    path = _content_pdf(tmp_path, 1, page, xobject=_noop(16 * KiB))
+    parsed["ceiling"] = 64 * KiB
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] <= 64 * KiB
+    assert doc.truncated
+
+
+def test_451_a_page_without_text_is_parsed_once(tmp_path, parsed):
+    # Reading used to run a second extraction for a page whose first yielded no
+    # positioned text, parsing the same content twice.
+    content = _noop(20 * KiB)
+    path = _content_pdf(tmp_path, 1, content)
+
+    doc = read_pdf(path)
+
+    assert parsed["bytes"] == len(content)
+    assert not doc.truncated
+
+
+def test_451_a_page_exactly_at_the_page_limit_is_read_whole(tmp_path, parsed, monkeypatch):
+    _limits(monkeypatch, page=64 * KiB, document=DOCUMENT_CONTENT_LIMIT)
+
+    at_limit = read_pdf(_content_pdf(tmp_path, 1, _text(64 * KiB), name="at.pdf"))
+    assert "Line 0 of an ordinary page." in at_limit.pages[0].text
+    assert not at_limit.truncated
+
+    over = read_pdf(_content_pdf(tmp_path, 1, _text(64 * KiB + 1), name="over.pdf"))
+    assert over.pages[0].text == ""
+    assert over.truncated
+
+
+def test_451_pages_that_exactly_fill_the_document_budget_are_all_read(tmp_path, parsed, monkeypatch):
+    _limits(monkeypatch, page=64 * KiB, document=256 * KiB)
+
+    four = read_pdf(_content_pdf(tmp_path, 4, _text(64 * KiB), distinct=True, name="four.pdf"))
+    assert len(four) == 4 and all(page.text for page in four.pages)
+    assert not four.truncated
+
+    five = read_pdf(_content_pdf(tmp_path, 5, _text(64 * KiB), distinct=True, name="five.pdf"))
+    assert len(five) == 4, "the fifth page does not fit and is never opened"
+    assert five.truncated
+
+
+def test_451_an_ordinary_document_reads_whole_within_the_shipped_limits(tmp_path, parsed):
+    content = _text(10 * KiB)
+    pages = 30
+    path = _content_pdf(tmp_path, pages, content, distinct=True)
+
+    doc = read_pdf(path)
+
+    assert len(doc) == pages and not doc.truncated
+    assert all("Line 0 of an ordinary page." in page.text for page in doc.pages)
+    assert parsed["bytes"] == pages * len(content), "each page parsed exactly once"
+
+
+def test_451_the_page_tree_limit_still_stops_a_read_before_any_content_is_parsed(tmp_path, parsed):
+    pypdf = pytest.importorskip("pypdf", minversion="6.18")
+    path = _content_pdf(tmp_path, 10, _text(8 * KiB), distinct=True)
+    parsed["ceiling"] = 0
+
+    with pypdf.apply_configuration(page_tree_maximum_entries=5):
+        with pytest.raises(DocumentError, match="could not be read"):
+            read_pdf(path)
+    assert parsed["bytes"] == 0
+
+
+def test_451_the_document_op_answers_a_bounded_read(tmp_path, parsed, monkeypatch):
+    # model/serve.py's "document" op, which /api/generate/document reaches.
+    from model.serve import handle
+
+    _limits(monkeypatch, page=64 * KiB, document=256 * KiB)
+    path = _content_pdf(tmp_path, 80, _noop(48 * KiB))
+    parsed["ceiling"] = 256 * KiB
+
+    result = handle(None, "document", {"document_path": path, "out_dir": str(tmp_path)})
+
+    assert "error" not in result
+    assert result["pages"] == 5
+    assert parsed["bytes"] <= 256 * KiB
+
+
+def test_451_a_bounded_attachment_does_not_lose_the_rest_of_the_turn(tmp_path, parsed, monkeypatch):
+    from model.serve import _read_attachments
+
+    _limits(monkeypatch, page=64 * KiB, document=256 * KiB)
+    bomb = _content_pdf(tmp_path, 80, _noop(48 * KiB), name="bomb.pdf")
+    good = tmp_path / "good.txt"
+    good.write_text("readable")
+    parsed["ceiling"] = 256 * KiB
+
+    _, documents = _read_attachments(
+        _StubGen(),
+        [{"kind": "document", "path": bomb}, {"kind": "document", "path": str(good)}],
+    )
+
+    assert len(documents) == 2
+    assert "[document truncated: the rest was not read]" in documents[0]
+    assert "readable" in documents[1]
+    assert parsed["bytes"] <= 256 * KiB
