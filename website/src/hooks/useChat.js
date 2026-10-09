@@ -6,7 +6,7 @@ import {
   saveConversationsToStorage,
   clearConversationsFromStorage,
 } from "../utils/storage";
-import { dedupeMessages, mergeMessages, reconcileConversation } from "../utils/dedupe";
+import { dedupeMessages, reconcileConversation } from "../utils/dedupe";
 import {
   createBackup,
   exportConversationToMarkdown,
@@ -105,6 +105,31 @@ export function useChat(settings) {
       return existing[0] || null;
     }
     return existing || null;
+  };
+
+  // What a sync may send for a conversation. A turn the server has not acked is
+  // still under the client's ids (the server stores it under its own), and a
+  // reply that is streaming is not stored yet, so sending either would store a
+  // second copy. Error bubbles are the client's own and never history. All of
+  // these stay local and are merged back by reconcileConversation.
+  const buildSyncPayload = (convId, conv, localMsgs, titleUpdatedAt) => {
+    const pending = new Set();
+    for (const t of inFlightTurnsByConvRef.current.get(convId) || []) {
+      if (!t.acknowledged) pending.add(t.userMsgId);
+      pending.add(t.assistantId);
+    }
+    const active = activeAssistantIdByConvRef.current.get(convId);
+    for (const id of Array.isArray(active) ? active : active ? [active] : []) pending.add(id);
+
+    return {
+      clientVersion: conv?.version || 1,
+      messages: localMsgs.filter(
+        (m) => m && !pending.has(m.id) && m.completed !== false && m.type !== "error"
+      ),
+      deletedMessageIds: conv?.deletedMessageIds || [],
+      title: conv?.title,
+      titleUpdatedAt,
+    };
   };
 
   // Track monotonic operation sequence per conversation to drop stale out-of-order responses (#404)
@@ -728,8 +753,20 @@ export function useChat(settings) {
         const opSeq = (operationSeqRef.current.get(convId) || 0) + 1;
         operationSeqRef.current.set(convId, opSeq);
 
-        api
-          .getConversation(convId)
+        const currentConv = conversationsRef.current?.find((c) => c.id === convId);
+        const localMsgs =
+          convId === activeConversationRef.current && messagesConversationIdRef.current === convId
+            ? messagesRef.current
+            : currentConv?.messages || [];
+        const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
+
+        const syncPayload = buildSyncPayload(convId, currentConv, localMsgs, localTitleUpdatedAt);
+
+        const fetchRemote = typeof api.syncConversation === "function"
+          ? api.syncConversation(convId, syncPayload).then((res) => res?.conversation).catch(() => api.getConversation(convId))
+          : api.getConversation(convId);
+
+        fetchRemote
           .then((conv) => {
             if (deletedConversationIdsRef.current.has(convId)) return;
             if (operationSeqRef.current.get(convId) !== opSeq) return;
@@ -737,14 +774,15 @@ export function useChat(settings) {
               setConversations((prev) => {
                 if (deletedConversationIdsRef.current.has(convId)) return prev;
                 const idx = prev.findIndex((c) => c.id === convId);
-                const currentConv = idx !== -1 ? prev[idx] : null;
-                const localMsgs =
+                const existing = idx !== -1 ? prev[idx] : null;
+                const localMsgsNow =
                   convId === activeConversationRef.current && messagesConversationIdRef.current === convId
                     ? messagesRef.current
-                    : currentConv?.messages || [];
-                const reconciled = mergeMessages(localMsgs, conv.messages);
+                    : existing?.messages || [];
+                const localConvNow = existing ? { ...existing, messages: localMsgsNow } : null;
+                const updatedConv = reconcileConversation(localConvNow, conv, localTitleUpdatedAt);
 
-                for (const m of reconciled) {
+                for (const m of updatedConv.messages || []) {
                   if (m.role === "assistant" && m.completed) {
                     if (m.id) completedMessageIdsRef.current.add(m.id);
                     if (m.clientId) completedMessageIdsRef.current.add(m.clientId);
@@ -752,18 +790,8 @@ export function useChat(settings) {
                 }
 
                 if (convId === activeConversationRef.current && messagesConversationIdRef.current === convId) {
-                  setMessages(reconciled);
+                  setMessages(updatedConv.messages || []);
                 }
-
-                const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
-                const title = localTitleUpdatedAt > 0 && currentConv?.title ? currentConv.title : (conv.title || currentConv?.title);
-                const updatedConv = {
-                  ...(currentConv || {}),
-                  ...conv,
-                  title,
-                  messages: reconciled,
-                  updatedAt: new Date().toISOString(),
-                };
 
                 const updatedList = idx !== -1
                   ? prev.map((c, i) => (i === idx ? updatedConv : c))
@@ -1192,11 +1220,21 @@ export function useChat(settings) {
           }
         })
         .catch(async (_err) => {
+          titleUpdatedAtByConvRef.current.set(id, prevTimestamp);
           try {
             const remoteConv = await api.getConversation(id);
             if (remoteConv) {
               setConversations((prev) => {
-                const updated = prev.map((c) => (c.id === id ? reconcileConversation(c, remoteConv) : c));
+                const updated = prev.map((c) => {
+                  if (c.id !== id) return c;
+                  const rolledBackConv = {
+                    ...c,
+                    title: remoteConv.title || c.title,
+                    titleUpdatedAt: prevTimestamp,
+                    version: currentVersion,
+                  };
+                  return reconcileConversation(rolledBackConv, remoteConv, prevTimestamp);
+                });
                 saveConversationsToStorage(updated, activeConversationRef.current);
                 return updated;
               });
@@ -1209,7 +1247,7 @@ export function useChat(settings) {
           setConversations((prev) => {
             const updated = prev.map((c) =>
               c.id === id && c.version === currentVersion + 1
-                ? { ...c, version: currentVersion }
+                ? { ...c, version: currentVersion, titleUpdatedAt: prevTimestamp }
                 : c
             );
             saveConversationsToStorage(updated, activeConversationRef.current);
@@ -1218,6 +1256,102 @@ export function useChat(settings) {
         });
     }
   }, []);
+
+  const syncConversation = useCallback(
+    async (id) => {
+      const convId = id || activeConversationRef.current;
+      if (!convId || deletedConversationIdsRef.current.has(convId)) return null;
+
+      const currentConv = conversationsRef.current?.find((c) => c.id === convId);
+      const localMsgs =
+        convId === activeConversationRef.current && messagesConversationIdRef.current === convId
+          ? messagesRef.current
+          : currentConv?.messages || [];
+      const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
+
+      const syncPayload = buildSyncPayload(convId, currentConv, localMsgs, localTitleUpdatedAt);
+
+      try {
+        let remoteConv = null;
+        if (typeof api.syncConversation === "function") {
+          try {
+            const res = await api.syncConversation(convId, syncPayload);
+            remoteConv = res?.conversation || null;
+          } catch {
+            // fallback
+          }
+        }
+        if (!remoteConv && typeof api.getConversation === "function") {
+          remoteConv = await api.getConversation(convId);
+        }
+
+        if (remoteConv) {
+          let reconciled = null;
+          setConversations((prev) => {
+            const updatedList = prev.map((c) => {
+              if (c.id === convId) {
+                reconciled = reconcileConversation(c, remoteConv, localTitleUpdatedAt);
+                return reconciled;
+              }
+              return c;
+            });
+            if (!reconciled) {
+              reconciled = reconcileConversation(null, remoteConv, localTitleUpdatedAt);
+              updatedList.unshift(reconciled);
+            }
+            saveConversationsToStorage(updatedList, activeConversationRef.current);
+            return updatedList;
+          });
+          if (activeConversationRef.current === convId && reconciled) {
+            setMessages(reconciled.messages || []);
+          }
+          return reconciled;
+        }
+      } catch {
+        // Non-fatal
+      }
+      return currentConv || null;
+    },
+    []
+  );
+
+  const deleteMessage = useCallback(
+    async (convId, messageId) => {
+      if (!convId || !messageId) return;
+      if (deletedConversationIdsRef.current.has(convId)) return;
+
+      setConversations((prev) => {
+        const updated = prev.map((c) => {
+          if (c.id !== convId) return c;
+          const filteredMessages = (c.messages || []).filter((m) => m.id !== messageId && m.clientId !== messageId);
+          const deletedMessageIds = Array.isArray(c.deletedMessageIds) ? [...c.deletedMessageIds] : [];
+          if (!deletedMessageIds.includes(messageId)) deletedMessageIds.push(messageId);
+          return {
+            ...c,
+            messages: filteredMessages,
+            deletedMessageIds,
+            version: (c.version || 1) + 1,
+            updatedAt: new Date().toISOString(),
+          };
+        });
+        saveConversationsToStorage(updated, activeConversationRef.current);
+        return updated;
+      });
+
+      if (activeConversationRef.current === convId) {
+        setMessages((prev) => prev.filter((m) => m.id !== messageId && m.clientId !== messageId));
+      }
+
+      if (typeof api.deleteMessage === "function") {
+        try {
+          await api.deleteMessage(convId, messageId);
+        } catch {
+          // ignore or handled via background sync
+        }
+      }
+    },
+    []
+  );
 
   const exportConversation = useCallback((convId, format = "json") => {
     const targetId = convId || activeConversationRef.current;
@@ -2133,6 +2267,8 @@ export function useChat(settings) {
     selectConversation,
     deleteConversation,
     clearAllConversations,
+    syncConversation,
+    deleteMessage,
     sendMessage,
     branchConversation,
     editMessage,

@@ -342,6 +342,125 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/chat/conversations/{id}/sync": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "Conversation UUID to synchronize",
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+        post: {
+          summary: "Differential conversation synchronization",
+          description: "Reconciles divergent client and server conversation states, applying differential changes and resolving conflicts.",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    clientVersion: {
+                      type: "integer",
+                      minimum: 1,
+                      description: "Known client version for optimistic concurrency and diff tracking",
+                    },
+                    messages: {
+                      type: "array",
+                      description: "Current client messages for differential comparison",
+                      items: { $ref: "#/components/schemas/ChatMessage" },
+                    },
+                    deletedMessageIds: {
+                      type: "array",
+                      description: "IDs of messages deleted on client",
+                      items: { type: "string" },
+                    },
+                    title: {
+                      type: "string",
+                      maxLength: 200,
+                      description: "Current client conversation title",
+                    },
+                    titleUpdatedAt: {
+                      type: "number",
+                      description: "Monotonic timestamp of local title modification",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Reconciled synchronization result",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["status", "version", "conversation"],
+                    properties: {
+                      status: {
+                        type: "string",
+                        enum: ["synchronized", "up_to_date", "client_ahead", "server_ahead"],
+                      },
+                      version: { type: "integer", minimum: 1 },
+                      serverVersion: { type: "integer", minimum: 1 },
+                      clientVersion: { type: "integer" },
+                      diff: { type: "object" },
+                      conversation: { $ref: "#/components/schemas/Conversation" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error"),
+            "404": errorResponseRef(404, "Conversation not found"),
+          },
+        },
+      },
+      "/chat/conversations/{id}/messages/{messageId}": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "Conversation UUID",
+            schema: { type: "string", format: "uuid" },
+          },
+          {
+            name: "messageId",
+            in: "path",
+            required: true,
+            description: "Message UUID to delete",
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+        delete: {
+          summary: "Delete conversation message",
+          description: "Deletes a single message from the conversation and advances its version.",
+          responses: {
+            "200": {
+              description: "Message deleted successfully",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["success", "version", "messageId"],
+                    properties: {
+                      success: { type: "boolean", example: true },
+                      version: { type: "integer", minimum: 1 },
+                      messageId: { type: "string", format: "uuid" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error"),
+            "404": errorResponseRef(404, "Message or conversation not found"),
+          },
+        },
+      },
       "/generate/image": {
         post: {
           summary: "Generate image from text",
