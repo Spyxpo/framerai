@@ -107,6 +107,31 @@ export function useChat(settings) {
     return existing || null;
   };
 
+  // What a sync may send for a conversation. A turn the server has not acked is
+  // still under the client's ids (the server stores it under its own), and a
+  // reply that is streaming is not stored yet, so sending either would store a
+  // second copy. Error bubbles are the client's own and never history. All of
+  // these stay local and are merged back by reconcileConversation.
+  const buildSyncPayload = (convId, conv, localMsgs, titleUpdatedAt) => {
+    const pending = new Set();
+    for (const t of inFlightTurnsByConvRef.current.get(convId) || []) {
+      if (!t.acknowledged) pending.add(t.userMsgId);
+      pending.add(t.assistantId);
+    }
+    const active = activeAssistantIdByConvRef.current.get(convId);
+    for (const id of Array.isArray(active) ? active : active ? [active] : []) pending.add(id);
+
+    return {
+      clientVersion: conv?.version || 1,
+      messages: localMsgs.filter(
+        (m) => m && !pending.has(m.id) && m.completed !== false && m.type !== "error"
+      ),
+      deletedMessageIds: conv?.deletedMessageIds || [],
+      title: conv?.title,
+      titleUpdatedAt,
+    };
+  };
+
   // Track monotonic operation sequence per conversation to drop stale out-of-order responses (#404)
   const operationSeqRef = useRef(new Map());
   // Track deleted conversation IDs so pending asynchronous responses cannot resurrect them (#404)
@@ -735,13 +760,7 @@ export function useChat(settings) {
             : currentConv?.messages || [];
         const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
 
-        const syncPayload = {
-          clientVersion: currentConv?.version || 1,
-          messages: localMsgs,
-          deletedMessageIds: currentConv?.deletedMessageIds || [],
-          title: currentConv?.title,
-          titleUpdatedAt: localTitleUpdatedAt,
-        };
+        const syncPayload = buildSyncPayload(convId, currentConv, localMsgs, localTitleUpdatedAt);
 
         const fetchRemote = typeof api.syncConversation === "function"
           ? api.syncConversation(convId, syncPayload).then((res) => res?.conversation).catch(() => api.getConversation(convId))
@@ -1250,13 +1269,7 @@ export function useChat(settings) {
           : currentConv?.messages || [];
       const localTitleUpdatedAt = titleUpdatedAtByConvRef.current.get(convId) || 0;
 
-      const syncPayload = {
-        clientVersion: currentConv?.version || 1,
-        messages: localMsgs,
-        deletedMessageIds: currentConv?.deletedMessageIds || [],
-        title: currentConv?.title,
-        titleUpdatedAt: localTitleUpdatedAt,
-      };
+      const syncPayload = buildSyncPayload(convId, currentConv, localMsgs, localTitleUpdatedAt);
 
       try {
         let remoteConv = null;

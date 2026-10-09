@@ -3,7 +3,7 @@ const router = express.Router();
 const { randomUUID } = require("node:crypto");
 const { processMessage, validateTrace, traceAllowed } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
-const { validator } = require("../middleware/validate");
+const { validator, Validator } = require("../middleware/validate");
 const { generationLimiter } = require("../middleware/limiters");
 const { readSettings } = require("../generationSettings");
 
@@ -12,6 +12,7 @@ const { readSettings } = require("../generationSettings");
 const conversations = require("../conversationStore");
 
 const MESSAGE_TYPES = ["text", "code", "image", "video", "audio"];
+const SYNC_ROLES = ["user", "assistant"];
 const modelLimits = require("../modelLimits");
 
 // The documented floor. The accepted length rises with the window of the model
@@ -142,6 +143,58 @@ router.post("/conversations/:id/branch", (req, res) => {
   res.json(branchConv);
 });
 
+// The deleted ids a sync may carry. The store keeps the same number, so a list
+// longer than this could never be honoured anyway.
+const MAX_SYNC_DELETED_IDS = conversations.MAX_DELETED_IDS;
+
+// A synced message is held to the same rules as one posted to /messages: the
+// stored history is what the model reads, so a sync must not be a way around
+// the role, type or length checks. Only known fields are kept.
+function readSyncMessages(v) {
+  const raw = v.array("messages", { max: conversations.maxMessages() });
+  const limit = modelLimits.messageChars();
+  const out = [];
+  raw.forEach((item, i) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      v.fail(`messages.${i}`, "must be an object");
+      return;
+    }
+    const m = new Validator(item, { prefix: `messages.${i}.`, errors: v.errors });
+    const id = m.uuid("id");
+    const role = m.oneOf("role", SYNC_ROLES, { required: true });
+    const type = m.oneOf("type", MESSAGE_TYPES, { fallback: "text" });
+    const attachments = m.array("attachments", { max: 10, fallback: undefined });
+    const content = item.content === undefined ? "" : item.content;
+    if (typeof content !== "string") m.fail("content", "must be a string");
+    else if (content.length > limit) m.fail("content", `must be at most ${limit} characters`);
+    const clientId = item.clientId !== undefined ? m.uuid("clientId") : undefined;
+    const replyToId = item.replyToId !== undefined ? m.uuid("replyToId") : undefined;
+    const timestamp = m.string("timestamp", { max: 64 });
+    if (item.completed !== undefined && typeof item.completed !== "boolean") {
+      m.fail("completed", "must be a boolean");
+    }
+
+    out.push({
+      id,
+      role,
+      content: typeof content === "string" ? content : "",
+      type,
+      ...(attachments ? { attachments } : {}),
+      ...(clientId ? { clientId } : {}),
+      ...(replyToId ? { replyToId } : {}),
+      ...(timestamp ? { timestamp } : {}),
+      ...(typeof item.completed === "boolean" ? { completed: item.completed } : {}),
+    });
+  });
+  return out;
+}
+
+function readDeletedIds(v) {
+  const raw = v.array("deletedMessageIds", { max: MAX_SYNC_DELETED_IDS });
+  const ids = new Validator(raw, { prefix: "deletedMessageIds.", errors: v.errors });
+  return raw.map((_, i) => ids.uuid(i));
+}
+
 // Differential conversation synchronization and conflict resolution
 router.post("/conversations/:id/sync", (req, res) => {
   const id = conversationId(req);
@@ -149,18 +202,12 @@ router.post("/conversations/:id/sync", (req, res) => {
 
   const v = validator(req.body);
   const title = v.string("title", { min: 1, max: 200, optional: true });
+  const clientVersion = v.integer("clientVersion", { min: 1 });
+  // A clock ahead of the server's would win every later rename, so it is held to now.
+  const titleUpdatedAt = v.integer("titleUpdatedAt", { min: 0, max: Date.now() + 60_000 });
+  const messages = readSyncMessages(v);
+  const deletedMessageIds = readDeletedIds(v);
   v.done();
-
-  const clientVersion =
-    req.body.clientVersion !== undefined && req.body.clientVersion !== null
-      ? Number(req.body.clientVersion)
-      : undefined;
-  const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
-  const deletedMessageIds = Array.isArray(req.body.deletedMessageIds) ? req.body.deletedMessageIds : [];
-  const titleUpdatedAt =
-    req.body.titleUpdatedAt !== undefined && req.body.titleUpdatedAt !== null
-      ? Number(req.body.titleUpdatedAt)
-      : undefined;
 
   const syncResult = conversations.sync(id, {
     clientVersion,
