@@ -275,6 +275,30 @@ function clear() {
   conversations.clear();
 }
 
+const conversationSync = require("./conversationSync");
+
+// Deleted ids are kept so a stale client cannot bring a message back, but only
+// the most recent ones: the list would otherwise grow for as long as the
+// conversation lives.
+const MAX_DELETED_IDS = 1000;
+
+function _trackDeleted(conv, ids) {
+  const list = Array.isArray(conv.deletedMessageIds) ? conv.deletedMessageIds : [];
+  const seen = new Set(list);
+  for (const id of ids) {
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      list.push(id);
+    }
+  }
+  if (list.length > MAX_DELETED_IDS) list.splice(0, list.length - MAX_DELETED_IDS);
+  conv.deletedMessageIds = list;
+}
+
+function maxMessages() {
+  return _maxMessages;
+}
+
 /**
  * Truncate all messages in a conversation strictly after the specified message ID.
  */
@@ -284,7 +308,10 @@ function truncateAfter(id, messageId) {
   _touch(conv);
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
-  conv.messages.splice(idx + 1);
+  const removed = conv.messages.splice(idx + 1);
+  if (removed.length > 0) {
+    _trackDeleted(conv, removed.map((m) => m?.id));
+  }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
   return true;
@@ -299,10 +326,97 @@ function truncateFrom(id, messageId) {
   _touch(conv);
   const idx = conv.messages.findIndex((m) => m.id === messageId);
   if (idx === -1) return false;
-  conv.messages.splice(idx);
+  const removed = conv.messages.splice(idx);
+  if (removed.length > 0) {
+    _trackDeleted(conv, removed.map((m) => m?.id));
+  }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
   return true;
+}
+
+/**
+ * Delete a specific message from a conversation and track its deletion.
+ */
+function deleteMessage(id, messageId) {
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  _touch(conv);
+  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return false;
+  conv.messages.splice(idx, 1);
+  _trackDeleted(conv, [messageId]);
+  conv.version = (conv.version || 1) + 1;
+  conv.updatedAt = new Date().toISOString();
+  return true;
+}
+
+function _fingerprint(conv) {
+  return JSON.stringify([conv.messages, conv.title, conv.deletedMessageIds || []]);
+}
+
+/**
+ * Perform differential synchronization and conflict resolution against stored conversation.
+ */
+function sync(id, clientState = {}, options = {}) {
+  const conv = conversations.get(id);
+  if (!conv) return null;
+  _touch(conv);
+
+  const serverVersion = conv.version || 1;
+  const serverIds = new Set(conv.messages.map((m) => m?.id));
+  const client = {
+    ...clientState,
+    // The server owns the version. A client claiming one ahead of it would
+    // otherwise win every conflict and could set the counter to anything.
+    clientVersion: Math.min(clientState.clientVersion || 1, serverVersion),
+    // A reply the client is still streaming is not part of the history yet: the
+    // server stores it under its own id once it completes.
+    messages: (clientState.messages || []).filter(
+      (m) => m.role !== "assistant" || serverIds.has(m.id) || (m.content && m.completed !== false)
+    ),
+  };
+
+  const { diff, reconciled } = conversationSync.reconcileConversationDiff(client, conv, options);
+
+  const before = _fingerprint(conv);
+  if (diff.hasDifferences) {
+    conv.messages = reconciled.messages;
+    if (conv.messages.length > _maxMessages) {
+      conv.messages.splice(0, conv.messages.length - _maxMessages);
+    }
+    conv.title = reconciled.title;
+    if (reconciled.titleUpdatedAt) {
+      conv.titleUpdatedAt = reconciled.titleUpdatedAt;
+    }
+    if (Array.isArray(reconciled.deletedMessageIds)) {
+      conv.deletedMessageIds = [];
+      _trackDeleted(conv, reconciled.deletedMessageIds);
+    }
+  }
+  // Only a sync that changed something is a new revision, and it is one step on.
+  if (_fingerprint(conv) !== before) {
+    conv.version = serverVersion + 1;
+    conv.updatedAt = new Date().toISOString();
+  }
+
+  let responseStatus = "synchronized";
+  if (!diff.hasDifferences) {
+    responseStatus = "up_to_date";
+  } else if (diff.status === "server_ahead") {
+    responseStatus = "server_ahead";
+  } else if (diff.status === "client_ahead") {
+    responseStatus = "client_ahead";
+  }
+
+  return {
+    status: responseStatus,
+    version: conv.version,
+    serverVersion: conv.version,
+    clientVersion: clientState.clientVersion,
+    diff,
+    conversation: conv,
+  };
 }
 
 /**
@@ -335,7 +449,8 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 
 module.exports = {
   create, get, has, remove, list, messages, append, update, clear,
-  truncateAfter, truncateFrom, updateMessage,
+  truncateAfter, truncateFrom, updateMessage, deleteMessage, sync,
+  maxMessages, MAX_DELETED_IDS,
   _map: conversations,
   _evict,
   _resetLimits,

@@ -148,6 +148,10 @@ export function sanitizeConversation(conv) {
     }
   }
 
+  const deletedMessageIds = Array.isArray(conv.deletedMessageIds)
+    ? conv.deletedMessageIds.filter((id) => typeof id === "string" && id)
+    : undefined;
+
   return {
     id,
     title,
@@ -158,6 +162,7 @@ export function sanitizeConversation(conv) {
     ...(parentVersion ? { parentVersion } : {}),
     ...(branchedFromMessageId ? { branchedFromMessageId } : {}),
     ...(titleUpdatedAt ? { titleUpdatedAt } : {}),
+    ...(deletedMessageIds && deletedMessageIds.length > 0 ? { deletedMessageIds } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
     messages,
   };
