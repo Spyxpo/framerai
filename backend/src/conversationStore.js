@@ -364,17 +364,24 @@ function sync(id, clientState = {}, options = {}) {
   _touch(conv);
 
   const serverVersion = conv.version || 1;
-  const serverIds = new Set(conv.messages.map((m) => m?.id));
+  // A client message is the stored one if the diff would match it: by its id,
+  // by its clientId, or by a stored message's clientId.
+  const serverIds = new Set(conv.messages.map((m) => m?.id).filter(Boolean));
+  const serverClientIds = new Set(conv.messages.map((m) => m?.clientId).filter(Boolean));
+  const storedHere = (m) =>
+    serverIds.has(m.id) || (m.clientId && serverIds.has(m.clientId)) || serverClientIds.has(m.id);
   const client = {
     ...clientState,
     // The server owns the version. A client claiming one ahead of it would
     // otherwise win every conflict and could set the counter to anything.
     clientVersion: Math.min(clientState.clientVersion || 1, serverVersion),
-    // A reply the client is still streaming is not part of the history yet: the
-    // server stores it under its own id once it completes.
-    messages: (clientState.messages || []).filter(
-      (m) => m.role !== "assistant" || serverIds.has(m.id) || (m.content && m.completed !== false)
-    ),
+    // Every reply is stored by the server, under its own id, once it completes,
+    // so a client only ever holds a copy of one. An assistant message the server
+    // does not have is a reply it has not finished: one cut off by a dropped
+    // socket arrives marked completed, under the very id the whole reply will
+    // be stored under, and storing it made append() skip that reply as already
+    // there (Issue #456). Sync updates replies the server has and never adds one.
+    messages: (clientState.messages || []).filter((m) => m.role !== "assistant" || storedHere(m)),
   };
 
   const { diff, reconciled } = conversationSync.reconcileConversationDiff(client, conv, options);
