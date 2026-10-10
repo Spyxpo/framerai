@@ -219,11 +219,26 @@ export function loadConversationsFromStorage(storage = typeof window !== "undefi
 }
 
 /**
+ * Whether a conversation fits within maxBytes when it is the only one stored,
+ * measured on the same payload evictOldestConversations measures.
+ */
+function fitsOnItsOwn(conv, maxBytes) {
+  const payload = {
+    version: STORAGE_VERSION,
+    conversations: [conv],
+    activeConversationId: conv.id || null,
+  };
+  return JSON.stringify(payload).length <= maxBytes;
+}
+
+/**
  * Evicts the oldest conversations until payload fits maxBytes.
- * Preserves the active conversation unless storage limit requires removing everything.
+ * Preserves the active conversation as long as it fits on its own; a
+ * conversation that cannot is left out rather than evicting the others.
  */
 export function evictOldestConversations(conversations, activeId, maxBytes = DEFAULT_MAX_BYTES) {
   let list = [...conversations];
+  let checkedOversized = false;
 
   while (list.length > 0) {
     const payload = {
@@ -235,6 +250,21 @@ export function evictOldestConversations(conversations, activeId, maxBytes = DEF
     const serialized = JSON.stringify(payload);
     if (serialized.length <= maxBytes) {
       return { conversations: list, activeConversationId: payload.activeConversationId };
+    }
+
+    // A conversation too large to fit even on its own can never be saved, so it
+    // is left out before anything is evicted to make room for it. Otherwise the
+    // active one is protected below while every other conversation is evicted,
+    // and then nothing at all is left to save: one oversized conversation
+    // cleared the whole saved history (Issue #453). Checked once, the first time
+    // the list is over the limit, so a list that fits pays nothing for it.
+    if (!checkedOversized) {
+      checkedOversized = true;
+      const fitting = list.filter((conv) => fitsOnItsOwn(conv, maxBytes));
+      if (fitting.length < list.length) {
+        list = fitting;
+        continue;
+      }
     }
 
     if (list.length === 1) {
@@ -295,6 +325,8 @@ export function saveConversationsToStorage(
       maxBytes
     );
 
+    // Only when not one conversation fits (Issue #453): the key then holds
+    // nothing, as for an empty list, rather than a stale copy of what is gone.
     if (evictedList.length === 0) {
       return clearConversationsFromStorage(storage);
     }
