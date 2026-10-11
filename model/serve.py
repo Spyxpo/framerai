@@ -205,6 +205,30 @@ def _window_report(gen, requested_max_new_tokens):
     return report
 
 
+def _fresh(gen):
+    """Forget the last completion, so a stale one is never mistaken for this one."""
+    try:
+        gen.last_completion = None
+    except AttributeError:
+        pass
+
+
+def _reply(gen, decoded, prompt=None):
+    """What the model said, without the prompt ``decoded`` begins with.
+
+    The generator records its continuation as it decodes; that is used when
+    this call set it. Otherwise the prompt's own text is cut from the front.
+    """
+    completion = getattr(gen, "last_completion", None)
+    if isinstance(completion, str):
+        return completion
+    if prompt is not None and not isinstance(prompt, str):
+        prompt = gen.tokenizer.decode(list(prompt))
+    if prompt and isinstance(decoded, str) and decoded.startswith(prompt):
+        return decoded[len(prompt):]
+    return decoded
+
+
 def _usage(gen):
     """Tokens the last generation consumed and produced, for metering.
 
@@ -681,6 +705,7 @@ def handle(gen, op, params, mind=None, tools=None):
 
             return _stream_generator()
 
+        _fresh(gen)
         out = gen.generate_text(
             prompt if prompt_ids is None else prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -694,6 +719,9 @@ def handle(gen, op, params, mind=None, tools=None):
         else:
             content = out
             finish_reason = getattr(gen, "last_finish_reason", "eos") or "eos"
+        # generate_text hands back the prompt with the continuation; the reply
+        # is the continuation alone, or every earlier turn is sent back again.
+        content = _reply(gen, content, prompt if prompt_ids is None else prompt_ids)
 
         content, reasoning = _extract_reasoning(content)
         result = {
@@ -741,7 +769,9 @@ def handle(gen, op, params, mind=None, tools=None):
             code_kwargs["max_new_tokens"] = params["max_new_tokens"]
         if params.get("temperature") is not None:
             code_kwargs["temperature"] = params["temperature"]
-        return {"content": gen.generate_code(prompt, **code_kwargs), **_usage(gen)}
+        _fresh(gen)
+        code = _reply(gen, gen.generate_code(prompt, **code_kwargs))
+        return {"content": code, **_usage(gen)}
 
     if op == "image":
         images, request = gen.generate_image(
@@ -788,11 +818,15 @@ def handle(gen, op, params, mind=None, tools=None):
         from model.data import load_waveform
 
         wav = load_waveform(params["audio_path"], gen.model.config.audio_sample_rate)
-        return {"content": gen.transcribe(wav)}
+        _fresh(gen)
+        return {"content": _reply(gen, gen.transcribe(wav)).strip()}
 
     if op == "understand":
         tensor = _load_image(params["image_path"], gen.model.config)
-        return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
+        question = params.get("prompt", "Describe this:")
+        _fresh(gen)
+        decoded = gen.generate_text(question, image=tensor)
+        return {"content": _reply(gen, decoded, question)}
 
     if op == "document":
         from .document import DOC_MARKERS, DocumentError, read_document
@@ -824,11 +858,14 @@ def handle(gen, op, params, mind=None, tools=None):
             doc_ids = gen.tokenizer.encode(
                 f"{focused}\n\n", add_special=False, allowed_special=DOC_MARKERS
             )
-            result["content"] = gen.generate_text(
-                doc_ids + gen.tokenizer.encode(prompt, add_special=False),
+            asked = doc_ids + gen.tokenizer.encode(prompt, add_special=False)
+            _fresh(gen)
+            decoded = gen.generate_text(
+                asked,
                 max_new_tokens=params.get("max_new_tokens", 256),
                 **_sampling(params),
             )
+            result["content"] = _reply(gen, decoded, asked)
         return result
 
     raise ValueError(f"Unknown op: {op}")

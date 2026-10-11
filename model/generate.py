@@ -93,6 +93,11 @@ class FramerGenerator:
         self.last_prompt_tokens_dropped = 0
         self.last_max_new_tokens = 0
         self.last_finish_reason = None
+        # The text the last generate_text call produced, without the prompt it
+        # was given. generate_text itself returns prompt and continuation
+        # together, which callers that parse prompts rely on; a reply sent to a
+        # user must be this instead.
+        self.last_completion = ""
         # What the last call consumed and produced, in tokens. Billing reads
         # these, so they count positions the backbone actually ran: the prompt
         # after any trimming plus any modality prefix, and every sampled token.
@@ -681,8 +686,10 @@ class FramerGenerator:
             gen_text = self.tokenizer.decode(new_tokens)[:earliest_stop_idx]
             prompt_text = self.tokenizer.decode(tokens)
             final_text = prompt_text + gen_text
+            self.last_completion = gen_text
         else:
             final_text = self.tokenizer.decode(generated)
+            self.last_completion = self.tokenizer.decode(new_tokens)
 
         if return_reason:
             return final_text, finish_reason

@@ -155,7 +155,7 @@ def test_serve_path_chat_template_single_application(monkeypatch):
     res1 = handle(generator, "chat", {"prompt": "what is rectified flow", "max_new_tokens": 8})
     assert len(captured_prompts) == 1
     p1 = captured_prompts[0]
-    assert res1["content"] == p1 + "I answer directly."
+    assert res1["content"] == "I answer directly."
     assert "<user><user>" not in p1
     assert "<system><system>" not in p1
     assert "<assistant><assistant>" not in p1
@@ -171,7 +171,7 @@ def test_serve_path_chat_template_single_application(monkeypatch):
     )
     assert len(captured_prompts) == 1
     p2 = captured_prompts[0]
-    assert res2["content"] == p2 + "I answer directly."
+    assert res2["content"] == "I answer directly."
     assert "<user><user>" not in p2
     assert "<system><system>" not in p2
     assert "<assistant><assistant>" not in p2
