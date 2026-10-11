@@ -1,0 +1,32 @@
+{
+  "currency": "USD",
+  "basis": {
+    "gpu_hour_usd": 2.0,
+    "margin": 0.2,
+    "note": "Rates are derived, not set by hand: GPU cost per second divided by measured throughput, plus margin. Re-measure with `python scripts/measure_throughput.py` on the serving hardware and paste its output into `throughput` below."
+  },
+  "throughput": {
+    "framerai-text": {
+      "prefill_tokens_per_second": 40000,
+      "decode_tokens_per_second": 2500,
+      "cached_input_discount": 0.9
+    },
+    "framerai-code": {
+      "prefill_tokens_per_second": 40000,
+      "decode_tokens_per_second": 2500,
+      "cached_input_discount": 0.9
+    },
+    "framerai-image": {
+      "gpu_seconds_per_megapixel": 0.6
+    },
+    "framerai-video": {
+      "gpu_seconds_per_output_second": 12.0
+    },
+    "framerai-audio": {
+      "gpu_seconds_per_output_second": 0.05
+    },
+    "framerai-transcribe": {
+      "gpu_seconds_per_input_second": 0.01
+    }
+  }
+}

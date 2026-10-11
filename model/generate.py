@@ -89,6 +89,11 @@ class FramerGenerator:
         self.last_prompt_tokens_dropped = 0
         self.last_max_new_tokens = 0
         self.last_finish_reason = None
+        # What the last call consumed and produced, in tokens. Billing reads
+        # these, so they count positions the backbone actually ran: the prompt
+        # after any trimming plus any modality prefix, and every sampled token.
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, tokenizer_path: str, device: str = "auto"):
@@ -146,6 +151,10 @@ class FramerGenerator:
         Returns the populated cache and the logits for the final prompt position.
         """
         chunk = chunk_size or DEFAULT_PREFILL_CHUNK
+        self.last_input_tokens = int(input_ids.shape[1]) + (
+            int(prefix_embeds.shape[1]) if prefix_embeds is not None else 0
+        )
+        self.last_output_tokens = 0
         starts = list(range(0, input_ids.shape[1], chunk)) or [0]
         past, logits = None, None
         consumed = {placeholder: 0 for placeholder in (modality_embeds or {})}
@@ -440,6 +449,7 @@ class FramerGenerator:
             logits = out["logits"][:, -1, :]
 
         self.last_finish_reason = finish_reason
+        self.last_output_tokens = len(new_tokens)
 
         if finish_reason == "stop":
             gen_text = self.tokenizer.decode(new_tokens)[:earliest_stop_idx]
@@ -607,6 +617,7 @@ class FramerGenerator:
                 yield delta
 
         self.last_finish_reason = finish_reason
+        self.last_output_tokens = len(new_tokens)
 
     @torch.no_grad()
     def generate_chat(

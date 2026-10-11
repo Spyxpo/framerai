@@ -15,6 +15,7 @@ const config = require("./config");
 const chatRoutes = require("./routes/chat");
 const generateRoutes = require("./routes/generate");
 const healthRoutes = require("./routes/health");
+const pricingRoutes = require("./routes/pricing");
 const { setupWebSocket } = require("./services/websocket");
 const { getOpenApiSpecJson } = require("./openapi");
 const { notFoundHandler, errorHandler } = require("./middleware/errors");
@@ -71,6 +72,7 @@ function createApp() {
 
   // Routes
   app.use("/api/health", healthRoutes);
+  app.use("/api/pricing", pricingRoutes);
   app.use("/api/chat", chatRoutes);
   // Support direct /api/conversations routes as well as /api/chat/conversations
   app.use("/api/conversations", (req, res, next) => {

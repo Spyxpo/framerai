@@ -13,6 +13,7 @@ const path = require("node:path");
 const bridge = require("./pythonBridge");
 const { logger } = require("./logger");
 const config = require("../config");
+const pricing = require("../pricing");
 
 const GENERATED_URL = "/uploads/generated";
 
@@ -436,6 +437,9 @@ async function modelChat(intent, content, settings = {}, requestIdOrOptions = nu
   const result = await bridge.request(op, params, opts.options);
   const metadata = { model: `framerai-${intent === "code" ? "code" : "text"}` };
   if (result.finish_reason) metadata.finish_reason = result.finish_reason;
+  // Tokens the worker ran, priced at the derived rate for this model.
+  const usage = pricing.meter(metadata.model, result.usage);
+  if (usage) metadata.usage = usage;
   // Report what actually reached the model, so a dropped attachment is visible
   // rather than looking like the model ignored it.
   if (attachments.length) metadata.attachments = attachments.map((a) => a.kind);
@@ -642,7 +646,10 @@ async function generateCode(prompt, language = "python", settings = {}, requestI
   if (bridge.available()) {
     try {
       const result = await bridge.request("code", { prompt, language, ...settings }, opts.options);
-      return { id: randomUUID(), prompt, code: result.content, language, metadata: { model: "framerai-code" } };
+      const metadata = { model: "framerai-code" };
+      const usage = pricing.meter(metadata.model, result.usage);
+      if (usage) metadata.usage = usage;
+      return { id: randomUUID(), prompt, code: result.content, language, metadata };
     } catch (err) {
       logger.warn("code fallback", { error: err.message, requestId: opts.requestId });
     }
