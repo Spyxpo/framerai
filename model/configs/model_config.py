@@ -35,6 +35,11 @@ class FramerConfig:
     # Transformer / Text config
     vocab_size: int = 50304
     max_seq_len: int = 2048
+    # Tokens per training sequence. None keeps the caps that suit one consumer
+    # GPU (1024 for pretraining, 512 for SFT and DPO). A frontier-scale run
+    # sets it to the pretraining length, then raises it for a long-context
+    # stage alongside rope scaling; see GUIDE.md, "Long-context training".
+    train_seq_len: int = None
     # KV cache storage. The cache, not the weights, is what decides whether a
     # long window is servable: paging grows one buffer in blocks instead of
     # reallocating the whole history per decoded token, and "int8" halves what
@@ -246,6 +251,12 @@ class FramerConfig:
         original = self.rope_original_max_seq_len or self.max_seq_len
         return self.max_seq_len / original if original else 1.0
 
+    def train_length(self, default_cap: int) -> int:
+        """Training sequence length: ``train_seq_len`` when set, else capped."""
+        if self.train_seq_len:
+            return int(self.train_seq_len)
+        return min(self.max_seq_len, default_cap)
+
     def validate(self) -> "FramerConfig":
         """Check the shape invariants the modules assume, and fail early if not.
 
@@ -321,6 +332,14 @@ class FramerConfig:
                     f"{self.context_extension:.0f}x extension max_seq_len ({self.max_seq_len}) "
                     f"asks for over rope_original_max_seq_len "
                     f"({self.rope_original_max_seq_len})"
+                )
+
+        if self.train_seq_len is not None:
+            if self.train_seq_len < 2:
+                problems.append(f"train_seq_len ({self.train_seq_len}) must be at least 2")
+            elif self.train_seq_len > self.max_seq_len:
+                problems.append(
+                    f"train_seq_len ({self.train_seq_len}) exceeds max_seq_len ({self.max_seq_len})"
                 )
 
         if self.use_moe:

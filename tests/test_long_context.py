@@ -122,3 +122,47 @@ def test_prefill_cache_covers_every_prompt_position():
 def test_prefill_chunk_default_is_bounded():
     """A default of None must not degrade into a single-shot prefill."""
     assert 0 < DEFAULT_PREFILL_CHUNK <= 8192
+
+
+# ── Training sequence length and the 128K presets ─────────────────────────
+
+ONE_TWENTY_EIGHT_K = 131072
+
+
+@pytest.mark.parametrize(
+    "preset",
+    ["framer-3b", "framer-8b", "framer-30b-a3b", "framer-160b-a16b", "framer-200b-a20b"],
+)
+def test_mid_and_large_presets_serve_128k(preset):
+    config = build_preset_config(preset)
+    assert config.max_seq_len == ONE_TWENTY_EIGHT_K
+    assert config.rope_scaling_type == "yarn"
+    assert config.rope_scaling_factor >= config.context_extension
+    # Pretrained short; the long window comes from scaling, not from training
+    # every step at 128K.
+    assert config.rope_original_max_seq_len <= 8192
+
+
+def test_train_length_keeps_the_single_gpu_caps_by_default():
+    config = tiny_config(max_seq_len=4096)
+    assert config.train_length(1024) == 1024
+    assert config.train_length(512) == 512
+    assert tiny_config(max_seq_len=256).train_length(1024) == 256
+
+
+def test_train_length_follows_an_explicit_setting():
+    config = tiny_config(max_seq_len=8192, train_seq_len=4096)
+    assert config.train_length(1024) == 4096
+    assert config.train_length(512) == 4096
+
+
+def test_a_training_length_past_the_window_is_refused():
+    with pytest.raises(ValueError, match="train_seq_len"):
+        tiny_config(max_seq_len=1024, train_seq_len=2048).validate()
+
+
+def test_the_cli_sets_the_training_length():
+    from build import _build_config_from_args, _make_parser
+
+    args = _make_parser().parse_args(["--preset", "framer-8b", "--seq-len", "8192"])
+    assert _build_config_from_args(args).train_length(1024) == 8192

@@ -241,7 +241,7 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
         load_checkpoint(resume, model=None, optimizer=optimizer, scheduler=scheduler)
         logger.info(f"Restored optimizer and scheduler state at step {start_step}")
 
-    seq_len = min(config.max_seq_len, 1024)
+    seq_len = config.train_length(1024)
 
     # Prefer streaming packed shards; fall back to the in-memory corpus loader.
     packed = build_packed_dataset(shard_dir, seq_len, rank=rank, world_size=world, seed=config.seed) if shard_dir else None
@@ -604,12 +604,12 @@ def train_sft_model(config: FramerConfig, output_dir: str, data_dir: str = "data
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
 
-    dataset = SFTDataset(data_dir, tokenizer, max_len=min(config.max_seq_len, 512))
+    dataset = SFTDataset(data_dir, tokenizer, max_len=config.train_length(512))
     if len(dataset) == 0:
         sample_path = os.path.join(os.path.dirname(__file__), "data", "examples", "sft_sample.jsonl")
         if os.path.exists(sample_path):
             logger.warning(f"No SFT data found in '{data_dir}'. Using sample SFT dataset.")
-            dataset = SFTDataset(sample_path, tokenizer, max_len=min(config.max_seq_len, 512))
+            dataset = SFTDataset(sample_path, tokenizer, max_len=config.train_length(512))
 
     if len(dataset) == 0:
         raise ValueError("No SFT data available.")
@@ -659,12 +659,12 @@ def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
 
-    dataset = DPODataset(data_dir, tokenizer, max_len=min(config.max_seq_len, 512))
+    dataset = DPODataset(data_dir, tokenizer, max_len=config.train_length(512))
     if len(dataset) == 0:
         sample_path = os.path.join(os.path.dirname(__file__), "data", "examples", "dpo_sample.jsonl")
         if os.path.exists(sample_path):
             logger.warning(f"No DPO data found in '{data_dir}'. Using sample DPO dataset.")
-            dataset = DPODataset(sample_path, tokenizer, max_len=min(config.max_seq_len, 512))
+            dataset = DPODataset(sample_path, tokenizer, max_len=config.train_length(512))
 
     if len(dataset) == 0:
         raise ValueError("No DPO data available.")
@@ -882,6 +882,9 @@ def _make_parser() -> argparse.ArgumentParser:
     # Context extension
     parser.add_argument("--rope-scaling", type=float, default=None,
                         help="RoPE scaling factor for extended context (e.g., 8.0 for 8x)")
+    parser.add_argument("--seq-len", type=int, default=None,
+                        help="Tokens per training sequence (default: 1024 for pretraining, "
+                             "512 for SFT/DPO, capped at max_seq_len)")
 
     # Evaluation
     parser.add_argument("--benchmark-dir", default="benchmarks",
@@ -935,6 +938,8 @@ def _build_config_from_args(args: argparse.Namespace) -> FramerConfig:
         config.device = args.device
     if args.rope_scaling:
         config.rope_scaling_factor = args.rope_scaling
+    if args.seq_len:
+        config.train_seq_len = args.seq_len
     if args.seed is not None:
         config.seed = args.seed
     if args.tokenizer_vocab_size is not None:
