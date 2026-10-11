@@ -13,6 +13,7 @@ const {
   verifyAudio,
   transcribeAudio,
   understandImage,
+  understandVideo,
   readDocument,
 } = require("../services/model");
 const { ApiError, asyncHandler } = require("../middleware/errors");
@@ -94,11 +95,13 @@ const LANGUAGES = [
 ];
 
 // Route uploads to a subfolder chosen by the form field name.
-const UPLOAD_SUBDIRS = { audio: "audio", document: "documents", image: "images" };
+const UPLOAD_SUBDIRS = { audio: "audio", document: "documents", image: "images", mask: "images", video: "clips" };
 
 // A generic upload field says nothing about the file, so fall back to its type.
 function bucketForMime(mimetype = "") {
   if (mimetype.startsWith("audio/")) return "audio";
+  // Not "videos": that directory holds model output with its own lifecycle.
+  if (mimetype.startsWith("video/")) return "clips";
   if (DOCUMENT_MIME_TYPES.includes(mimetype)) return "documents";
   return "images";
 }
@@ -133,6 +136,10 @@ const MIME_EXTENSIONS = {
   "audio/mp4":     ".m4a",
   "audio/x-m4a":   ".m4a",
   "audio/webm":    ".webm",
+  // video
+  "video/mp4":       ".mp4",
+  "video/webm":      ".webm",
+  "video/quicktime": ".mov",
   // documents — exact allowlist from DOCUMENT_TYPES
   ...DOCUMENT_TYPES,
 };
@@ -220,6 +227,22 @@ const uploadAttachment = multer({
   },
 });
 
+// Sampler controls shared by generation and editing. `shift` spends more steps
+// at high noise; `guidance_interval` applies guidance only between two times.
+function readSampler(v) {
+  const out = {};
+  const shift = v.number("shift", { min: 0.1, max: 10 });
+  if (shift !== undefined) out.shift = shift;
+  const interval = v.array("guidance_interval", { max: 2 });
+  if (interval && interval.length) {
+    const ok = interval.length === 2 && interval.every((n) => typeof n === "number" && n >= 0 && n <= 1)
+      && interval[0] <= interval[1];
+    if (!ok) v.fail("guidance_interval", "must be two numbers in [0, 1], low then high");
+    else out.guidance_interval = interval;
+  }
+  return out;
+}
+
 // Generate image from text
 router.post(
   "/image",
@@ -236,6 +259,7 @@ router.post(
     const tier = v.oneOf("tier", SIZE_TIERS);
     const seed = v.integer("seed", { min: 0, max: 2 ** 31 - 1 });
     const resolution = v.oneOf("resolution", RESOLUTIONS);
+    const sampler = readSampler(v);
     v.done();
 
     if ((width === undefined) !== (height === undefined)) {
@@ -245,7 +269,7 @@ router.post(
     }
 
     res.json(
-      await generateImage(prompt, numImages, { width, height, aspect, tier, seed, resolution }, req.requestId)
+      await generateImage(prompt, numImages, { width, height, aspect, tier, seed, resolution, ...sampler }, req.requestId)
     );
   })
 );
@@ -344,6 +368,85 @@ router.post(
       throw new ApiError(503, "The model worker is not running, so audio cannot be checked", "MODEL_UNAVAILABLE");
     }
     res.json(result);
+  })
+);
+
+const mimeImages = mimeFilter("image/");
+
+// `/image-edit`'s handler reads four fields: `prompt`, `strength`, `seed` and `shift`.
+const uploadEdit = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 2, fields: 4, fieldSize: config.maxMultipartFieldSize },
+  fileFilter: mimeImages,
+});
+
+// Redraw an uploaded image to a prompt, or repaint only where a mask is white.
+router.post(
+  "/image-edit",
+  uploadEdit.fields([{ name: "image", maxCount: 1 }, { name: "mask", maxCount: 1 }]),
+  asyncHandler(async (req, res) => {
+    const image = req.files && req.files.image && req.files.image[0];
+    if (!image) throw ApiError.badRequest("Request validation failed", [{ field: "image", message: "is required" }]);
+    const mask = req.files.mask && req.files.mask[0];
+
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
+    const strength = v.number("strength", { min: 0, max: 1, fallback: 0.6 });
+    const seed = v.integer("seed", { min: 0, max: 2 ** 31 - 1 });
+    const shift = v.number("shift", { min: 0.1, max: 10 });
+    v.done();
+
+    const edit = { init_image_path: image.path, strength, seed, shift };
+    if (mask) edit.mask_path = mask.path;
+    res.json(await generateImage(prompt, 1, edit, req.requestId));
+  })
+);
+
+// `/animate`'s handler reads four fields: `prompt`, `num_frames`, `fps` and `seed`.
+const uploadAnimate = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 4, fieldSize: config.maxMultipartFieldSize },
+  fileFilter: mimeImages,
+});
+
+// Make a clip that opens on an uploaded image and continues from it.
+router.post(
+  "/animate",
+  uploadAnimate.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "image", message: "is required" }]);
+
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
+    const numFrames = v.integer("num_frames", { min: 1, max: MAX_FRAMES, fallback: 16 });
+    const fps = v.integer("fps", { min: MIN_FPS, max: MAX_FPS });
+    const seed = v.integer("seed", { min: 0, max: 2 ** 31 - 1 });
+    v.done();
+
+    res.json(await generateVideo(prompt, numFrames, { fps, seed, first_frame_path: req.file.path }, req.requestId));
+  })
+);
+
+// `/understand-video`'s handler reads one field: `prompt`.
+const uploadVideo = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 1, fieldSize: config.maxMultipartFieldSize },
+  fileFilter: mimeFilter("video/"),
+});
+
+// Answer a question about an uploaded video, from frames spread across it.
+router.post(
+  "/understand-video",
+  uploadVideo.single("video"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "video", message: "is required" }]);
+
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { max: modelLimits.promptChars(), fallback: "Describe this video:" });
+    v.done();
+
+    const result = await understandVideo(req.file.path, prompt, req.requestId);
+    res.json({ description: result.description, frames: result.frames, videoPath: `/uploads/clips/${req.file.filename}` });
   })
 );
 
