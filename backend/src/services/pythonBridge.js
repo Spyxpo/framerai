@@ -24,6 +24,9 @@ function resolvePath(p, base) {
 const MODEL_PATH = resolvePath(process.env.MODEL_PATH, BACKEND_ROOT);
 const TOKENIZER_PATH = resolvePath(process.env.TOKENIZER_PATH, BACKEND_ROOT);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+// A smaller FramerAI checkpoint for speculative decoding, resolved like
+// MODEL_PATH so a relative path means the same thing in both.
+const MODEL_DRAFT_PATH = resolvePath(process.env.MODEL_DRAFT_PATH, BACKEND_ROOT);
 const MODEL_ENABLED = (process.env.MODEL_ENABLED || "true").toLowerCase() !== "false";
 const REQUEST_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS || 180000);
 const STARTUP_TIMEOUT_MS = Number(process.env.MODEL_STARTUP_TIMEOUT_MS || 60000);
@@ -110,6 +113,7 @@ class Worker {
     return new Promise((resolve) => {
       const argv = ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH];
       if (MODEL_TOOLS) argv.push("--tools", MODEL_TOOLS);
+      if (MODEL_DRAFT_PATH) argv.push("--draft", MODEL_DRAFT_PATH);
       if (MODEL_TOOLS.includes("cli")) {
         argv.push("--cli-mode", MODEL_CLI_MODE, "--cli-root", MODEL_CLI_ROOT);
       }

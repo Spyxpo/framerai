@@ -147,6 +147,40 @@ class KVCache:
             total += self._key_scales.numel() * self._key_scales.element_size() * 2
         return total
 
+    def truncate(self, length: int):
+        """Forget every position from ``length`` on, keeping the buffer.
+
+        Speculative decoding writes a run of drafted tokens and then discards
+        the ones the target rejected; moving the length back is all that takes,
+        because nothing past it is ever read.
+        """
+        if length < 0 or length > self.length:
+            raise ValueError(f"cannot truncate a cache of {self.length} to {length}")
+        self.length = int(length)
+        return self
+
+    def fork(self, length: int = None):
+        """An independent copy of the first ``length`` positions.
+
+        A reused prefix must not be appended to in place, or the next request
+        that matches it would read the previous request's answer as context.
+        """
+        length = self.length if length is None else int(length)
+        if length < 0 or length > self.length:
+            raise ValueError(f"cannot fork {length} positions from a cache of {self.length}")
+        clone = KVCache(block_size=self.block_size, quantized=self.quantized)
+        if self._keys is None or length == 0:
+            return clone
+        capacity = clone._blocks_for(length)
+        clone._dtype = self._dtype
+        clone._keys = self._keys[:, :, :capacity].clone()
+        clone._values = self._values[:, :, :capacity].clone()
+        if self.quantized:
+            clone._key_scales = self._key_scales[:, :, :capacity].clone()
+            clone._value_scales = self._value_scales[:, :, :capacity].clone()
+        clone.length = length
+        return clone
+
     def __len__(self) -> int:
         return self.length
 
@@ -175,3 +209,32 @@ def cache_bytes_per_token(n_layers: int, n_kv_heads: int, head_dim: int,
         return 2.0 * per_layer * n_layers  # bf16
     scales = 2 * 2 * n_kv_heads  # one bf16 scale per token, head, and tensor
     return float(per_layer + scales) * n_layers
+
+
+def cache_length(past) -> int:
+    """Positions one layer's cache holds, paged or a plain (keys, values) pair."""
+    if isinstance(past, KVCache):
+        return len(past)
+    return past[0].shape[2]
+
+
+def truncate_cache(past_kvs: list, length: int) -> list:
+    """Every layer's cache cut back to ``length`` positions."""
+    out = []
+    for past in past_kvs:
+        if isinstance(past, KVCache):
+            out.append(past.truncate(length))
+        else:
+            out.append((past[0][:, :, :length], past[1][:, :, :length]))
+    return out
+
+
+def fork_cache(past_kvs: list, length: int) -> list:
+    """An independent copy of every layer's first ``length`` positions."""
+    out = []
+    for past in past_kvs:
+        if isinstance(past, KVCache):
+            out.append(past.fork(length))
+        else:
+            out.append((past[0][:, :, :length].clone(), past[1][:, :, :length].clone()))
+    return out

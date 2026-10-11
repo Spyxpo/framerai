@@ -211,12 +211,14 @@ def _usage(gen):
     Read from the generator rather than recounted here, so the figure is what
     the backbone actually ran after the window trimmed the prompt.
     """
-    return {
-        "usage": {
-            "input_tokens": int(getattr(gen, "last_input_tokens", 0) or 0),
-            "output_tokens": int(getattr(gen, "last_output_tokens", 0) or 0),
-        }
+    usage = {
+        "input_tokens": int(getattr(gen, "last_input_tokens", 0) or 0),
+        "output_tokens": int(getattr(gen, "last_output_tokens", 0) or 0),
     }
+    cached = int(getattr(gen, "last_cached_input_tokens", 0) or 0)
+    if cached:
+        usage["cached_input_tokens"] = cached
+    return {"usage": usage}
 
 
 def _sampling(params):
@@ -871,6 +873,23 @@ def load_mind(generator, path):
     return Mind.from_generator(generator)
 
 
+def _accelerate(gen, args):
+    """Attach the serving accelerators the arguments ask for."""
+    from model.generate import FramerGenerator
+    from model.prefix_cache import PrefixCache
+    from model.quantize import quantize_model
+
+    quantize_model(gen.model, args.weight_dtype)
+    if args.prefix_cache > 0:
+        gen.prefix_cache = PrefixCache(
+            max_entries=args.prefix_cache, max_tokens=args.prefix_cache_tokens
+        )
+    if args.draft:
+        draft = FramerGenerator.from_checkpoint(args.draft, args.tokenizer, args.device)
+        quantize_model(draft.model, args.weight_dtype)
+        gen.attach_draft(draft, k=args.speculate_k)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FramerAI inference worker")
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH"))
@@ -905,6 +924,29 @@ def main():
         "--heartbeat-interval", type=float, default=float(os.environ.get("MODEL_HEARTBEAT_INTERVAL", 2.0)),
         help="seconds between liveness heartbeat signals; the bridge uses these to detect wedged workers",
     )
+    parser.add_argument(
+        "--weight-dtype", default=os.environ.get("MODEL_WEIGHT_DTYPE", "auto"), choices=("auto", "int8"),
+        help="int8 holds transformer weights as int8 with per-channel scales, halving or "
+             "quartering weight memory and the bytes read per decoded token",
+    )
+    parser.add_argument(
+        "--prefix-cache", type=int, default=int(os.environ.get("MODEL_PREFIX_CACHE", 16)),
+        help="prompt caches kept for reuse across requests; 0 turns reuse off",
+    )
+    parser.add_argument(
+        "--prefix-cache-tokens", type=int,
+        default=int(os.environ.get("MODEL_PREFIX_CACHE_TOKENS", 65536)),
+        help="ceiling on the tokens held across all reusable prompt caches",
+    )
+    parser.add_argument(
+        "--draft", default=os.environ.get("MODEL_DRAFT_PATH"),
+        help="checkpoint of a smaller FramerAI model sharing the tokenizer, used to "
+             "draft tokens for speculative decoding",
+    )
+    parser.add_argument(
+        "--speculate-k", type=int, default=int(os.environ.get("MODEL_SPECULATE_K", 4)),
+        help="tokens the draft proposes per verification step",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -915,6 +957,7 @@ def main():
         from model.generate import FramerGenerator
 
         gen = FramerGenerator.from_checkpoint(args.model, args.tokenizer, args.device)
+        _accelerate(gen, args)
     except Exception as exc:  # noqa: BLE001 - report any load failure to the caller
         _print({"ready": False, "error": str(exc)})
         sys.exit(1)

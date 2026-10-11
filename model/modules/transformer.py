@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..configs.model_config import ROPE_SCALING_TYPES
-from .kv_cache import DEFAULT_BLOCK_SIZE, KVCache
+from .kv_cache import DEFAULT_BLOCK_SIZE, KVCache, cache_length
 
 
 class RMSNorm(nn.Module):
@@ -256,7 +256,9 @@ class CausalSelfAttention(nn.Module):
     ):
         B, T, C = x.shape
         has_past = past_kv is not None
-        offset = past_kv[0].shape[2] if has_past else 0
+        # Read the length, not the keys: on an int8 cache the keys are a
+        # dequantised copy of the whole history.
+        offset = cache_length(past_kv) if has_past else 0
 
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)

@@ -7,12 +7,16 @@ from PIL import Image
 
 from .configs import FramerConfig
 from .framer import FramerModel
+from .modules.kv_cache import truncate_cache
 from .tokenizer import FramerTokenizer
 from .utils.image_request import resolve_image_request
 
 # Prompt tokens pushed through the KV cache per prefill step. Bounded so a very
 # long prompt costs the same activation memory as a short one.
 DEFAULT_PREFILL_CHUNK = 4096
+
+# Tokens a draft model proposes per verification step.
+DEFAULT_SPECULATE_K = 4
 
 
 def _filter_logits(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
@@ -94,6 +98,16 @@ class FramerGenerator:
         # after any trimming plus any modality prefix, and every sampled token.
         self.last_input_tokens = 0
         self.last_output_tokens = 0
+        # Of the input tokens, how many came from a reused prompt cache.
+        self.last_cached_input_tokens = 0
+        # Optional serving accelerators, both off unless a caller attaches
+        # them: a PrefixCache, and a smaller FramerGenerator sharing this
+        # tokenizer that drafts tokens for speculative decoding.
+        self.prefix_cache = None
+        self.draft = None
+        self.speculate_k = DEFAULT_SPECULATE_K
+        self.last_draft_accepted = 0
+        self.last_draft_proposed = 0
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, tokenizer_path: str, device: str = "auto"):
@@ -155,11 +169,29 @@ class FramerGenerator:
             int(prefix_embeds.shape[1]) if prefix_embeds is not None else 0
         )
         self.last_output_tokens = 0
-        starts = list(range(0, input_ids.shape[1], chunk)) or [0]
-        past, logits = None, None
+        self.last_cached_input_tokens = 0
+
+        # Only a text prompt is cacheable: modality positions are not tokens,
+        # so equal ids do not mean equal context.
+        prefix_cache = getattr(self, "prefix_cache", None)
+        cacheable = (
+            prefix_cache is not None
+            and prefix_embeds is None
+            and not modality_embeds
+            and input_ids.shape[0] == 1
+        )
+        past, reused = None, 0
+        if cacheable:
+            tokens = input_ids[0].tolist()
+            reused, past = prefix_cache.lookup(tokens)
+            self.last_cached_input_tokens = reused
+
+        remaining = input_ids[:, reused:]
+        starts = list(range(0, remaining.shape[1], chunk)) or [0]
+        logits = None
         consumed = {placeholder: 0 for placeholder in (modality_embeds or {})}
         for start in starts:
-            piece = input_ids[:, start:start + chunk]
+            piece = remaining[:, start:start + chunk]
             chunk_embeds = (
                 self._chunk_modality_embeds(piece, modality_embeds, consumed)
                 if modality_embeds
@@ -174,6 +206,9 @@ class FramerGenerator:
             )
             past = out["past_kvs"]
             logits = out["logits"][:, -1, :]
+
+        if cacheable:
+            prefix_cache.store(tokens, past)
         return past, logits
 
     def _fit_to_window(
@@ -321,6 +356,206 @@ class FramerGenerator:
             modality_embeds[builder.audio_frame] = audio_embeds
         return tokens, modality_embeds
 
+    def attach_draft(self, draft, k: int = DEFAULT_SPECULATE_K):
+        """Use ``draft``, a smaller FramerAI generator, for speculative decoding.
+
+        The draft has to speak the same tokens, or its proposals would be ids
+        that mean something else to the target.
+        """
+        if draft.model.config.vocab_size != self.model.config.vocab_size:
+            raise ValueError(
+                f"draft vocabulary {draft.model.config.vocab_size} does not match "
+                f"target vocabulary {self.model.config.vocab_size}"
+            )
+        same = (
+            draft.tokenizer.merges == self.tokenizer.merges
+            and draft.tokenizer.marker_tokens == self.tokenizer.marker_tokens
+        )
+        if not same:
+            raise ValueError("draft and target tokenizers differ")
+        if k < 1:
+            raise ValueError(f"k must be positive, got {k}")
+        self.draft = draft
+        self.speculate_k = int(k)
+        return self
+
+    def _distribution(self, logits, temperature, top_k, top_p):
+        """The sampling distribution over a (1, V) logits row, after filtering."""
+        step = _filter_logits(logits / temperature, top_k, top_p)
+        return F.softmax(step, dim=-1)
+
+    def _pick(self, logits, generated, temperature, top_k, top_p, repetition_penalty, generator):
+        step = _apply_repetition_penalty(logits, generated, repetition_penalty)
+        if temperature <= 0:
+            return step.argmax(dim=-1).item()
+        probs = self._distribution(step, temperature, top_k, top_p)
+        return torch.multinomial(probs, num_samples=1, generator=generator).item()
+
+    def _can_speculate(self, input_ids, repetition_penalty, text_only=True) -> bool:
+        """Whether the attached draft may propose tokens for this request.
+
+        The draft sees token ids only, so a prompt carrying an image or audio
+        is decoded plainly. A repetition penalty depends on the tokens accepted
+        so far, which the draft's proposals would read out of order.
+        """
+        return (
+            getattr(self, "draft", None) is not None
+            and text_only
+            and self.speculate_k > 0
+            and input_ids.shape[0] == 1
+            and (repetition_penalty is None or repetition_penalty == 1.0)
+        )
+
+    def _decode_tokens(self, past, logits, input_ids, generated, max_new_tokens,
+                       temperature, top_k, top_p, repetition_penalty, generator,
+                       text_only=True):
+        """Yield sampled token ids, running the backbone between them.
+
+        The caller appends each token to ``generated`` and decides when to stop;
+        closing the iterator early is how an end marker or a stop string ends
+        generation. No forward runs after the last token is handed out.
+        """
+        self.last_draft_accepted = 0
+        self.last_draft_proposed = 0
+        if self._can_speculate(input_ids, repetition_penalty, text_only):
+            yield from self._speculative_tokens(
+                past, logits, input_ids, max_new_tokens, temperature, top_k, top_p, generator
+            )
+            return
+
+        for i in range(max_new_tokens):
+            next_token = self._pick(
+                logits, generated, temperature, top_k, top_p, repetition_penalty, generator
+            )
+            yield next_token
+            if i == max_new_tokens - 1:
+                return
+            nxt = torch.tensor([[next_token]], device=self.device)
+            out = self.model.forward_lm(nxt, past_kvs=past, use_cache=True)
+            past = out["past_kvs"]
+            logits = out["logits"][:, -1, :]
+
+    def _speculative_tokens(self, past, logits, input_ids, max_new_tokens,
+                            temperature, top_k, top_p, generator):
+        """Speculative decoding against the attached draft model.
+
+        The draft proposes ``speculate_k`` tokens one at a time, which is cheap
+        because it is small; the target then scores all of them in a single
+        forward, which costs about what one decode step does because decode is
+        bound by reading weights, not by arithmetic. Each proposal is accepted
+        with probability ``min(1, p/q)`` and the first rejection is replaced by
+        a draw from the normalised residual ``max(p - q, 0)``, so the output
+        follows the target's distribution exactly. Under greedy decoding a
+        proposal is accepted iff it is the target's argmax, so the output is
+        token for token what plain greedy decoding gives.
+
+        The draft is another FramerAI checkpoint sharing this tokenizer, so no
+        outside model is involved in what is produced.
+        """
+        greedy = temperature <= 0
+        draft = self.draft
+        draft_past, draft_logits = draft._prefill(input_ids)
+        # Text only, so both caches hold exactly the prompt's tokens.
+        length = int(input_ids.shape[1])
+        produced = 0
+
+        def dist(row):
+            if greedy:
+                return None
+            return self._distribution(row, temperature, top_k, top_p)
+
+        while produced < max_new_tokens:
+            k = min(self.speculate_k, max_new_tokens - produced)
+
+            proposals, q_rows = [], []
+            d_logits, d_past = draft_logits, draft_past
+            for j in range(k):
+                q = dist(d_logits)
+                if greedy:
+                    t = d_logits.argmax(dim=-1).item()
+                else:
+                    t = torch.multinomial(q, num_samples=1, generator=generator).item()
+                proposals.append(t)
+                q_rows.append(q)
+                if j < k - 1:
+                    out = draft.model.forward_lm(
+                        torch.tensor([[t]], device=draft.device), past_kvs=d_past, use_cache=True
+                    )
+                    d_past, d_logits = out["past_kvs"], out["logits"][:, -1, :]
+
+            out = self.model.forward_lm(
+                torch.tensor([proposals], device=self.device), past_kvs=past, use_cache=True
+            )
+            past = out["past_kvs"]
+            # Row j scores the position proposal j was drafted for.
+            rows = [logits] + [out["logits"][:, j, :] for j in range(k)]
+
+            accepted, extra = 0, None
+            for j, t in enumerate(proposals):
+                row = rows[j]
+                if greedy:
+                    target = row.argmax(dim=-1).item()
+                    if target == t:
+                        accepted += 1
+                        continue
+                    extra = target
+                    break
+                p = dist(row)
+                ratio = (p[0, t] / q_rows[j][0, t].clamp(min=1e-20)).item()
+                u = torch.rand((), generator=generator, device=p.device).item() if generator is not None                     else torch.rand(()).item()
+                if u < min(1.0, ratio):
+                    accepted += 1
+                    continue
+                residual = (p - q_rows[j]).clamp(min=0)
+                total = residual.sum()
+                residual = residual / total if total > 0 else p
+                extra = torch.multinomial(residual, num_samples=1, generator=generator).item()
+                break
+
+            self.last_draft_proposed += k
+            self.last_draft_accepted += accepted
+
+            for t in proposals[:accepted]:
+                yield t
+                produced += 1
+            if produced >= max_new_tokens:
+                return
+
+            if extra is None:
+                # Every proposal stood: the target's next row is free.
+                bonus = rows[k]
+                extra = bonus.argmax(dim=-1).item() if greedy else torch.multinomial(
+                    dist(bonus), num_samples=1, generator=generator
+                ).item()
+
+            # Both caches go back to the accepted run, then take the extra token.
+            length += accepted
+            past = truncate_cache(past, length)
+            draft_cache_len = length
+            if accepted == k:
+                # The draft never ran its last proposal; run it so its cache
+                # covers every accepted token.
+                out = draft.model.forward_lm(
+                    torch.tensor([[proposals[-1]]], device=draft.device),
+                    past_kvs=d_past, use_cache=True,
+                )
+                d_past = out["past_kvs"]
+            draft_past = truncate_cache(d_past, draft_cache_len)
+
+            yield extra
+            produced += 1
+            if produced >= max_new_tokens:
+                return
+
+            step = torch.tensor([[extra]], device=self.device)
+            out = self.model.forward_lm(step, past_kvs=past, use_cache=True)
+            past, logits = out["past_kvs"], out["logits"][:, -1, :]
+            out = draft.model.forward_lm(
+                torch.tensor([[extra]], device=draft.device), past_kvs=draft_past, use_cache=True
+            )
+            draft_past, draft_logits = out["past_kvs"], out["logits"][:, -1, :]
+            length += 1
+
     @torch.no_grad()
     def generate_text(
         self,
@@ -413,15 +648,11 @@ class FramerGenerator:
         new_tokens = []
         finish_reason = "length"
 
-        for _ in range(max_new_tokens):
-            step = _apply_repetition_penalty(logits, generated, repetition_penalty)
-            if temperature <= 0:
-                next_token = step.argmax(dim=-1).item()
-            else:
-                step = step / temperature
-                step = _filter_logits(step, top_k, top_p)
-                probs = F.softmax(step, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1, generator=generator).item()
+        for next_token in self._decode_tokens(
+            past, logits, input_ids, generated, max_new_tokens,
+            temperature, top_k, top_p, repetition_penalty, generator,
+            text_only=prefix_embeds is None and not modality_embeds,
+        ):
 
             if next_token == self.tokenizer.eos_id:
                 finish_reason = "eos"
@@ -442,11 +673,6 @@ class FramerGenerator:
                 if earliest_stop_idx != -1:
                     finish_reason = "stop"
                     break
-
-            nxt = torch.tensor([[next_token]], device=self.device)
-            out = self.model.forward_lm(nxt, past_kvs=past, use_cache=True)
-            past = out["past_kvs"]
-            logits = out["logits"][:, -1, :]
 
         self.last_finish_reason = finish_reason
         self.last_output_tokens = len(new_tokens)
@@ -534,15 +760,11 @@ class FramerGenerator:
         pending_buffer = ""
         finish_reason = "length"
 
-        for _ in range(max_new_tokens):
-            step = _apply_repetition_penalty(logits, generated, repetition_penalty)
-            if temperature <= 0:
-                next_token = step.argmax(dim=-1).item()
-            else:
-                step = step / temperature
-                step = _filter_logits(step, top_k, top_p)
-                probs = F.softmax(step, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1, generator=generator).item()
+        for next_token in self._decode_tokens(
+            past, logits, input_ids, generated, max_new_tokens,
+            temperature, top_k, top_p, repetition_penalty, generator,
+            text_only=prefix_embeds is None and not modality_embeds,
+        ):
 
             if next_token == self.tokenizer.eos_id:
                 finish_reason = "eos"
@@ -594,11 +816,6 @@ class FramerGenerator:
                         delta = pending_buffer
                         pending_buffer = ""
                         yield (delta, None) if return_reason else delta
-
-            nxt = torch.tensor([[next_token]], device=self.device)
-            out = self.model.forward_lm(nxt, past_kvs=past, use_cache=True)
-            past = out["past_kvs"]
-            logits = out["logits"][:, -1, :]
 
         if finish_reason != "stop":
             decoded_full = self.tokenizer.decode(new_tokens)

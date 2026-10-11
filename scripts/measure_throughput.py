@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from model.generate import FramerGenerator
+from model.quantize import quantize_model
 
 
 def _sync(device):
@@ -65,9 +66,11 @@ def main():
     parser.add_argument("--prompt-tokens", type=int, default=1024)
     parser.add_argument("--new-tokens", type=int, default=128)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--weight-dtype", default="auto", choices=("auto", "int8"))
     args = parser.parse_args()
 
     gen = FramerGenerator.from_checkpoint(args.checkpoint, args.tokenizer, device=args.device)
+    quantize_model(gen.model, args.weight_dtype)
     window = int(getattr(gen.model.config, "max_seq_len", 0) or 0)
     prompt_tokens = min(args.prompt_tokens, window - args.new_tokens - 2) if window else args.prompt_tokens
 
