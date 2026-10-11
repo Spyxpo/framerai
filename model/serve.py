@@ -205,6 +205,20 @@ def _window_report(gen, requested_max_new_tokens):
     return report
 
 
+def _usage(gen):
+    """Tokens the last generation consumed and produced, for metering.
+
+    Read from the generator rather than recounted here, so the figure is what
+    the backbone actually ran after the window trimmed the prompt.
+    """
+    return {
+        "usage": {
+            "input_tokens": int(getattr(gen, "last_input_tokens", 0) or 0),
+            "output_tokens": int(getattr(gen, "last_output_tokens", 0) or 0),
+        }
+    }
+
+
 def _sampling(params):
     """Sampling controls the caller set, leaving the rest to the generator."""
     keys = ("temperature", "top_k", "top_p", "repetition_penalty", "stop", "seed")
@@ -613,6 +627,7 @@ def handle(gen, op, params, mind=None, tools=None):
                     "content": cleaned,
                     "finish_reason": finish_reason,
                     **_window_report(gen, max_new_tokens),
+                    **_usage(gen),
                 }
                 if return_reasoning:
                     res["reasoning"] = reasoning if reasoning is not None else ""
@@ -639,6 +654,7 @@ def handle(gen, op, params, mind=None, tools=None):
             "content": content,
             "finish_reason": finish_reason,
             **_window_report(gen, max_new_tokens),
+            **_usage(gen),
         }
         if return_reasoning:
             result["reasoning"] = reasoning if reasoning is not None else ""
@@ -679,7 +695,7 @@ def handle(gen, op, params, mind=None, tools=None):
             code_kwargs["max_new_tokens"] = params["max_new_tokens"]
         if params.get("temperature") is not None:
             code_kwargs["temperature"] = params["temperature"]
-        return {"content": gen.generate_code(prompt, **code_kwargs)}
+        return {"content": gen.generate_code(prompt, **code_kwargs), **_usage(gen)}
 
     if op == "image":
         images, request = gen.generate_image(
