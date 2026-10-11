@@ -271,6 +271,39 @@ MAX_ATTACHMENT_PAGES = 2000
 ATTACHMENT_CHARS_PER_TOKEN = 3
 
 
+# How far past its share of the window a document is read when there is a
+# question to choose passages by. Reading more costs parse time, bounded here;
+# choosing from more is what lets the right passage be found at all.
+RETRIEVAL_READ_FACTOR = 8
+
+
+def _focus(text, query, budget):
+    """Fit document text to ``budget`` by keeping the passages ``query`` needs.
+
+    Returns ``(text, excerpted)``. Without a question, or when the text fits,
+    the text comes back unchanged and the caller cuts it as before.
+    """
+    from .document import DOC_END_TOKEN
+    from .retrieval import select_relevant
+
+    if budget is None or not query or len(text) <= budget:
+        return text, False
+    excerpt, selected = select_relevant(text, query, max(budget - len(DOC_END_TOKEN) - 1, 1))
+    if not selected:
+        return text, False
+    if DOC_END_TOKEN not in excerpt:
+        excerpt += "\n" + DOC_END_TOKEN
+    return excerpt, True
+
+
+def _last_user_text(messages, prompt):
+    """The question a turn asks: the latest user message, else the prompt."""
+    for message in reversed(messages or []):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return prompt or None
+
+
 def _attachment_chars(config):
     """Characters of document text a request may carry, or None with no window.
 
@@ -328,7 +361,7 @@ def _load_image(path, config):
     return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
 
 
-def _read_attachments(gen, attachments):
+def _read_attachments(gen, attachments, query=None):
     """Turn resolved attachments into an image tensor and any document text.
 
     The backend has already checked that every path sits inside its uploads
@@ -356,13 +389,22 @@ def _read_attachments(gen, attachments):
             if pages_left <= 0 or (chars_left is not None and chars_left <= 0):
                 documents.append("[document skipped: the other attachments used up what a request may read]")
                 continue
+            # With a question, read further than fits and keep what it needs.
+            read_chars = chars_left
+            if query and chars_left is not None:
+                read_chars = chars_left * RETRIEVAL_READ_FACTOR
             try:
-                document = read_document(path, max_pages=pages_left, max_chars=chars_left)
+                document = read_document(path, max_pages=pages_left, max_chars=read_chars)
             except DocumentError as exc:
                 documents.append(f"[document could not be read: {exc}]")
                 continue
-            text = document.to_text()
-            if document.truncated:
+            text, excerpted = _focus(document.to_text(), query, chars_left)
+            truncated = document.truncated
+            if not excerpted and chars_left is not None and len(text) > chars_left:
+                text, truncated = text[:chars_left], True
+            if excerpted:
+                text += "\n[document excerpted: passages chosen for relevance to the question]"
+            elif truncated:
                 text += "\n[document truncated: the rest was not read]"
             documents.append(text)
             pages_left -= len(document)
@@ -529,7 +571,9 @@ def handle(gen, op, params, mind=None, tools=None):
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
-        image, documents = _read_attachments(gen, params.get("attachments"))
+        image, documents = _read_attachments(
+            gen, params.get("attachments"), query=_last_user_text(messages, prompt)
+        )
 
         template_version = params.get("chat_template_version")
         if not template_version:
@@ -771,8 +815,14 @@ def handle(gen, op, params, mind=None, tools=None):
             "text": text,
         }
         if prompt:
+            budget = _attachment_chars(gen.model.config)
+            if budget is not None:
+                budget = max(budget - len(prompt) * 2, 1)
+            focused, excerpted = _focus(text, prompt, budget)
+            if excerpted:
+                result["excerpted"] = True
             doc_ids = gen.tokenizer.encode(
-                f"{text}\n\n", add_special=False, allowed_special=DOC_MARKERS
+                f"{focused}\n\n", add_special=False, allowed_special=DOC_MARKERS
             )
             result["content"] = gen.generate_text(
                 doc_ids + gen.tokenizer.encode(prompt, add_special=False),

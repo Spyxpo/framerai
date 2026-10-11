@@ -25,6 +25,34 @@ async function uploadRequest(path, formData) {
   return res.json();
 }
 
+
+// Types the backend accepts for a file a browser leaves unlabelled. Source code
+// and office files often arrive as "" or application/octet-stream, which the
+// server refuses, so they are labelled by extension before upload.
+const TYPES_BY_EXTENSION = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  csv: "text/csv", html: "text/html", htm: "text/html", json: "application/json",
+  md: "text/markdown", txt: "text/plain", py: "text/x-python", js: "text/javascript",
+  mjs: "text/javascript", ts: "application/typescript", tsx: "application/typescript",
+  jsx: "text/javascript", java: "text/x-java-source", go: "text/x-go", rs: "text/x-rust",
+  c: "text/x-c", h: "text/x-c", cpp: "text/x-c++src", cc: "text/x-c++src", hpp: "text/x-c++src",
+  cs: "text/x-csharp", rb: "text/x-ruby", php: "text/x-php", sh: "application/x-sh",
+  sql: "application/sql", css: "text/css", yaml: "application/yaml", yml: "application/yaml",
+  toml: "application/toml",
+};
+
+export function labelled(file) {
+  const ext = (file.name || "").split(".").pop().toLowerCase();
+  const type = TYPES_BY_EXTENSION[ext];
+  // A browser's own label wins unless it is missing or generic, or names a
+  // type the server would refuse for this extension (.ts as video/mp2t).
+  const generic = !file.type || file.type === "application/octet-stream" || file.type === "video/mp2t";
+  if (!type || !generic) return file;
+  return new File([file], file.name, { type, lastModified: file.lastModified });
+}
+
 export const api = {
   // Health
   health: () => request("/health"),
@@ -128,7 +156,7 @@ export const api = {
   // Store a file and get back the path a chat message can attach. No model runs.
   uploadAttachment: (file) => {
     const form = new FormData();
-    form.append("file", file);
+    form.append("file", labelled(file));
     return uploadRequest("/generate/upload", form);
   },
 

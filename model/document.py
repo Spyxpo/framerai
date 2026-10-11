@@ -608,7 +608,7 @@ def read_pdf(
 def read_document(
     path: str, max_pages: int | None = None, max_chars: int | None = None
 ) -> Document:
-    """Read any supported document. PDF today; the dispatch point for more.
+    """Read any supported document: PDF, text, office files, web pages, data, code.
 
     ``max_chars`` stops a long file being read past that much text; see
     :func:`read_pdf`. A plain-text file is one page, so ``max_pages`` does not
@@ -629,6 +629,10 @@ def read_document(
         return Document(
             path=path, pages=[Page(number=1, text=text.strip())], truncated=truncated
         )
+    from . import document_formats
+
+    if document_formats.handles(path):
+        return document_formats.read(path, max_pages=max_pages, max_chars=max_chars)
     raise DocumentError(f"unsupported document type: '{path}'")
 
 

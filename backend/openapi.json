@@ -1275,7 +1275,7 @@
                   "file": {
                     "type": "string",
                     "format": "binary",
-                    "description": "Image or document to attach (image/*, application/pdf, text/plain, text/markdown, max file size 50MB)"
+                    "description": "Image or document to attach (image/*, application/pdf, text/plain, text/markdown, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, text/csv, text/html, application/json, text/x-python, text/x-script.python, text/javascript, application/javascript, application/typescript, text/x-typescript, text/x-java-source, text/x-java, text/x-go, text/x-rust, text/x-c, text/x-csrc, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, application/x-sh, text/x-sh, application/sql, text/css, application/yaml, text/yaml, application/toml, max file size 50MB)"
                   }
                 }
               }
@@ -1394,7 +1394,7 @@
                   "document": {
                     "type": "string",
                     "format": "binary",
-                    "description": "Document to read (application/pdf, text/plain, text/markdown, max file size 50MB)"
+                    "description": "Document to read (application/pdf, text/plain, text/markdown, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, text/csv, text/html, application/json, text/x-python, text/x-script.python, text/javascript, application/javascript, application/typescript, text/x-typescript, text/x-java-source, text/x-java, text/x-go, text/x-rust, text/x-c, text/x-csrc, text/x-c++src, text/x-csharp, text/x-ruby, text/x-php, application/x-sh, text/x-sh, application/sql, text/css, application/yaml, text/yaml, application/toml, max file size 50MB)"
                   },
                   "prompt": {
                     "type": "string",
