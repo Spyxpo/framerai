@@ -213,6 +213,12 @@ def _fresh(gen):
         pass
 
 
+# A voice reference shorter than this carries too little of the voice to
+# condition on; longer than the cap only costs encoder time.
+MIN_REFERENCE_SECONDS = 1.0
+MAX_REFERENCE_SECONDS = 30.0
+
+
 def _reply(gen, decoded, prompt=None):
     """What the model said, without the prompt ``decoded`` begins with.
 
@@ -811,8 +817,46 @@ def handle(gen, op, params, mind=None, tools=None):
         }
 
     if op == "audio":
-        waveform, sample_rate = gen.generate_audio(prompt)
-        return {"file": _save_audio(waveform, sample_rate, out_dir)}
+        from . import audio_watermark
+
+        speaker = None
+        if params.get("speaker_path"):
+            from model.data import load_waveform
+
+            rate = getattr(gen.model.config, "codec_sample_rate", 24000)
+            speaker = load_waveform(params["speaker_path"], rate)[: int(MAX_REFERENCE_SECONDS * rate)]
+            if speaker.numel() < int(MIN_REFERENCE_SECONDS * rate):
+                raise ValueError(
+                    f"a voice reference needs at least {MIN_REFERENCE_SECONDS:g} seconds of audio"
+                )
+        waveform, sample_rate = gen.generate_audio(
+            prompt,
+            speaker_audio=speaker,
+            reference_text=params.get("reference_text"),
+            seed=params.get("seed"),
+            temperature=params.get("temperature"),
+            top_k=params.get("top_k"),
+        )
+        # Generated speech is marked so it can be told apart from a recording;
+        # a cloned voice is always marked, whatever the request asked.
+        cloned = speaker is not None
+        watermarked = cloned or params.get("watermark", True) is not False
+        if watermarked:
+            waveform = audio_watermark.embed(waveform)
+        return {
+            "file": _save_audio(waveform, sample_rate, out_dir),
+            "cloned": cloned,
+            "watermarked": watermarked,
+        }
+
+    if op == "verify_audio":
+        from model.data import load_waveform
+
+        from . import audio_watermark
+
+        rate = getattr(gen.model.config, "codec_sample_rate", 24000)
+        wav = load_waveform(params["audio_path"], rate)
+        return audio_watermark.detect(wav.numpy())
 
     if op == "transcribe":
         from model.data import load_waveform

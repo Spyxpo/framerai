@@ -111,6 +111,18 @@ function mockModel(overrides = {}) {
       metadata: { model: "test-model" },
     })),
     transcribeAudio: record("transcribeAudio", { text: "transcribed", metadata: { model: "test-model" } }),
+    // The prompt "force-refusal" drives the branch where the worker cannot clone.
+    cloneVoice: record("cloneVoice", (referencePath, prompt) =>
+      prompt === "force-refusal"
+        ? { error: "voice cloning needs audio_gen_arch='rvq_lm'" }
+        : {
+            id: "voice-1",
+            prompt,
+            audio: { url: "/uploads/generated/voice.wav", placeholder: false },
+            metadata: { model: "test-model", cloned: true, watermarked: true },
+          }
+    ),
+    verifyAudio: record("verifyAudio", { watermarked: true, score: 14.2, threshold: 4 }),
     understandImage: record("understandImage", { description: "a description" }),
     // The routes bind their handlers when the app module loads, so a test
     // cannot restub an export afterwards. The sentinel prompt is how a route

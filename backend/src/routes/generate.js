@@ -9,6 +9,8 @@ const {
   generateVideo,
   generateAudio,
   generateCode,
+  cloneVoice,
+  verifyAudio,
   transcribeAudio,
   understandImage,
   readDocument,
@@ -287,6 +289,61 @@ router.post(
     v.done();
 
     res.json(await generateAudio(prompt, {}, req.requestId));
+  })
+);
+
+// `/voice`'s handler reads three fields: `prompt`, `consent` and `reference_text`.
+const uploadVoice = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 3, fieldSize: config.maxMultipartFieldSize },
+  fileFilter: mimeFilter("audio/"),
+});
+
+// Speak a prompt in the voice of an uploaded reference clip. Cloning someone's
+// voice needs their permission, so the caller has to say they have it, and the
+// output is always watermarked so it can be identified as generated.
+router.post(
+  "/voice",
+  uploadVoice.single("reference"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "reference", message: "is required" }]);
+
+    const v = validator(req.body);
+    const prompt = v.string("prompt", { required: true, max: modelLimits.promptChars() });
+    const consent = v.oneOf("consent", ["true", "false"], { required: true });
+    const referenceText = v.string("reference_text", { max: modelLimits.promptChars() });
+    v.done();
+
+    if (consent !== "true") {
+      throw ApiError.badRequest("Voice cloning requires the speaker's consent", [
+        { field: "consent", message: "must be true: confirm you have the speaker's permission to clone their voice" },
+      ]);
+    }
+
+    const result = await cloneVoice(req.file.path, prompt, { referenceText, requestId: req.requestId });
+    if (result.error) throw ApiError.badRequest(result.error);
+    res.json(result);
+  })
+);
+
+// `/verify-audio`'s handler reads no fields of its own, only the file.
+const uploadVerify = multer({
+  storage,
+  limits: { fileSize: config.maxFileSize, files: 1, fields: 0, fieldSize: config.maxMultipartFieldSize },
+  fileFilter: mimeFilter("audio/"),
+});
+
+// Check a recording for the watermark generated speech carries.
+router.post(
+  "/verify-audio",
+  uploadVerify.single("audio"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw ApiError.badRequest("Request validation failed", [{ field: "audio", message: "is required" }]);
+    const result = await verifyAudio(req.file.path, req.requestId);
+    if (result.unavailable) {
+      throw new ApiError(503, "The model worker is not running, so audio cannot be checked", "MODEL_UNAVAILABLE");
+    }
+    res.json(result);
   })
 );
 

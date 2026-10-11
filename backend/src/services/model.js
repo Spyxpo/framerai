@@ -641,6 +641,46 @@ async function generateAudio(prompt, settings = {}, requestIdOrOptions = null) {
   };
 }
 
+/**
+ * Speak `prompt` in the voice of the reference clip at `referencePath`.
+ *
+ * Unlike the other generators this does not fall back to a placeholder when
+ * the worker refuses: a refusal here is usually that the loaded model cannot
+ * clone, which the caller has to be told rather than handed silence.
+ */
+async function cloneVoice(referencePath, prompt, { referenceText, requestId } = {}) {
+  const opts = normalizeModelOptions(requestId || null);
+  if (!bridge.available()) {
+    return {
+      id: randomUUID(),
+      prompt,
+      audio: { url: null, placeholder: true, message: "Train the model to clone a voice" },
+      metadata: { model: "framerai-audio", cloned: false },
+    };
+  }
+  const params = { prompt, speaker_path: referencePath };
+  if (referenceText) params.reference_text = referenceText;
+  try {
+    const result = await bridge.request("audio", params, opts.options);
+    return {
+      id: randomUUID(),
+      prompt,
+      audio: { url: `${GENERATED_URL}/${result.file}`, placeholder: false },
+      metadata: { model: "framerai-audio", cloned: Boolean(result.cloned), watermarked: Boolean(result.watermarked) },
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/** Whether an audio file carries the generated-speech watermark. */
+async function verifyAudio(audioPath, requestId = null) {
+  const opts = normalizeModelOptions(requestId);
+  if (!bridge.available()) return { unavailable: true };
+  const result = await bridge.request("verify_audio", { audio_path: audioPath }, opts.options);
+  return { watermarked: Boolean(result.watermarked), score: result.score, threshold: result.threshold };
+}
+
 async function generateCode(prompt, language = "python", settings = {}, requestIdOrOptions = null) {
   const opts = normalizeModelOptions(requestIdOrOptions);
   if (bridge.available()) {
@@ -739,6 +779,8 @@ module.exports = {
   generateVideo,
   generateAudio,
   generateCode,
+  cloneVoice,
+  verifyAudio,
   transcribeAudio,
   understandImage,
   readDocument,

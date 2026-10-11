@@ -940,6 +940,101 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/generate/voice": {
+        post: {
+          summary: "Speak text in a cloned voice",
+          description:
+            "Generates speech for `prompt` in the voice of an uploaded reference clip. `consent` must be `true`, confirming the speaker has given permission. The output always carries a watermark that `/generate/verify-audio` detects. With `reference_text` (what the clip says), the clip's own acoustic tokens are continued as well, which carries the voice further. Requires a model built with speaker conditioning.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["reference", "prompt", "consent"],
+                  properties: {
+                    reference: {
+                      type: "string",
+                      format: "binary",
+                      description: `Reference clip of the voice, 1 to 30 seconds (audio/*, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    consent: { type: "string", enum: ["true", "false"] },
+                    reference_text: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Generated speech",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["id", "prompt", "audio"],
+                    properties: {
+                      id: { type: "string" },
+                      prompt: { type: "string" },
+                      audio: { type: "object", additionalProperties: true },
+                      metadata: { type: "object", additionalProperties: true },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error, missing consent, or a model that cannot clone"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/verify-audio": {
+        post: {
+          summary: "Check audio for the generated-speech watermark",
+          description:
+            "Correlates an uploaded recording with the watermark generated speech carries. A provenance check, not a guarantee: resampling, time stretching or heavy lossy re-encoding can remove the mark.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["audio"],
+                  properties: {
+                    audio: { type: "string", format: "binary", description: "Recording to check (audio/*)" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Detection result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["watermarked", "score", "threshold"],
+                    properties: {
+                      watermarked: { type: "boolean" },
+                      score: { type: "number" },
+                      threshold: { type: "number" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+            "503": errorResponseRef(503, "Model worker not running"),
+          },
+        },
+      },
     },
     components: {
       schemas: {
