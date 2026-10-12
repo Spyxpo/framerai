@@ -802,6 +802,22 @@ tc = get_training_config("framer-small")   # or alias "small"
 config = FramerConfig.from_preset("framer-small", **tc)
 ```
 
+### Checkpoint provenance
+
+FramerAI is trained from scratch, with no outside model used as a teacher or as initial weights. Every checkpoint records the lineage that backs this up:
+
+- A run that loaded nothing is a root.
+- A run that loaded weights (resume, init, or a self-distillation teacher) lists each one with a SHA-256 fingerprint and that checkpoint's own record.
+- Loading a checkpoint whose record names another origin is refused.
+
+To audit a file:
+
+```bash
+python scripts/verify_provenance.py checkpoints/model_final.pt
+```
+
+The result is `scratch` (every root is a FramerAI run from random initialisation), `unrecorded` (some ancestor predates provenance), or `foreign`. The record is an audit trail, not a signature: anyone who can write the file can edit it.
+
 ### Long-context training
 
 The 3B, 8B and 30B–200B presets serve a 131,072-token window. The trillion-scale presets serve 1,048,576 tokens. In every case the backbone is pretrained at a much shorter length (`rope_original_max_seq_len`, 4096–16384), and yarn RoPE scaling stretches it to the full window. That declaration only holds once the model has been trained on long sequences, so a run has two stages:

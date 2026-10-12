@@ -412,11 +412,14 @@ def save_checkpoint(model: nn.Module, optimizer, step: int, loss: float, path: s
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
+    from .. import provenance
+
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
         "loss": loss,
+        "provenance": provenance.record(),
     }
 
     if scheduler is not None:
@@ -430,7 +433,8 @@ def save_checkpoint(model: nn.Module, optimizer, step: int, loss: float, path: s
     os.replace(temp_path, path)
 
 
-def load_checkpoint(path: str, model: nn.Module = None, optimizer=None, scheduler=None):
+def load_checkpoint(path: str, model: nn.Module = None, optimizer=None, scheduler=None,
+                    role: str = "loaded"):
     """Load a training checkpoint.
 
     Args:
@@ -449,9 +453,14 @@ def load_checkpoint(path: str, model: nn.Module = None, optimizer=None, schedule
     Backward compatible: older checkpoints without scheduler_state_dict are
     supported (scheduler will not be restored, but loading won't fail).
     """
+    from .. import provenance
+
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
     if model is not None:
+        # Recorded before the weights are used, and refused outright if they
+        # come from another model; see model/provenance.py.
+        provenance.note_parent(checkpoint, path, role=role)
         model.load_state_dict(checkpoint["model_state_dict"])
 
     if optimizer is not None and "optimizer_state_dict" in checkpoint:

@@ -259,6 +259,10 @@ def _save(model, optimizer, scheduler, config, step, output_dir, filename):
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
+    from .. import provenance
+
+    checkpoint["provenance"] = provenance.record()
+
     # Atomic write
     path = os.path.join(output_dir, filename)
     temp_path = path + ".tmp"
