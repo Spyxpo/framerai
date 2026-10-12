@@ -544,6 +544,24 @@ describe("Issue #449 — Differential Conversation Synchronization & Conflict Re
     expect(sanitized.messages[1].content).toBe("Turn 2");
   });
 
+  // 16b. The flake behind #449's idempotency check: when the server copy has no
+  // creation time, a second reconcile must keep the one the first produced
+  // rather than minting another, even across a clock tick.
+  it("Scenario 16b: Reconcile keeps the client's creation time when the server has none", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const server = { id: "c-ts", title: "T", version: 1, messages: [] };
+      const first = reconcileConversation({ id: "c-ts", title: "T", version: 1, messages: [] }, server);
+      vi.setSystemTime(new Date("2026-01-01T00:00:01.000Z"));
+      const second = reconcileConversation(first, server);
+      expect(second.createdAt).toBe(first.createdAt);
+      expect(second).toEqual(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // 16. Repeated synchronization is idempotent
   it("Scenario 16: Repeated synchronization is idempotent -> identical state and no mutations", () => {
     const client = {
