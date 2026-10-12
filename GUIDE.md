@@ -699,6 +699,19 @@ methods: `generate_text` (optionally conditioned on an image or audio),
 The tokenizer adds `<audio>` and `<audio_end>` alongside the existing image,
 video, and code special tokens.
 
+### Voice cloning and the speech watermark
+
+Presets with `audio_gen_arch="rvq_lm"` and `use_speaker_conditioning=True` (30B and up) can speak in the voice of a reference clip:
+
+- `generate_audio(prompt, speaker_audio=wav)` conditions on a speaker embedding taken from the clip.
+- Adding `reference_text=` (what the clip says) also continues the clip's own acoustic tokens. That carries the voice further. The transcript goes ahead of the prompt so the text and tokens line up.
+
+Over HTTP, `POST /api/generate/voice` takes a `reference` audio file (1–30 s), a `prompt`, and `consent=true`. The consent field confirms the speaker has given permission. Requests without it are refused.
+
+Generated speech is watermarked: a key-derived spread-spectrum sequence at about 39 dB below the signal. Clones are always marked, and other generated speech is marked unless the worker is asked not to. `POST /api/generate/verify-audio` reports whether a recording carries the mark. Volume changes and light noise keep the mark. Resampling, time stretching or heavy lossy re-encoding can remove it. It is a provenance check, not a guarantee.
+
+`transcribe` cuts recordings longer than the audio encoder's window at pauses and joins the pieces, so nothing past the first window is dropped.
+
 ## The training pipeline
 
 `build.py` is the single entry point with four modes:

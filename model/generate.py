@@ -1097,15 +1097,60 @@ class FramerGenerator:
         )
 
     @torch.no_grad()
-    def generate_audio(self, prompt: str) -> tuple:
+    def generate_audio(
+        self,
+        prompt: str,
+        speaker_audio: torch.Tensor = None,
+        reference_text: str = None,
+        seed: int = None,
+        temperature: float = None,
+        top_k: int = None,
+        prompt_seconds: float = 3.0,
+    ) -> tuple:
         """Generate an audio waveform from a text prompt.
+
+        ``speaker_audio`` is a mono reference clip at the codec's sample rate;
+        its speaker embedding conditions the voice. With ``reference_text``,
+        what the clip says, the clip's own last ``prompt_seconds`` of acoustic
+        tokens are continued as well, with the transcript placed ahead of the
+        prompt so the text the tokens follow lines up with them.
 
         Returns a tuple of (waveform numpy array, sample_rate).
         """
+        audio_gen = self.model.audio_gen
+        clones = speaker_audio is not None
+        if clones and not getattr(audio_gen, "can_clone", False):
+            raise ValueError(
+                "voice cloning needs audio_gen_arch='rvq_lm' with use_speaker_conditioning=True; "
+                "this model has neither"
+            )
+
+        kwargs = {}
+        if clones:
+            ref = speaker_audio.reshape(1, -1).to(self.device)
+            kwargs["speaker"] = audio_gen.speaker_embedding(ref)
+            if reference_text:
+                frames_per_second = audio_gen.sample_rate / self.model.config.codec_hop
+                # At most half the positions, so the prompt never crowds out
+                # the speech it is there to shape.
+                frames = min(int(prompt_seconds * frames_per_second), audio_gen.max_positions // 2)
+                kwargs["prompt_codes"] = audio_gen.voice_prompt(ref, max(1, frames))
+                prompt = f"{reference_text.strip()} {prompt}"
+        if hasattr(audio_gen, "can_clone"):
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if top_k is not None:
+                kwargs["top_k"] = top_k
+            if seed is not None:
+                kwargs["generator"] = _make_seed_generator(self.device, seed)
+
         context = self._text_context(prompt)
-        mel = self.model.audio_gen.sample(context, self.device)
-        waveform = self.model.audio_gen.mel_to_waveform(mel)
-        return waveform.cpu().numpy(), self.model.audio_gen.sample_rate
+        if hasattr(audio_gen, "can_clone"):
+            waveform = audio_gen.sample(context, self.device, **kwargs)
+            return waveform.reshape(-1).cpu().numpy(), audio_gen.sample_rate
+        mel = audio_gen.sample(context, self.device)
+        waveform = audio_gen.mel_to_waveform(mel)
+        return waveform.cpu().numpy(), audio_gen.sample_rate
 
     @torch.no_grad()
     def transcribe(
@@ -1114,13 +1159,34 @@ class FramerGenerator:
         prompt: str = "<audio><audio_end>Transcribe the audio:",
         max_new_tokens: int = 256,
     ) -> str:
-        """Transcribe or describe audio (audio understanding -> text)."""
-        return self.generate_text(
-            prompt,
-            allowed_special={"<audio>", "<audio_end>"},
-            max_new_tokens=max_new_tokens,
-            temperature=0.3,
-            top_k=40,
-            top_p=0.95,
-            audio=audio,
+        """Transcribe or describe audio (audio understanding -> text).
+
+        A recording longer than the encoder's window is cut at pauses into
+        windows that fit, each is transcribed, and the pieces are joined, so
+        nothing past the first window is dropped. Like generate_text, the
+        prompt leads the returned text and ``last_completion`` holds the
+        transcript alone.
+        """
+        from .audio_segment import split_on_silence
+
+        config = self.model.config
+        limit = int(getattr(config, "audio_max_frames", 0) or 0) * int(
+            getattr(config, "audio_hop_length", 0) or 0
         )
+        pieces = split_on_silence(audio, limit) if limit and audio.dim() == 1 else [audio]
+
+        texts = []
+        for piece in pieces:
+            self.generate_text(
+                prompt,
+                allowed_special={"<audio>", "<audio_end>"},
+                max_new_tokens=max_new_tokens,
+                temperature=0.3,
+                top_k=40,
+                top_p=0.95,
+                audio=piece,
+            )
+            texts.append(self.last_completion.strip())
+        transcript = " ".join(t for t in texts if t)
+        self.last_completion = transcript
+        return prompt + transcript
