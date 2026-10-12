@@ -11,11 +11,17 @@ and swapping it touches this module alone.
 
 No API key, no account, and nothing added to requirements.txt - which is the
 point: a clone of this repository can search the web as soon as it can run.
+
+A deployment that wants other results can point the client at a self-hosted
+SearXNG instance (``MODEL_SEARCH_PROVIDER=searxng``, ``MODEL_SEARXNG_URL``) or
+at the Brave Search API (``MODEL_SEARCH_PROVIDER=brave``,
+``MODEL_BRAVE_API_KEY``). Each provider returns the same :class:`SearchResult`.
 """
 
 import http.client
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -41,6 +47,13 @@ DEFAULT_MAX_CHARS = 4_000
 DEFAULT_MAX_RESULTS = 5
 DEFAULT_MAX_REDIRECTS = 10
 DEFAULT_MAX_REDIRECT_REPEATS = 4
+BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+PROVIDERS = ("duckduckgo", "searxng", "brave")
+
+# How each provider spells "only results from the last ...".
+RECENCY = ("day", "week", "month", "year")
+_DDG_RECENCY = {"day": "d", "week": "w", "month": "m", "year": "y"}
+_BRAVE_RECENCY = {"day": "pd", "week": "pw", "month": "pm", "year": "py"}
 _DNS_PIN_CACHE_TTL = 5.0
 
 _SKIP_TAGS = {"script", "style", "noscript", "head", "template", "svg"}
@@ -305,24 +318,38 @@ def _build_safe_opener() -> urllib.request.OpenerDirector:
     return opener
 
 
-def _urllib_transport(url: str, data: bytes | None, timeout: float, max_bytes: int) -> bytes:
-    """The real transport: one request, capped by time and by bytes."""
-    _, safe_ips = _resolve_and_validate(url)
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        method="POST" if data else "GET",
-    )
-    request._pinned_ips = safe_ips
-    request.redirect_count = 0
-    request.redirect_dict = {url: 1}
+def _urllib_transport(
+    url: str,
+    data: bytes | None,
+    timeout: float,
+    max_bytes: int,
+    headers: dict | None = None,
+    trusted: bool = False,
+) -> bytes:
+    """The real transport: one request, capped by time and by bytes.
 
-    opener = _build_safe_opener()
+    ``trusted`` is for an endpoint the operator configured, such as a SearXNG
+    instance on the local network: the address checks that keep a model-chosen
+    URL off private hosts would otherwise refuse it. A URL the model chose is
+    never trusted.
+    """
+    merged = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        **(headers or {}),
+    }
+    request = urllib.request.Request(
+        url, data=data, headers=merged, method="POST" if data else "GET"
+    )
+    if trusted:
+        opener = urllib.request.build_opener()
+    else:
+        _, safe_ips = _resolve_and_validate(url)
+        request._pinned_ips = safe_ips
+        request.redirect_count = 0
+        request.redirect_dict = {url: 1}
+        opener = _build_safe_opener()
     try:
         with opener.open(request, timeout=timeout) as response:
             return response.read(max_bytes)
@@ -435,31 +462,102 @@ class SearchClient:
         timeout: float = DEFAULT_TIMEOUT,
         max_bytes: int = DEFAULT_MAX_BYTES,
         transport: Transport | None = None,
+        provider: str | None = None,
+        searxng_url: str | None = None,
+        brave_api_key: str | None = None,
     ):
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.transport = transport or _urllib_transport
+        self.provider = (provider or os.environ.get("MODEL_SEARCH_PROVIDER") or "duckduckgo").lower()
+        if self.provider not in PROVIDERS:
+            raise ValueError(f"search provider must be one of {PROVIDERS}, got {self.provider!r}")
+        self.searxng_url = (searxng_url or os.environ.get("MODEL_SEARXNG_URL") or "").rstrip("/")
+        self.brave_api_key = brave_api_key or os.environ.get("MODEL_BRAVE_API_KEY") or ""
+        if self.provider == "searxng" and not self.searxng_url:
+            raise ValueError("the searxng provider needs MODEL_SEARXNG_URL")
+        if self.provider == "brave" and not self.brave_api_key:
+            raise ValueError("the brave provider needs MODEL_BRAVE_API_KEY")
 
-    def _get(self, url: str, data: bytes | None = None) -> str:
-        raw = self.transport(url, data, self.timeout, self.max_bytes)
+    def _get(self, url: str, data: bytes | None = None, headers: dict | None = None,
+             trusted: bool = False) -> str:
+        if headers or trusted:
+            raw = self.transport(url, data, self.timeout, self.max_bytes, headers=headers, trusted=trusted)
+        else:
+            raw = self.transport(url, data, self.timeout, self.max_bytes)
         if isinstance(raw, bytes):
             return raw.decode("utf-8", errors="replace")
         return str(raw)
 
-    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[SearchResult]:
-        """Ranked results for a query, in the provider's own order."""
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS,
+               recency: str | None = None) -> list[SearchResult]:
+        """Ranked results for a query, in the provider's own order.
+
+        ``recency`` ("day", "week", "month" or "year") keeps only results from
+        that long ago or newer, which is what a question about the news needs.
+        """
         query = (query or "").strip()
         if not query:
             raise ToolError("search needs a non-empty query")
+        if recency is not None and recency not in RECENCY:
+            raise ToolError(f"recency must be one of {RECENCY}, got {recency!r}")
+        limit = max(1, max_results)
 
-        body = urllib.parse.urlencode({"q": query, "kl": "wt-wt"}).encode()
-        parser = _ResultParser()
-        parser.feed(self._get(SEARCH_URL, body))
-        parser.close()
-        return parser.results[: max(1, max_results)]
+        if self.provider == "searxng":
+            results = self._search_searxng(query, recency)
+        elif self.provider == "brave":
+            results = self._search_brave(query, limit, recency)
+        else:
+            fields = {"q": query, "kl": "wt-wt"}
+            if recency:
+                fields["df"] = _DDG_RECENCY[recency]
+            parser = _ResultParser()
+            parser.feed(self._get(SEARCH_URL, urllib.parse.urlencode(fields).encode()))
+            parser.close()
+            results = parser.results
+        return results[:limit]
+
+    def _json(self, url: str, **kwargs) -> Any:
+        try:
+            return json.loads(self._get(url, **kwargs))
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"search provider returned malformed JSON: {exc}") from exc
+
+    def _search_searxng(self, query: str, recency: str | None) -> list[SearchResult]:
+        params = {"q": query, "format": "json"}
+        if recency:
+            params["time_range"] = recency
+        payload = self._json(f"{self.searxng_url}/search?{urllib.parse.urlencode(params)}", trusted=True)
+        results = []
+        for item in (payload or {}).get("results", []):
+            if item.get("url") and item.get("title"):
+                results.append(SearchResult(
+                    title=_collapse(item["title"]), url=item["url"],
+                    snippet=_collapse(item.get("content") or ""),
+                ))
+        return results
+
+    def _search_brave(self, query: str, limit: int, recency: str | None) -> list[SearchResult]:
+        params = {"q": query, "count": min(limit, 20)}
+        if recency:
+            params["freshness"] = _BRAVE_RECENCY[recency]
+        payload = self._json(
+            f"{BRAVE_URL}?{urllib.parse.urlencode(params)}",
+            headers={"Accept": "application/json", "X-Subscription-Token": self.brave_api_key},
+        )
+        results = []
+        for item in ((payload or {}).get("web") or {}).get("results", []):
+            if item.get("url") and item.get("title"):
+                snippet = re.sub(r"<[^>]+>", "", item.get("description") or "")
+                results.append(SearchResult(
+                    title=_collapse(item["title"]), url=item["url"], snippet=_collapse(snippet),
+                ))
+        return results
 
     def instant_answer(self, query: str) -> str:
         """The provider's own summary for a query, empty when there is none."""
+        if self.provider != "duckduckgo":
+            return ""
         params = urllib.parse.urlencode(
             {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
         )
@@ -485,15 +583,20 @@ class WebSearchTool(Tool):
 
     name = "web_search"
     description = "Search the internet and return ranked results with URLs."
-    parameters = {"query": "string", "max_results": f"integer, default {DEFAULT_MAX_RESULTS}"}
+    parameters = {
+        "query": "string",
+        "max_results": f"integer, default {DEFAULT_MAX_RESULTS}",
+        "recency": "optional: day, week, month or year",
+    }
 
     def __init__(self, client: SearchClient | None = None, max_results: int = DEFAULT_MAX_RESULTS):
         self.client = client or SearchClient()
         self.max_results = max_results
 
-    def run(self, query: str = "", max_results: int | None = None, **_: Any) -> ToolResult:
+    def run(self, query: str = "", max_results: int | None = None, recency: str | None = None,
+            **_: Any) -> ToolResult:
         limit = int(max_results or self.max_results)
-        results = self.client.search(query, max_results=limit)
+        results = self.client.search(query, max_results=limit, recency=recency or None)
         if not results:
             return ToolResult.failure(f"no results for {query!r}", query=query, results=[])
 
@@ -538,6 +641,8 @@ class WebFetchTool(Tool):
 
 
 def web_tools(client: SearchClient | None = None, **kwargs: Any) -> list[Tool]:
-    """Both web tools sharing one client, so they share one timeout policy."""
+    """The web tools sharing one client, so they share one provider and timeout."""
+    from .research import WebResearchTool
+
     client = client or SearchClient(**kwargs)
-    return [WebSearchTool(client), WebFetchTool(client)]
+    return [WebSearchTool(client), WebFetchTool(client), WebResearchTool(client)]

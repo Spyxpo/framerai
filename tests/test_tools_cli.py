@@ -288,4 +288,4 @@ def test_the_worker_reports_a_refusal_rather_than_raising(sandbox):
 
 def test_build_registry_can_register_both_toolsets(sandbox):
     registry = build_registry("web,cli", cli_policy=ShellPolicy(mode="allow", root=str(sandbox)))
-    assert registry.names() == ["web_search", "web_fetch", "shell", "read_file", "list_dir"]
+    assert registry.names() == ["web_search", "web_fetch", "web_research", "shell", "read_file", "list_dir"]

@@ -484,7 +484,7 @@ def _select_tools(registry, requested):
     return subset if len(subset) else None
 
 
-TOOL_FLAGS = {"web_search": "web", "web_fetch": "web", "shell": "cli"}
+TOOL_FLAGS = {"web_search": "web", "web_fetch": "web", "web_research": "web", "shell": "cli"}
 
 
 def _require_tool(registry, name, op):
@@ -737,7 +737,18 @@ def handle(gen, op, params, mind=None, tools=None):
     if op == "search":
         tool = _require_tool(tools, "web_search", op)
         result = tool.run(
-            query=params.get("query", prompt), max_results=params.get("max_results", 5)
+            query=params.get("query", prompt), max_results=params.get("max_results", 5),
+            recency=params.get("recency"),
+        )
+        if not result.ok:
+            raise ValueError(result.content)
+        return {"content": result.content, **result.data}
+
+    if op == "research":
+        tool = _require_tool(tools, "web_research", op)
+        result = tool.run(
+            query=params.get("query", prompt), pages=params.get("pages"),
+            recency=params.get("recency"),
         )
         if not result.ok:
             raise ValueError(result.content)
