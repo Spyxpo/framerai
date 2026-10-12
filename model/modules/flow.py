@@ -70,16 +70,18 @@ class ODESampler(nn.Module):
         # twice. Skipping the pair halves the cost of every step.
         self.guidance_distilled = guidance_distilled
 
-    def _guided(self, velocity_fn, x, t, context, null_context, cfg_scale):
+    def _guided(self, velocity_fn, x, t, context, null_context, cfg_scale, guide=True):
         """One velocity evaluation, with classifier-free guidance when asked.
 
         The conditional and unconditional fields are evaluated in a single
         batch-doubled forward, then extrapolated apart. ``cfg_scale`` of 1.0 is
-        the unguided field, so the doubling is skipped entirely.
+        the unguided field, so the doubling is skipped entirely, as it is when
+        ``guide`` is False outside the guidance interval.
         """
         if self.guidance_distilled:
             return velocity_fn(x, t, context)
-        if null_context is None or cfg_scale is None or cfg_scale == 1.0 or context is None:
+        if (not guide or null_context is None or cfg_scale is None or cfg_scale == 1.0
+                or context is None):
             return velocity_fn(x, t, context)
 
         batch = x.shape[0]
@@ -90,6 +92,21 @@ class ODESampler(nn.Module):
         velocity = velocity_fn(x_pair, t_pair, context_pair)
         conditional, unconditional = velocity[:batch], velocity[batch:]
         return unconditional + cfg_scale * (conditional - unconditional)
+
+    @staticmethod
+    def timeline(steps: int, start: float = 0.0, shift: float = 1.0, device="cpu") -> torch.Tensor:
+        """Times from ``start`` to 1 (data), warped by ``shift``.
+
+        ``shift`` above 1 spends more of the steps at high noise, where the
+        layout of a large image is decided; the noise level ``1 - t`` maps to
+        ``shift * s / (1 + (shift - 1) * s)``. 1.0 is the uniform schedule.
+        """
+        times = torch.linspace(start, 1.0, steps + 1, device=device)
+        if shift == 1.0:
+            return times
+        sigma = 1.0 - times
+        sigma = shift * sigma / (1.0 + (shift - 1.0) * sigma)
+        return 1.0 - sigma
 
     @torch.no_grad()
     def sample(
@@ -103,24 +120,51 @@ class ODESampler(nn.Module):
         steps: int = None,
         generator: torch.Generator = None,
         clamp_fn=None,
+        init: torch.Tensor = None,
+        start: float = 0.0,
+        noise: torch.Tensor = None,
+        shift: float = 1.0,
+        cfg_interval: tuple = None,
     ) -> torch.Tensor:
         """Solve from noise to data.
 
         ``clamp_fn(x, t)`` runs after each step when given. It is how a window
-        of video is held to the frames that came before it: without a hook the
-        solver has no way to say "these positions are already decided", and a
-        long clip has to be generated as independent pieces that do not join.
+        of video is held to the frames that came before it, and how an
+        inpainting mask keeps what is outside it: without a hook the solver has
+        no way to say "these positions are already decided".
+
+        ``init`` with ``start`` > 0 begins part way, from ``init`` noised to
+        time ``start``, which is image-to-image: the lower the start, the more
+        is redrawn. ``noise`` fixes the starting noise, so a caller can noise
+        known content consistently at every step.
+
+        ``cfg_interval`` ``(lo, hi)`` applies guidance only while ``lo <= t <=
+        hi``. Guidance at the very start and end mostly costs a second forward
+        and saturates colour; inside the interval is where it shapes content.
         """
         steps = steps or self.steps
-        x = torch.randn(shape, device=device, generator=generator)
-        timeline = torch.linspace(0.0, 1.0, steps + 1, device=device)
+        if noise is None:
+            noise = torch.randn(shape, device=device, generator=generator)
+        if init is not None and start > 0.0:
+            x = (1.0 - start) * noise + start * init
+        else:
+            x, start = noise, 0.0
+        timeline = self.timeline(steps, start=start, shift=shift, device=device)
+
+        def guided_at(t):
+            if cfg_interval is None:
+                return True
+            lo, hi = cfg_interval
+            return lo <= float(t) <= hi
 
         for i in range(steps):
             t_now, t_next = timeline[i], timeline[i + 1]
             dt = t_next - t_now
             t_batch = t_now.expand(shape[0])
 
-            velocity = self._guided(velocity_fn, x, t_batch, context, null_context, cfg_scale)
+            velocity = self._guided(
+                velocity_fn, x, t_batch, context, null_context, cfg_scale, guided_at(t_now)
+            )
 
             if self.method == "euler":
                 x = x + dt * velocity
@@ -128,7 +172,7 @@ class ODESampler(nn.Module):
                 x_predicted = x + dt * velocity
                 velocity_next = self._guided(
                     velocity_fn, x_predicted, t_next.expand(shape[0]),
-                    context, null_context, cfg_scale,
+                    context, null_context, cfg_scale, guided_at(t_next),
                 )
                 x = x + dt * 0.5 * (velocity + velocity_next)
 

@@ -315,6 +315,12 @@ function generateOpenApiSpec() {
                       format: "uuid",
                       description: "ID of an assistant message to regenerate",
                     },
+                    clientMessageId: {
+                      type: "string",
+                      format: "uuid",
+                      description:
+                        "The id the client gave this new message. Stored as the message's clientId, so a later sync carrying it matches the stored message instead of adding it again; a message already stored under it is reused.",
+                    },
                   },
                 },
               },
@@ -557,6 +563,19 @@ function generateOpenApiSpec() {
                       type: "integer",
                       enum: generateRoutes.RESOLUTIONS,
                       description: "Deprecated square-only resolution tier alias",
+                    },
+                    shift: {
+                      type: "number",
+                      minimum: 0.1,
+                      maximum: 10,
+                      description: "Timestep shift; above 1 spends more steps at high noise",
+                    },
+                    guidance_interval: {
+                      type: "array",
+                      items: { type: "number", minimum: 0, maximum: 1 },
+                      minItems: 2,
+                      maxItems: 2,
+                      description: "Apply guidance only between these two times (0 noise, 1 data)",
                     },
                   },
                 },
@@ -889,6 +908,129 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/generate/image-edit": {
+        post: {
+          summary: "Edit an image to a prompt",
+          description:
+            "Redraws an uploaded image toward `prompt` to the degree `strength` says (0 keeps it, 1 starts from noise), or with a `mask` (white where to generate) repaints inside the mask only and holds everything outside it. Output takes the image's size, rounded to what the generator produces. Requires image_gen_arch='latent_dit'.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["image", "prompt"],
+                  properties: {
+                    image: { type: "string", format: "binary", description: "Image to edit (image/*)" },
+                    mask: { type: "string", format: "binary", description: "Optional mask, white where to generate" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    strength: { type: "number", minimum: 0, maximum: 1, default: 0.6 },
+                    seed: { type: "integer", minimum: 0, maximum: 2147483647 },
+                    shift: { type: "number", minimum: 0.1, maximum: 10 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Edited image result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ImageGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/animate": {
+        post: {
+          summary: "Animate an image into a video",
+          description:
+            "Generates a clip that opens on the uploaded image and continues from it, following `prompt`. Requires video_gen_arch='spacetime_dit' and a clip that fits one denoising window.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["image", "prompt"],
+                  properties: {
+                    image: { type: "string", format: "binary", description: "First frame (image/*)" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    num_frames: { type: "integer", minimum: 1, maximum: generateRoutes.MAX_FRAMES, default: 16 },
+                    fps: { type: "integer", minimum: generateRoutes.MIN_FPS, maximum: generateRoutes.MAX_FPS },
+                    seed: { type: "integer", minimum: 0, maximum: 2147483647 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Generated video result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: { type: "object", additionalProperties: true },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/understand-video": {
+        post: {
+          summary: "Answer a question about a video",
+          description:
+            "Reads frames spread evenly across an uploaded video, encodes each with the vision tower in order, and answers `prompt` about the clip. Needs opencv-python in the worker.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["video"],
+                  properties: {
+                    video: { type: "string", format: "binary", description: "Video (video/mp4, video/webm, video/quicktime)" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH, default: "Describe this video:" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Video description",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["description", "videoPath"],
+                    properties: {
+                      description: { type: "string" },
+                      frames: { type: "integer" },
+                      videoPath: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
       "/generate/transcribe": {
         post: {
           summary: "Speech-to-text audio transcription",
@@ -937,6 +1079,101 @@ function generateOpenApiSpec() {
             "400": errorResponseRef(400, "Validation error or invalid file type"),
             "413": errorResponseRef(413, "Uploaded file too large"),
             "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/voice": {
+        post: {
+          summary: "Speak text in a cloned voice",
+          description:
+            "Generates speech for `prompt` in the voice of an uploaded reference clip. `consent` must be `true`, confirming the speaker has given permission. The output always carries a watermark that `/generate/verify-audio` detects. With `reference_text` (what the clip says), the clip's own acoustic tokens are continued as well, which carries the voice further. Requires a model built with speaker conditioning.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["reference", "prompt", "consent"],
+                  properties: {
+                    reference: {
+                      type: "string",
+                      format: "binary",
+                      description: `Reference clip of the voice, 1 to 30 seconds (audio/*, max file size ${MAX_FILE_SIZE_MB}MB)`,
+                    },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    consent: { type: "string", enum: ["true", "false"] },
+                    reference_text: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Generated speech",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["id", "prompt", "audio"],
+                    properties: {
+                      id: { type: "string" },
+                      prompt: { type: "string" },
+                      audio: { type: "object", additionalProperties: true },
+                      metadata: { type: "object", additionalProperties: true },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error, missing consent, or a model that cannot clone"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/verify-audio": {
+        post: {
+          summary: "Check audio for the generated-speech watermark",
+          description:
+            "Correlates an uploaded recording with the watermark generated speech carries. A provenance check, not a guarantee: resampling, time stretching or heavy lossy re-encoding can remove the mark.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["audio"],
+                  properties: {
+                    audio: { type: "string", format: "binary", description: "Recording to check (audio/*)" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Detection result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["watermarked", "score", "threshold"],
+                    properties: {
+                      watermarked: { type: "boolean" },
+                      score: { type: "number" },
+                      threshold: { type: "number" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+            "503": errorResponseRef(503, "Model worker not running"),
           },
         },
       },
@@ -1018,6 +1255,11 @@ function generateOpenApiSpec() {
           required: ["id", "role", "content", "type"],
           properties: {
             id: { type: "string", format: "uuid" },
+            clientId: {
+              type: "string",
+              format: "uuid",
+              description: "The id the client gave the message before it learned id, when it sent one.",
+            },
             role: { type: "string", enum: ["user", "assistant"] },
             content: { type: "string" },
             type: { type: "string", enum: ["text", "code", "image", "video", "audio", "error"] },

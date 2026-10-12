@@ -95,8 +95,15 @@ class LatentVideoGenerator(nn.Module):
         cfg_scale: float = None,
         steps: int = None,
         generator: torch.Generator = None,
+        first_frame: torch.Tensor = None,
     ) -> torch.Tensor:
-        """Generate a clip. Duration and resolution are per request."""
+        """Generate a clip. Duration and resolution are per request.
+
+        ``first_frame`` ``(B, 3, H, W)`` in ``[-1, 1]`` animates an image: the VAE
+        is causal, so the first latent frame encodes that image alone, and it
+        is held to it, noised to each step's time, while the rest is generated
+        to follow from it.
+        """
         frames = frames or self.frames
         height = height or self.resolution
         width = width or self.resolution
@@ -108,6 +115,22 @@ class LatentVideoGenerator(nn.Module):
         def velocity_fn(z, t, ctx):
             return self.denoiser(z, t, ctx, fps=fps_batch[: z.shape[0]])
 
+        noise = torch.randn(latent_shape, device=device, generator=generator)
+        clamp_fn = None
+        if first_frame is not None:
+            image = first_frame.to(device).unsqueeze(2)  # one frame of video
+            held = self.vae.encode_to_latent(image, sample=False)[:, :, :1]
+            if held.shape[-2:] != tuple(latent_shape[-2:]):
+                raise ValueError(
+                    f"first frame encodes to {tuple(held.shape[-2:])} latents, expected "
+                    f"{tuple(latent_shape[-2:])}; resize it to {width}x{height}"
+                )
+
+            def clamp_fn(x, t):
+                x = x.clone()
+                x[:, :, :1] = (1 - t) * noise[:, :, :1] + t * held
+                return x
+
         latents = self.sampler.sample(
             velocity_fn,
             latent_shape,
@@ -117,6 +140,8 @@ class LatentVideoGenerator(nn.Module):
             device=device,
             steps=steps,
             generator=generator,
+            clamp_fn=clamp_fn,
+            noise=noise,
         )
         video = self.vae.decode(latents).clamp(-1, 1)
         # The VAE's temporal upsampling works in powers of two, so a requested

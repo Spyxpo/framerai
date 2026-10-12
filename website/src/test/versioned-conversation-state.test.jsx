@@ -375,7 +375,7 @@ describe("Issue #438 — Versioned Conversation State & Concurrency", () => {
       "text",
       [],
       undefined,
-      1
+      { expectedVersion: 1, clientMessageId: expect.any(String) }
     );
 
     const stored = loadConversationsFromStorage();
@@ -445,7 +445,7 @@ describe("Issue #438 — Versioned Conversation State & Concurrency", () => {
       "text",
       [],
       undefined,
-      1 // MUST send expectedVersion 1, avoiding conflict!
+      { expectedVersion: 1, clientMessageId: expect.any(String) } // MUST send expectedVersion 1, avoiding conflict!
     );
     expect(result.current.conversations.find((c) => c.id === convId).version).toBe(2);
   });
@@ -495,7 +495,7 @@ describe("Issue #438 — Versioned Conversation State & Concurrency", () => {
       "text",
       [],
       undefined,
-      1 // Sent expectedVersion 1 after reload, avoiding conflict!
+      { expectedVersion: 1, clientMessageId: expect.any(String) } // Sent expectedVersion 1 after reload, avoiding conflict!
     );
     expect(reloaded.result.current.conversations.find((c) => c.id === convId).version).toBe(2);
   });
@@ -579,7 +579,7 @@ describe("Issue #438 — Versioned Conversation State & Concurrency", () => {
       "text",
       [],
       undefined,
-      1
+      { expectedVersion: 1, clientMessageId: expect.any(String) }
     );
     expect(result.current.conversations.find((c) => c.id === convId).version).toBe(2);
   });
@@ -771,7 +771,7 @@ describe("Issue #438 — Versioned Conversation State & Concurrency", () => {
       "text",
       [],
       undefined,
-      2
+      { expectedVersion: 2, clientMessageId: expect.any(String) }
     );
     expect(result.current.conversations.find((c) => c.id === "conv-drift").version).toBe(3);
   });

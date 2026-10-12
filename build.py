@@ -21,6 +21,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from model import provenance
 from model.configs import FramerConfig, list_presets, resolve_preset_name
 from model.data import (
     AudioCaptionDataset,
@@ -177,6 +178,7 @@ def build_model(config: FramerConfig, output_dir: str, data_dir: str = "data", f
         "config": asdict(config),
         "step": 0,
         "loss": float("inf"),
+        "provenance": provenance.record(),
     }, checkpoint_path)
 
     tokenizer.save(os.path.join(output_dir, "tokenizer"))
@@ -216,12 +218,12 @@ def train_model(config: FramerConfig, output_dir: str, resume: str = None,
     # When resuming, load model weights BEFORE FSDP wrapping
     if resume:
         logger.info(f"Resuming from {resume}")
-        start_step, prev_loss = load_checkpoint(resume, model=model)
+        start_step, prev_loss = load_checkpoint(resume, model=model, role="resume")
         logger.info(f"Loaded model weights from step {start_step} (loss: {prev_loss:.4f})")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
-            start_step, _ = load_checkpoint(init_path, model=model)
+            start_step, _ = load_checkpoint(init_path, model=model, role="init")
 
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
@@ -358,6 +360,7 @@ def export_model(config: FramerConfig, output_dir: str, export_dir: str = None):
     torch.save({
         "model_state_dict": model.state_dict(),
         "config": asdict(config),
+        "provenance": provenance.record(),
     }, export_path)
 
     # Optional safetensors export (secure, framework-portable weights).
@@ -595,11 +598,11 @@ def train_sft_model(config: FramerConfig, output_dir: str, data_dir: str = "data
 
     model = FramerModel(config).to(device)
     if resume:
-        load_checkpoint(resume, model=model)
+        load_checkpoint(resume, model=model, role="resume")
     else:
         init_path = os.path.join(output_dir, "model_init.pt")
         if os.path.exists(init_path):
-            load_checkpoint(init_path, model=model)
+            load_checkpoint(init_path, model=model, role="init")
 
     tokenizer_path = os.path.join(output_dir, "tokenizer")
     tokenizer = FramerTokenizer.load(tokenizer_path) if os.path.exists(tokenizer_path) else FramerTokenizer(config.vocab_size)
@@ -641,7 +644,7 @@ def train_dpo_model(config: FramerConfig, output_dir: str, data_dir: str = "data
 
     policy_model = FramerModel(config).to(device)
     if resume:
-        load_checkpoint(resume, model=policy_model)
+        load_checkpoint(resume, model=policy_model, role="resume")
     else:
         final_path = os.path.join(output_dir, "model_final.pt")
         init_path = os.path.join(output_dir, "model_init.pt")
@@ -733,7 +736,7 @@ def train_distill_model(
 
     logger.info("Loading teacher model...")
     teacher_model = FramerModel(config).to(device)
-    step, loss = load_checkpoint(teacher_checkpoint, model=teacher_model)
+    step, loss = load_checkpoint(teacher_checkpoint, model=teacher_model, role="teacher")
     logger.info(f"  Loaded teacher from step {step} (loss: {loss:.4f})")
     teacher_model.eval()
     for param in teacher_model.parameters():
@@ -754,7 +757,7 @@ def train_distill_model(
     start_step = 0
     if resume:
         logger.info(f"Resuming student from {resume}")
-        start_step, prev_loss = load_checkpoint(resume, model=student_model)
+        start_step, prev_loss = load_checkpoint(resume, model=student_model, role="resume")
         logger.info(f"  Loaded student weights from step {start_step} (loss: {prev_loss:.4f})")
     else:
         # Initialize student from teacher weights

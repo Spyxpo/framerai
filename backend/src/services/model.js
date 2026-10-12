@@ -534,7 +534,11 @@ async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOption
   // aspect ratio at a size tier, then whatever the prompt itself asks for, then
   // the configured default. It reports back what it understood.
   const payload = { prompt, num_images: numImages };
-  for (const key of ["width", "height", "aspect", "tier", "seed", "resolution"]) {
+  // The edit keys come from /image-edit: a stored image to start from, an
+  // optional mask, and how far to move from it. The sampler keys tune any run.
+  const keys = ["width", "height", "aspect", "tier", "seed", "resolution",
+    "init_image_path", "mask_path", "strength", "shift", "guidance_interval"];
+  for (const key of keys) {
     if (size[key] !== undefined && size[key] !== null) payload[key] = size[key];
   }
 
@@ -590,7 +594,7 @@ async function generateVideo(prompt, numFrames = 16, size = {}, requestIdOrOptio
   if (bridge.available()) {
     try {
       const params = { prompt, num_frames: numFrames };
-      for (const key of ["width", "height", "aspect", "tier", "fps", "seed"]) {
+      for (const key of ["width", "height", "aspect", "tier", "fps", "seed", "first_frame_path"]) {
         if (size[key] !== undefined && size[key] !== null) params[key] = size[key];
       }
       const result = await bridge.request("video", params, opts.options);
@@ -639,6 +643,46 @@ async function generateAudio(prompt, settings = {}, requestIdOrOptions = null) {
     audio: { url: null, placeholder: true, message: "Train the model to generate actual audio" },
     metadata: { model: "framerai-audio" },
   };
+}
+
+/**
+ * Speak `prompt` in the voice of the reference clip at `referencePath`.
+ *
+ * Unlike the other generators this does not fall back to a placeholder when
+ * the worker refuses: a refusal here is usually that the loaded model cannot
+ * clone, which the caller has to be told rather than handed silence.
+ */
+async function cloneVoice(referencePath, prompt, { referenceText, requestId } = {}) {
+  const opts = normalizeModelOptions(requestId || null);
+  if (!bridge.available()) {
+    return {
+      id: randomUUID(),
+      prompt,
+      audio: { url: null, placeholder: true, message: "Train the model to clone a voice" },
+      metadata: { model: "framerai-audio", cloned: false },
+    };
+  }
+  const params = { prompt, speaker_path: referencePath };
+  if (referenceText) params.reference_text = referenceText;
+  try {
+    const result = await bridge.request("audio", params, opts.options);
+    return {
+      id: randomUUID(),
+      prompt,
+      audio: { url: `${GENERATED_URL}/${result.file}`, placeholder: false },
+      metadata: { model: "framerai-audio", cloned: Boolean(result.cloned), watermarked: Boolean(result.watermarked) },
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/** Whether an audio file carries the generated-speech watermark. */
+async function verifyAudio(audioPath, requestId = null) {
+  const opts = normalizeModelOptions(requestId);
+  if (!bridge.available()) return { unavailable: true };
+  const result = await bridge.request("verify_audio", { audio_path: audioPath }, opts.options);
+  return { watermarked: Boolean(result.watermarked), score: result.score, threshold: result.threshold };
 }
 
 async function generateCode(prompt, language = "python", settings = {}, requestIdOrOptions = null) {
@@ -694,6 +738,21 @@ async function understandImage(imagePath, prompt = "Describe this image", reques
   };
 }
 
+async function understandVideo(videoPath, prompt = "Describe this video:", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("understand_video", { video_path: videoPath, prompt }, opts.options);
+      return { description: result.content, frames: result.frames };
+    } catch (err) {
+      logger.warn("understand video fallback", { error: err.message, requestId: opts.requestId });
+    }
+  }
+  return {
+    description: `[FramerAI Video Analysis]\nPrompt: ${prompt}\n\nThis is a placeholder response. Train a FramerAI model and set MODEL_ENABLED=true for real video analysis.`,
+  };
+}
+
 async function readDocument(documentPath, prompt = "", requestIdOrOptions = null) {
   const opts = normalizeModelOptions(requestIdOrOptions);
   const maxPages = requestIdOrOptions && requestIdOrOptions.maxPages;
@@ -739,8 +798,11 @@ module.exports = {
   generateVideo,
   generateAudio,
   generateCode,
+  cloneVoice,
+  verifyAudio,
   transcribeAudio,
   understandImage,
+  understandVideo,
   readDocument,
   resolveAttachments,
   conversationHistory,

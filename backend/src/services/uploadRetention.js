@@ -51,7 +51,7 @@ let _root = UPLOADS_ROOT;
 
 // Exactly the buckets the upload routes write to (UPLOAD_SUBDIRS plus the
 // bucketForMime fallback in routes/generate.js).
-const MANAGED_BUCKETS = ["images", "audio", "documents"];
+const MANAGED_BUCKETS = ["images", "audio", "documents", "clips"];
 
 // The shape multer's filename callback produces: a UUID plus one of the
 // extensions MIME_EXTENSIONS maps to, or .bin.

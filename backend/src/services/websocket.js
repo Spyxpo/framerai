@@ -65,6 +65,9 @@ function parseChatFrame(message) {
   if (message.regenerateMessageId !== undefined && message.regenerateMessageId !== null) {
     v.uuid("regenerateMessageId");
   }
+  if (message.clientMessageId !== undefined && message.clientMessageId !== null) {
+    v.uuid("clientMessageId");
+  }
 
   const settings = readSettings(v);
   if (v.errors.length) {
@@ -87,6 +90,7 @@ function parseChatFrame(message) {
     expectedVersion,
     editMessageId: message.editMessageId,
     regenerateMessageId: message.regenerateMessageId,
+    clientMessageId: message.clientMessageId ?? undefined,
   };
 }
 
@@ -422,15 +426,25 @@ function setupWebSocket(wss) {
               }
             }
           } else {
-            const userMessage = {
-              id: userMessageId,
-              role: "user",
-              content,
-              type: messageType,
-              attachments,
-              timestamp: new Date().toISOString(),
-            };
-            conversations.append(conversationId, userMessage);
+            // Already stored under the client's id, by a sync that got here first.
+            const known = conversations.findUserMessage(conversationId, frame.clientMessageId);
+            if (known) {
+              userMessageId = known.id;
+            } else {
+              const userMessage = {
+                id: userMessageId,
+                // The id the client knows the message by until the ack names this
+                // one: if the ack is lost, the sync that still carries it is matched
+                // to this message instead of storing the question again (Issue #471).
+                ...(frame.clientMessageId ? { clientId: frame.clientMessageId } : {}),
+                role: "user",
+                content,
+                type: messageType,
+                attachments,
+                timestamp: new Date().toISOString(),
+              };
+              conversations.append(conversationId, userMessage);
+            }
           }
 
           const currentConv = conversationId ? conversations.get(conversationId) : null;
