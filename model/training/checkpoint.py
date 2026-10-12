@@ -24,6 +24,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
 
+from .. import provenance
+
 CONFIG_FILENAME = "config.json"
 METADATA_FILENAME = "checkpoint_meta.json"
 
@@ -78,7 +80,8 @@ def save_sharded(model, optimizer, path: str, step: int = 0, config=None, schedu
 
     if not _is_distributed():
         core = _unwrap(model)
-        payload = {"model_state_dict": core.state_dict(), "step": step}
+        payload = {"model_state_dict": core.state_dict(), "step": step,
+                   "provenance": provenance.record()}
         if optimizer is not None:
             payload["optimizer_state_dict"] = optimizer.state_dict()
         if scheduler is not None:
@@ -138,6 +141,7 @@ def load_sharded(model, optimizer, path: str, scheduler=None) -> int:
                 "training run to produce a single-file export instead."
             )
         payload = torch.load(single_file, map_location="cpu", weights_only=False)
+        provenance.note_parent(payload, single_file, role="resume")
         _unwrap(model).load_state_dict(payload["model_state_dict"])
         if optimizer is not None and "optimizer_state_dict" in payload:
             optimizer.load_state_dict(payload["optimizer_state_dict"])
@@ -213,7 +217,7 @@ def save_full(model, path: str, step: int = 0, config=None) -> str:
         return path
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {"model_state_dict": state, "step": step}
+    payload = {"model_state_dict": state, "step": step, "provenance": provenance.record()}
     if config is not None:
         payload["config"] = config if isinstance(config, dict) else asdict(config)
     torch.save(payload, path)
