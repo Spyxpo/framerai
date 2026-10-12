@@ -534,7 +534,11 @@ async function generateImage(prompt, numImages = 1, size = {}, requestIdOrOption
   // aspect ratio at a size tier, then whatever the prompt itself asks for, then
   // the configured default. It reports back what it understood.
   const payload = { prompt, num_images: numImages };
-  for (const key of ["width", "height", "aspect", "tier", "seed", "resolution"]) {
+  // The edit keys come from /image-edit: a stored image to start from, an
+  // optional mask, and how far to move from it. The sampler keys tune any run.
+  const keys = ["width", "height", "aspect", "tier", "seed", "resolution",
+    "init_image_path", "mask_path", "strength", "shift", "guidance_interval"];
+  for (const key of keys) {
     if (size[key] !== undefined && size[key] !== null) payload[key] = size[key];
   }
 
@@ -590,7 +594,7 @@ async function generateVideo(prompt, numFrames = 16, size = {}, requestIdOrOptio
   if (bridge.available()) {
     try {
       const params = { prompt, num_frames: numFrames };
-      for (const key of ["width", "height", "aspect", "tier", "fps", "seed"]) {
+      for (const key of ["width", "height", "aspect", "tier", "fps", "seed", "first_frame_path"]) {
         if (size[key] !== undefined && size[key] !== null) params[key] = size[key];
       }
       const result = await bridge.request("video", params, opts.options);
@@ -734,6 +738,21 @@ async function understandImage(imagePath, prompt = "Describe this image", reques
   };
 }
 
+async function understandVideo(videoPath, prompt = "Describe this video:", requestIdOrOptions = null) {
+  const opts = normalizeModelOptions(requestIdOrOptions);
+  if (bridge.available()) {
+    try {
+      const result = await bridge.request("understand_video", { video_path: videoPath, prompt }, opts.options);
+      return { description: result.content, frames: result.frames };
+    } catch (err) {
+      logger.warn("understand video fallback", { error: err.message, requestId: opts.requestId });
+    }
+  }
+  return {
+    description: `[FramerAI Video Analysis]\nPrompt: ${prompt}\n\nThis is a placeholder response. Train a FramerAI model and set MODEL_ENABLED=true for real video analysis.`,
+  };
+}
+
 async function readDocument(documentPath, prompt = "", requestIdOrOptions = null) {
   const opts = normalizeModelOptions(requestIdOrOptions);
   const maxPages = requestIdOrOptions && requestIdOrOptions.maxPages;
@@ -783,6 +802,7 @@ module.exports = {
   verifyAudio,
   transcribeAudio,
   understandImage,
+  understandVideo,
   readDocument,
   resolveAttachments,
   conversationHistory,

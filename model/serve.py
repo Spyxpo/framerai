@@ -472,6 +472,43 @@ def _load_frames(path, size, limit=32):
     return torch.stack(frames)
 
 
+def _sample_frames(path, size, count=8):
+    """``count`` frames spread evenly across a video, as (T, 3, size, size).
+
+    Reading the first frames only describes the first second; spacing them
+    across the whole clip is what lets a question about the clip be answered.
+    """
+    import torch
+
+    from .cognition.perception import frame_to_tensor
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("video input needs opencv-python: pip install opencv-python") from exc
+
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        raise RuntimeError(f"could not open video {path!r}")
+    try:
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            return _load_frames(path, size, limit=count)
+        wanted = sorted({int(i * (total - 1) / max(count - 1, 1)) for i in range(count)})
+        frames = []
+        for index in wanted:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, frame = capture.read()
+            if ok:
+                rgb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (size, size))
+                frames.append(frame_to_tensor(rgb))
+    finally:
+        capture.release()
+    if not frames:
+        raise RuntimeError(f"no frames decoded from {path!r}")
+    return torch.stack(frames)
+
+
 def _select_tools(registry, requested):
     """The tools this request may use: all of them, a named subset, or none.
 
@@ -801,6 +838,11 @@ def handle(gen, op, params, mind=None, tools=None):
             seed=params.get("seed"),
             resolution=params.get("resolution"),
             return_request=True,
+            init_image=params.get("init_image_path"),
+            mask=params.get("mask_path"),
+            strength=params.get("strength", 0.6),
+            shift=params.get("shift"),
+            guidance_interval=params.get("guidance_interval"),
         )
         # The resolved size comes back so the caller can tell what was
         # understood, especially when it was read out of the prompt.
@@ -818,6 +860,7 @@ def handle(gen, op, params, mind=None, tools=None):
             fps=params.get("fps"),
             seed=params.get("seed"),
             return_request=True,
+            first_frame=params.get("first_frame_path"),
         )
         fps = params.get("fps") or getattr(gen.model.config, "video_fps", DEFAULT_VIDEO_FPS)
         return {
@@ -882,6 +925,14 @@ def handle(gen, op, params, mind=None, tools=None):
         _fresh(gen)
         decoded = gen.generate_text(question, image=tensor)
         return {"content": _reply(gen, decoded, question)}
+
+    if op == "understand_video":
+        size = gen.model.config.image_size
+        frames = _sample_frames(params["video_path"], size, count=int(params.get("frames", 8)))
+        question = params.get("prompt") or "Describe this video:"
+        _fresh(gen)
+        decoded = gen.describe_video(frames, prompt=question, max_new_tokens=params.get("max_new_tokens", 256))
+        return {"content": _reply(gen, decoded, question), "frames": int(frames.shape[0])}
 
     if op == "document":
         from .document import DOC_MARKERS, DocumentError, read_document

@@ -124,6 +124,7 @@ function mockModel(overrides = {}) {
     ),
     verifyAudio: record("verifyAudio", { watermarked: true, score: 14.2, threshold: 4 }),
     understandImage: record("understandImage", { description: "a description" }),
+    understandVideo: record("understandVideo", { description: "a video description", frames: 8 }),
     // The routes bind their handlers when the app module loads, so a test
     // cannot restub an export afterwards. The sentinel prompt is how a route
     // test drives the unreadable-document branch.

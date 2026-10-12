@@ -558,6 +558,19 @@ function generateOpenApiSpec() {
                       enum: generateRoutes.RESOLUTIONS,
                       description: "Deprecated square-only resolution tier alias",
                     },
+                    shift: {
+                      type: "number",
+                      minimum: 0.1,
+                      maximum: 10,
+                      description: "Timestep shift; above 1 spends more steps at high noise",
+                    },
+                    guidance_interval: {
+                      type: "array",
+                      items: { type: "number", minimum: 0, maximum: 1 },
+                      minItems: 2,
+                      maxItems: 2,
+                      description: "Apply guidance only between these two times (0 noise, 1 data)",
+                    },
                   },
                 },
               },
@@ -878,6 +891,129 @@ function generateOpenApiSpec() {
                     properties: {
                       description: { type: "string" },
                       imagePath: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/image-edit": {
+        post: {
+          summary: "Edit an image to a prompt",
+          description:
+            "Redraws an uploaded image toward `prompt` to the degree `strength` says (0 keeps it, 1 starts from noise), or with a `mask` (white where to generate) repaints inside the mask only and holds everything outside it. Output takes the image's size, rounded to what the generator produces. Requires image_gen_arch='latent_dit'.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["image", "prompt"],
+                  properties: {
+                    image: { type: "string", format: "binary", description: "Image to edit (image/*)" },
+                    mask: { type: "string", format: "binary", description: "Optional mask, white where to generate" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    strength: { type: "number", minimum: 0, maximum: 1, default: 0.6 },
+                    seed: { type: "integer", minimum: 0, maximum: 2147483647 },
+                    shift: { type: "number", minimum: 0.1, maximum: 10 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Edited image result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ImageGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/animate": {
+        post: {
+          summary: "Animate an image into a video",
+          description:
+            "Generates a clip that opens on the uploaded image and continues from it, following `prompt`. Requires video_gen_arch='spacetime_dit' and a clip that fits one denoising window.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["image", "prompt"],
+                  properties: {
+                    image: { type: "string", format: "binary", description: "First frame (image/*)" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH },
+                    num_frames: { type: "integer", minimum: 1, maximum: generateRoutes.MAX_FRAMES, default: 16 },
+                    fps: { type: "integer", minimum: generateRoutes.MIN_FPS, maximum: generateRoutes.MAX_FPS },
+                    seed: { type: "integer", minimum: 0, maximum: 2147483647 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Generated video result",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: { type: "object", additionalProperties: true },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error or invalid file type"),
+            "413": errorResponseRef(413, "Uploaded file too large"),
+            "429": errorResponseRef(429, "Rate limit exceeded"),
+          },
+        },
+      },
+      "/generate/understand-video": {
+        post: {
+          summary: "Answer a question about a video",
+          description:
+            "Reads frames spread evenly across an uploaded video, encodes each with the vision tower in order, and answers `prompt` about the clip. Needs opencv-python in the worker.",
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["video"],
+                  properties: {
+                    video: { type: "string", format: "binary", description: "Video (video/mp4, video/webm, video/quicktime)" },
+                    prompt: { type: "string", maxLength: generateRoutes.MAX_PROMPT_LENGTH, default: "Describe this video:" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Video description",
+              headers: rateLimitHeaderRefs,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["description", "videoPath"],
+                    properties: {
+                      description: { type: "string" },
+                      frames: { type: "integer" },
+                      videoPath: { type: "string" },
                     },
                   },
                 },
