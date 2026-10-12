@@ -29,7 +29,44 @@ const MIN_DIMENSION = 64;
 const MAX_DIMENSION = 2048;
 // Document types the ingestion path understands. Kept as an explicit list
 // rather than a prefix, because "application/" covers far more than this.
-const DOCUMENT_MIME_TYPES = ["application/pdf", "text/plain", "text/markdown"];
+// Each maps to the extension the stored file gets, which is also how the worker
+// picks a reader. Code is listed under the types browsers and tools actually
+// send for it; the website maps an unlabelled file to one of these first.
+const DOCUMENT_TYPES = {
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "text/markdown": ".md",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "text/csv": ".csv",
+  "text/html": ".html",
+  "application/json": ".json",
+  "text/x-python": ".py",
+  "text/x-script.python": ".py",
+  "text/javascript": ".js",
+  "application/javascript": ".js",
+  "application/typescript": ".ts",
+  "text/x-typescript": ".ts",
+  "text/x-java-source": ".java",
+  "text/x-java": ".java",
+  "text/x-go": ".go",
+  "text/x-rust": ".rs",
+  "text/x-c": ".c",
+  "text/x-csrc": ".c",
+  "text/x-c++src": ".cpp",
+  "text/x-csharp": ".cs",
+  "text/x-ruby": ".rb",
+  "text/x-php": ".php",
+  "application/x-sh": ".sh",
+  "text/x-sh": ".sh",
+  "application/sql": ".sql",
+  "text/css": ".css",
+  "application/yaml": ".yaml",
+  "text/yaml": ".yaml",
+  "application/toml": ".toml",
+};
+const DOCUMENT_MIME_TYPES = Object.keys(DOCUMENT_TYPES);
 const MAX_DOCUMENT_PAGES = 2000;
 // Duration is bounded by the overlapped-window path rather than by a single
 // denoising window, so the frame ceiling is no longer one window's worth.
@@ -94,10 +131,8 @@ const MIME_EXTENSIONS = {
   "audio/mp4":     ".m4a",
   "audio/x-m4a":   ".m4a",
   "audio/webm":    ".webm",
-  // documents — exact allowlist from DOCUMENT_MIME_TYPES
-  "application/pdf": ".pdf",
-  "text/plain":      ".txt",
-  "text/markdown":   ".md",
+  // documents — exact allowlist from DOCUMENT_TYPES
+  ...DOCUMENT_TYPES,
 };
 
 function safeExtension(mimetype) {
@@ -353,6 +388,7 @@ router.MIN_DIMENSION = MIN_DIMENSION;
 router.MAX_DIMENSION = MAX_DIMENSION;
 router.LANGUAGES = LANGUAGES;
 router.DOCUMENT_MIME_TYPES = DOCUMENT_MIME_TYPES;
+router.DOCUMENT_TYPES = DOCUMENT_TYPES;
 router.MAX_DOCUMENT_PAGES = MAX_DOCUMENT_PAGES;
 router.MAX_FRAMES = MAX_FRAMES;
 router.MIN_FPS = MIN_FPS;
