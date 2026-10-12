@@ -82,7 +82,7 @@ function computeConversationDiff(clientConv = {}, serverConv = {}, options = {})
   const serverById = new Map();
   const serverByClientId = new Map();
   for (const s of serverMessages) {
-    if (!s || deletedIds.has(s.id)) continue;
+    if (!s || deletedIds.has(s.id) || (s.clientId && deletedIds.has(s.clientId))) continue;
     if (s.id) serverById.set(s.id, s);
     if (s.clientId) serverByClientId.set(s.clientId, s);
   }
@@ -104,6 +104,8 @@ function computeConversationDiff(clientConv = {}, serverConv = {}, options = {})
       match = serverById.get(c.clientId);
     } else if (c.id && serverByClientId.has(c.id)) {
       match = serverByClientId.get(c.id);
+    } else if (c.clientId && serverByClientId.has(c.clientId)) {
+      match = serverByClientId.get(c.clientId);
     }
 
     if (match) {
@@ -156,7 +158,7 @@ function computeConversationDiff(clientConv = {}, serverConv = {}, options = {})
 
   const serverOnlyMessages = [];
   for (const s of serverMessages) {
-    if (!s || deletedIds.has(s.id)) continue;
+    if (!s || deletedIds.has(s.id) || (s.clientId && deletedIds.has(s.clientId))) continue;
     if (!matchedServerSet.has(s)) {
       serverOnlyMessages.push(s);
     }
@@ -262,9 +264,9 @@ function reconcileConversationDiff(clientConv = {}, serverConv = {}, options = {
 
   // 1. Process server messages in their authoritative order, applying updates
   for (const s of serverMessages) {
-    if (!s || deletedIds.has(s.id)) continue;
+    if (!s || deletedIds.has(s.id) || (s.clientId && deletedIds.has(s.clientId))) continue;
     const msg = updatedMap.has(s.id) ? updatedMap.get(s.id) : s;
-    if (deletedIds.has(msg.id)) continue;
+    if (deletedIds.has(msg.id) || (msg.clientId && deletedIds.has(msg.clientId))) continue;
     if (seenIds.has(msg.id)) continue;
 
     seenIds.add(msg.id);

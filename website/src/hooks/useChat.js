@@ -1323,9 +1323,12 @@ export function useChat(settings) {
       setConversations((prev) => {
         const updated = prev.map((c) => {
           if (c.id !== convId) return c;
+          const targetMsg = (c.messages || []).find((m) => m.id === messageId || m.clientId === messageId);
           const filteredMessages = (c.messages || []).filter((m) => m.id !== messageId && m.clientId !== messageId);
           const deletedMessageIds = Array.isArray(c.deletedMessageIds) ? [...c.deletedMessageIds] : [];
           if (!deletedMessageIds.includes(messageId)) deletedMessageIds.push(messageId);
+          if (targetMsg?.id && !deletedMessageIds.includes(targetMsg.id)) deletedMessageIds.push(targetMsg.id);
+          if (targetMsg?.clientId && !deletedMessageIds.includes(targetMsg.clientId)) deletedMessageIds.push(targetMsg.clientId);
           return {
             ...c,
             messages: filteredMessages,
