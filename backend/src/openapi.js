@@ -315,6 +315,12 @@ function generateOpenApiSpec() {
                       format: "uuid",
                       description: "ID of an assistant message to regenerate",
                     },
+                    clientMessageId: {
+                      type: "string",
+                      format: "uuid",
+                      description:
+                        "The id the client gave this new message. Stored as the message's clientId, so a later sync carrying it matches the stored message instead of adding it again; a message already stored under it is reused.",
+                    },
                   },
                 },
               },
@@ -1249,6 +1255,11 @@ function generateOpenApiSpec() {
           required: ["id", "role", "content", "type"],
           properties: {
             id: { type: "string", format: "uuid" },
+            clientId: {
+              type: "string",
+              format: "uuid",
+              description: "The id the client gave the message before it learned id, when it sent one.",
+            },
             role: { type: "string", enum: ["user", "assistant"] },
             content: { type: "string" },
             type: { type: "string", enum: ["text", "code", "image", "video", "audio", "error"] },

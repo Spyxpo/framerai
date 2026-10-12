@@ -351,6 +351,22 @@ function deleteMessage(id, messageId) {
   return true;
 }
 
+/**
+ * The user message a client knows as `clientMessageId`, if the conversation
+ * holds it already: under that id (a sync stored it), or under the server's
+ * own id with that id as its clientId (an earlier send). Issue #471.
+ */
+function findUserMessage(id, clientMessageId) {
+  if (!clientMessageId) return null;
+  const conv = conversations.get(id);
+  if (!conv || !Array.isArray(conv.messages)) return null;
+  return (
+    conv.messages.find(
+      (m) => m?.role === "user" && (m.id === clientMessageId || m.clientId === clientMessageId)
+    ) || null
+  );
+}
+
 function _fingerprint(conv) {
   return JSON.stringify([conv.messages, conv.title, conv.deletedMessageIds || []]);
 }
@@ -456,7 +472,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 
 module.exports = {
   create, get, has, remove, list, messages, append, update, clear,
-  truncateAfter, truncateFrom, updateMessage, deleteMessage, sync,
+  truncateAfter, truncateFrom, updateMessage, deleteMessage, sync, findUserMessage,
   maxMessages, MAX_DELETED_IDS,
   _map: conversations,
   _evict,
