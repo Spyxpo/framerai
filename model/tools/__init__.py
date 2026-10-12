@@ -8,11 +8,12 @@ behaves exactly as it did before this package existed.
 from .base import Tool, ToolError, ToolRegistry, ToolResult
 from .cli import ListDirTool, ReadFileTool, ShellPolicy, ShellTool, cli_tools
 from .loop import ToolCall, ToolCallError, ToolStep, ToolTrace, parse_tool_call, run_tool_loop
+from .research import WebResearchTool
 from .web import SearchClient, SearchResult, WebFetchTool, WebSearchTool, web_tools
 
 TOOLSETS = ("web", "cli")
 TOOLSET_TOOLS = {
-    "web": ("web_search", "web_fetch"),
+    "web": ("web_search", "web_fetch", "web_research"),
     "cli": ("shell", "read_file", "list_dir"),
 }
 
@@ -67,6 +68,7 @@ __all__ = [
     "ToolStep",
     "ToolTrace",
     "WebFetchTool",
+    "WebResearchTool",
     "WebSearchTool",
     "build_registry",
     "cli_tools",
