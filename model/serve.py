@@ -213,6 +213,12 @@ def _fresh(gen):
         pass
 
 
+# A voice reference shorter than this carries too little of the voice to
+# condition on; longer than the cap only costs encoder time.
+MIN_REFERENCE_SECONDS = 1.0
+MAX_REFERENCE_SECONDS = 30.0
+
+
 def _reply(gen, decoded, prompt=None):
     """What the model said, without the prompt ``decoded`` begins with.
 
@@ -466,6 +472,43 @@ def _load_frames(path, size, limit=32):
     return torch.stack(frames)
 
 
+def _sample_frames(path, size, count=8):
+    """``count`` frames spread evenly across a video, as (T, 3, size, size).
+
+    Reading the first frames only describes the first second; spacing them
+    across the whole clip is what lets a question about the clip be answered.
+    """
+    import torch
+
+    from .cognition.perception import frame_to_tensor
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("video input needs opencv-python: pip install opencv-python") from exc
+
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        raise RuntimeError(f"could not open video {path!r}")
+    try:
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            return _load_frames(path, size, limit=count)
+        wanted = sorted({int(i * (total - 1) / max(count - 1, 1)) for i in range(count)})
+        frames = []
+        for index in wanted:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, frame = capture.read()
+            if ok:
+                rgb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (size, size))
+                frames.append(frame_to_tensor(rgb))
+    finally:
+        capture.release()
+    if not frames:
+        raise RuntimeError(f"no frames decoded from {path!r}")
+    return torch.stack(frames)
+
+
 def _select_tools(registry, requested):
     """The tools this request may use: all of them, a named subset, or none.
 
@@ -484,7 +527,7 @@ def _select_tools(registry, requested):
     return subset if len(subset) else None
 
 
-TOOL_FLAGS = {"web_search": "web", "web_fetch": "web", "shell": "cli"}
+TOOL_FLAGS = {"web_search": "web", "web_fetch": "web", "web_research": "web", "shell": "cli"}
 
 
 def _require_tool(registry, name, op):
@@ -737,7 +780,18 @@ def handle(gen, op, params, mind=None, tools=None):
     if op == "search":
         tool = _require_tool(tools, "web_search", op)
         result = tool.run(
-            query=params.get("query", prompt), max_results=params.get("max_results", 5)
+            query=params.get("query", prompt), max_results=params.get("max_results", 5),
+            recency=params.get("recency"),
+        )
+        if not result.ok:
+            raise ValueError(result.content)
+        return {"content": result.content, **result.data}
+
+    if op == "research":
+        tool = _require_tool(tools, "web_research", op)
+        result = tool.run(
+            query=params.get("query", prompt), pages=params.get("pages"),
+            recency=params.get("recency"),
         )
         if not result.ok:
             raise ValueError(result.content)
@@ -784,6 +838,11 @@ def handle(gen, op, params, mind=None, tools=None):
             seed=params.get("seed"),
             resolution=params.get("resolution"),
             return_request=True,
+            init_image=params.get("init_image_path"),
+            mask=params.get("mask_path"),
+            strength=params.get("strength", 0.6),
+            shift=params.get("shift"),
+            guidance_interval=params.get("guidance_interval"),
         )
         # The resolved size comes back so the caller can tell what was
         # understood, especially when it was read out of the prompt.
@@ -801,6 +860,7 @@ def handle(gen, op, params, mind=None, tools=None):
             fps=params.get("fps"),
             seed=params.get("seed"),
             return_request=True,
+            first_frame=params.get("first_frame_path"),
         )
         fps = params.get("fps") or getattr(gen.model.config, "video_fps", DEFAULT_VIDEO_FPS)
         return {
@@ -811,8 +871,46 @@ def handle(gen, op, params, mind=None, tools=None):
         }
 
     if op == "audio":
-        waveform, sample_rate = gen.generate_audio(prompt)
-        return {"file": _save_audio(waveform, sample_rate, out_dir)}
+        from . import audio_watermark
+
+        speaker = None
+        if params.get("speaker_path"):
+            from model.data import load_waveform
+
+            rate = getattr(gen.model.config, "codec_sample_rate", 24000)
+            speaker = load_waveform(params["speaker_path"], rate)[: int(MAX_REFERENCE_SECONDS * rate)]
+            if speaker.numel() < int(MIN_REFERENCE_SECONDS * rate):
+                raise ValueError(
+                    f"a voice reference needs at least {MIN_REFERENCE_SECONDS:g} seconds of audio"
+                )
+        waveform, sample_rate = gen.generate_audio(
+            prompt,
+            speaker_audio=speaker,
+            reference_text=params.get("reference_text"),
+            seed=params.get("seed"),
+            temperature=params.get("temperature"),
+            top_k=params.get("top_k"),
+        )
+        # Generated speech is marked so it can be told apart from a recording;
+        # a cloned voice is always marked, whatever the request asked.
+        cloned = speaker is not None
+        watermarked = cloned or params.get("watermark", True) is not False
+        if watermarked:
+            waveform = audio_watermark.embed(waveform)
+        return {
+            "file": _save_audio(waveform, sample_rate, out_dir),
+            "cloned": cloned,
+            "watermarked": watermarked,
+        }
+
+    if op == "verify_audio":
+        from model.data import load_waveform
+
+        from . import audio_watermark
+
+        rate = getattr(gen.model.config, "codec_sample_rate", 24000)
+        wav = load_waveform(params["audio_path"], rate)
+        return audio_watermark.detect(wav.numpy())
 
     if op == "transcribe":
         from model.data import load_waveform
@@ -827,6 +925,14 @@ def handle(gen, op, params, mind=None, tools=None):
         _fresh(gen)
         decoded = gen.generate_text(question, image=tensor)
         return {"content": _reply(gen, decoded, question)}
+
+    if op == "understand_video":
+        size = gen.model.config.image_size
+        frames = _sample_frames(params["video_path"], size, count=int(params.get("frames", 8)))
+        question = params.get("prompt") or "Describe this video:"
+        _fresh(gen)
+        decoded = gen.describe_video(frames, prompt=question, max_new_tokens=params.get("max_new_tokens", 256))
+        return {"content": _reply(gen, decoded, question), "frames": int(frames.shape[0])}
 
     if op == "document":
         from .document import DOC_MARKERS, DocumentError, read_document

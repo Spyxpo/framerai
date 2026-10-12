@@ -1535,6 +1535,9 @@ export function useChat(settings) {
           messageType: type,
           attachments,
           expectedVersion: currentVersion,
+          // The server keeps this id with the message, so a later sync that still
+          // carries it (its ack lost to a reconnect) matches it (Issue #471).
+          clientMessageId: userMsg.id,
           settings: settingsRef.current,
         });
         return;
@@ -1542,7 +1545,10 @@ export function useChat(settings) {
 
       markLoadingStart(convId);
       try {
-        const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current, currentVersion);
+        const response = await api.sendMessage(convId, content, type, attachments, settingsRef.current, {
+          expectedVersion: currentVersion,
+          clientMessageId: userMsg.id,
+        });
         if (deletedConversationIdsRef.current.has(convId)) return;
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);

@@ -164,9 +164,9 @@ def test_subset_keeps_known_names_and_drops_the_rest():
 
 def test_build_registry_expands_the_web_toolset():
     registry = build_registry("web")
-    assert registry.names() == ["web_search", "web_fetch"]
+    assert registry.names() == ["web_search", "web_fetch", "web_research"]
     assert build_registry(None).names() == []
-    assert expand_toolsets(["web"]) == ["web_search", "web_fetch"]
+    assert expand_toolsets(["web"]) == ["web_search", "web_fetch", "web_research"]
 
 
 def test_build_registry_rejects_an_unknown_toolset():

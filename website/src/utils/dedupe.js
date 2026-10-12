@@ -516,7 +516,10 @@ export function reconcileConversationDiff(clientConv = {}, serverConv = {}, opti
     ...(diff.branch.branchedFromMessageId ? { branchedFromMessageId: diff.branch.branchedFromMessageId } : {}),
     ...(deletedIds.size > 0 ? { deletedMessageIds: [...deletedIds] } : {}),
     updatedAt: serverConv?.updatedAt || clientConv?.updatedAt || new Date().toISOString(),
-    createdAt: baseConv?.createdAt || new Date().toISOString(),
+    // A creation time is only invented when neither side has one; otherwise a
+    // second reconcile against a server copy without one minted a new time, so
+    // repeated synchronization was not idempotent.
+    createdAt: baseConv?.createdAt || clientConv?.createdAt || serverConv?.createdAt || new Date().toISOString(),
   };
 
   return { diff, reconciled };

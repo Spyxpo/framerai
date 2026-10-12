@@ -84,15 +84,9 @@ class RVQAudioGenerator(nn.Module):
     def _run_lm(self, tokens, text_context, speaker=None):
         """Prefix the conditioning, run the stack, return per-frame hidden states."""
         x = self.token_embed(tokens)
-        prefix = []
-        if text_context is not None:
-            prefix.append(self.context_proj(text_context))
-        if speaker is not None and self.speaker_proj is not None:
-            prefix.append(self.speaker_proj(speaker).unsqueeze(1))
-
+        prefix_embeds = self._prefix(text_context, speaker)
         prefix_len = 0
-        if prefix:
-            prefix_embeds = torch.cat(prefix, dim=1)
+        if prefix_embeds is not None:
             prefix_len = prefix_embeds.shape[1]
             x = torch.cat([prefix_embeds, x], dim=1)
 
@@ -140,6 +134,47 @@ class RVQAudioGenerator(nn.Module):
 
     # ------------------------------------------------------------------
 
+    def _prefix(self, text_context, speaker):
+        """The conditioning that precedes the acoustic tokens, or None."""
+        prefix = []
+        if text_context is not None:
+            prefix.append(self.context_proj(text_context))
+        if speaker is not None and self.speaker_proj is not None:
+            prefix.append(self.speaker_proj(speaker).unsqueeze(1))
+        return torch.cat(prefix, dim=1) if prefix else None
+
+    def _step(self, x, pasts):
+        """Run new positions through the stack against the cache."""
+        for i, block in enumerate(self.blocks):
+            out = block(x, past_kv=pasts[i], use_cache=True)
+            x, pasts[i] = out["x"], out["present"]
+        return self.norm(x)
+
+    @property
+    def can_clone(self) -> bool:
+        """True when a reference clip can condition the voice."""
+        return self.speaker_encoder is not None
+
+    @torch.no_grad()
+    def speaker_embedding(self, waveform: torch.Tensor) -> torch.Tensor:
+        """A ``(B, speaker_embed_dim)`` voice embedding from a ``(B, N)`` reference."""
+        if self.speaker_encoder is None:
+            raise ValueError(
+                "this model was built without speaker conditioning, so it cannot "
+                "clone a voice; use a preset with use_speaker_conditioning=True"
+            )
+        return self.speaker_encoder(self.codec.encode_latent(waveform))
+
+    @torch.no_grad()
+    def voice_prompt(self, waveform: torch.Tensor, max_frames: int) -> torch.Tensor:
+        """The reference clip's last ``max_frames`` acoustic frames, as a prompt."""
+        codes = self.codec.encode(waveform)
+        return codes[..., -max_frames:]
+
+    @property
+    def max_positions(self) -> int:
+        return self.config.audio_gen_frames * 4
+
     @torch.no_grad()
     def sample(
         self,
@@ -150,24 +185,55 @@ class RVQAudioGenerator(nn.Module):
         temperature: float = 0.9,
         speaker: torch.Tensor = None,
         generator: torch.Generator = None,
+        top_k: int = None,
+        prompt_codes: torch.Tensor = None,
     ) -> torch.Tensor:
-        """Autoregressively generate acoustic tokens, then decode a waveform."""
+        """Autoregressively generate acoustic tokens, then decode a waveform.
+
+        The stack runs once over the conditioning and then one frame at a time
+        against a KV cache. Re-running every earlier frame at each step made a
+        clip's cost quadratic in its length.
+
+        ``prompt_codes`` ``(B, n_q, T)`` continues from a reference clip's own
+        tokens, which carries its voice further than an embedding alone; only
+        the frames generated after it are decoded.
+        """
         n_frames = n_frames or self.config.audio_gen_frames
-        codes = torch.zeros(
-            batch_size, self.n_quantizers, 1, dtype=torch.long, device=device
-        )
+        codes = torch.zeros(batch_size, self.n_quantizers, 1, dtype=torch.long, device=device)
+        if prompt_codes is not None:
+            codes = torch.cat([codes, prompt_codes.to(device)], dim=-1)
 
-        for _ in range(n_frames):
-            hidden = self._run_lm(codes, context, speaker)
-            logits = self.head(hidden)[:, :, -1] / max(temperature, 1e-5)
-            probs = torch.softmax(logits, dim=-1)
-            flat = probs.reshape(-1, self.codebook_size)
-            picked = torch.multinomial(flat, 1, generator=generator)
-            codes = torch.cat(
-                [codes, picked.view(batch_size, self.n_quantizers, 1)], dim=-1
+        prefix = self._prefix(context, speaker)
+        prefix_len = prefix.shape[1] if prefix is not None else 0
+        room = self.max_positions - prefix_len - codes.shape[-1]
+        if room < 1:
+            raise ValueError(
+                f"the conditioning and voice prompt fill all {self.max_positions} positions; "
+                f"use a shorter reference clip"
             )
+        n_frames = min(n_frames, room)
 
-        return self.decode(codes[:, :, 1:])
+        x = self.token_embed(codes)
+        if prefix is not None:
+            x = torch.cat([prefix, x], dim=1)
+        pasts = [None] * len(self.blocks)
+        hidden = self._step(x, pasts)[:, -1:]
+
+        frames = []
+        for step in range(n_frames):
+            logits = self.head(hidden)[:, :, -1] / max(temperature, 1e-5)
+            if top_k:
+                kth = torch.topk(logits, min(top_k, self.codebook_size), dim=-1)[0][..., -1:]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
+            probs = torch.softmax(logits, dim=-1)
+            picked = torch.multinomial(
+                probs.reshape(-1, self.codebook_size), 1, generator=generator
+            ).view(batch_size, self.n_quantizers, 1)
+            frames.append(picked)
+            if step < n_frames - 1:
+                hidden = self._step(self.token_embed(picked), pasts)
+
+        return self.decode(torch.cat(frames, dim=-1))
 
     @torch.no_grad()
     def decode(self, codes: torch.Tensor) -> torch.Tensor:

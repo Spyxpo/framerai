@@ -577,8 +577,13 @@ class FramerGenerator:
         prefill_chunk_size: int = None,
         return_reason: bool = False,
         allowed_special=None,
+        vision_embeds: torch.Tensor = None,
     ) -> str | tuple[str, str]:
         """Generate text, optionally conditioned on an image or audio.
+
+        ``vision_embeds`` are already-encoded visual tokens, used in place of
+        encoding ``image``; it is how several video frames reach the model as
+        one sequence.
 
         Uses an incremental KV cache: the prompt is encoded once, then each new
         token attends to the cache in O(1) rather than re-running the whole
@@ -604,7 +609,9 @@ class FramerGenerator:
         if top_p < 0.0 or top_p > 1.0:
             raise ValueError(f"top_p must be in [0.0, 1.0], got {top_p}")
         image_embeds = audio_embeds = None
-        if image is not None:
+        if vision_embeds is not None:
+            image_embeds = vision_embeds.to(self.device)
+        elif image is not None:
             image_embeds = self.model.forward_vision(image.unsqueeze(0).to(self.device))
         if audio is not None:
             audio_embeds = self.model.forward_audio(audio.unsqueeze(0).to(self.device))
@@ -937,8 +944,19 @@ class FramerGenerator:
         seed: int = None,
         resolution: int = None,
         return_request: bool = False,
+        init_image=None,
+        mask=None,
+        strength: float = 0.6,
+        shift: float = None,
+        guidance_interval: tuple = None,
     ):
         """Generate images from a text prompt at a requested size.
+
+        ``init_image`` (a PIL image or path) edits instead of drawing from
+        nothing: redrawn to the degree ``strength`` says, or, with ``mask`` (white
+        where to generate), repainted inside the mask only. The output takes the
+        init image's size unless one is asked for. ``shift`` and
+        ``guidance_interval`` tune the sampler; see ``ODESampler.sample``.
 
         Size comes from explicit ``width``/``height``, then an ``aspect`` at a
         size ``tier``, then whatever the prompt itself asks for ("make it 16:9",
@@ -951,6 +969,9 @@ class FramerGenerator:
         """
         if resolution is not None and width is None and height is None:
             width = height = int(resolution)
+        source = _open_image(init_image) if init_image is not None else None
+        if source is not None and width is None and height is None:
+            width, height = _snap_size(source.size, self.model.config)
 
         request = resolve_image_request(
             prompt,
@@ -964,7 +985,25 @@ class FramerGenerator:
             generator = torch.Generator(device=self.device).manual_seed(int(request.seed))
 
         context = self._text_context(request.prompt).expand(request.num_images, -1, -1)
-        images = self._sample_images(request, context, generator)
+        edit = {}
+        if source is not None:
+            edit["init_images"] = _image_tensor(source, request.width, request.height).expand(
+                request.num_images, -1, -1, -1
+            ).to(self.device)
+            edit["strength"] = float(strength)
+            if mask is not None:
+                edit["mask"] = _mask_tensor(_open_image(mask), request.width, request.height).expand(
+                    request.num_images, -1, -1, -1
+                ).to(self.device)
+        if shift is not None:
+            edit["shift"] = float(shift)
+        if guidance_interval is not None:
+            edit["cfg_interval"] = tuple(float(v) for v in guidance_interval)
+        if edit and self.model.config.image_gen_arch != "latent_dit":
+            raise ValueError(
+                "editing, shift and guidance_interval need image_gen_arch='latent_dit'"
+            )
+        images = self._sample_images(request, context, generator, **edit)
 
         results = []
         for i in range(request.num_images):
@@ -984,14 +1023,32 @@ class FramerGenerator:
                 "Set image_gen_arch='latent_dit' for arbitrary aspect ratios."
             )
 
-    def _sample_images(self, request, context, generator):
+    def _sample_images(self, request, context, generator, **edit):
         """Sample, passing seed and guidance through when the decoder takes them."""
         sampler = self.model.diffusion.sample
+        if edit:
+            return sampler(request.shape, context, self.device, generator=generator, **edit)
         try:
             return sampler(request.shape, context, self.device, generator=generator)
         except TypeError:
             # The pixel U-Net's sampler has no seed parameter.
             return sampler(request.shape, context, self.device)
+
+    @torch.no_grad()
+    def describe_video(self, frames: torch.Tensor, prompt: str = "Describe this video:",
+                       max_new_tokens: int = 256, **sampling) -> str:
+        """Answer ``prompt`` about ``frames`` ``(T, 3, H, W)``, read in order.
+
+        Each frame is encoded by the vision tower and the frames are placed one
+        after another ahead of the prompt, so the model sees what changes as
+        well as what is there. Returns what generate_text returns; the answer
+        alone is ``last_completion``.
+        """
+        embeds = [self.model.forward_vision(f.unsqueeze(0).to(self.device)) for f in frames]
+        return self.generate_text(
+            prompt, max_new_tokens=max_new_tokens,
+            vision_embeds=torch.cat(embeds, dim=1), **sampling,
+        )
 
     @torch.no_grad()
     def generate_video(
@@ -1005,13 +1062,21 @@ class FramerGenerator:
         fps: int = None,
         seed: int = None,
         return_request: bool = False,
+        first_frame=None,
     ):
         """Generate video frames from a text prompt at a requested size.
+
+        ``first_frame`` (a PIL image or path) animates that image: the clip
+        opens on it and continues from it. The clip takes its size unless one
+        is asked for.
 
         Size resolves exactly as it does for images, reusing the same buckets and
         prompt parsing; ``num_frames`` and ``fps`` control duration separately.
         """
         config = self.model.config
+        source = _open_image(first_frame) if first_frame is not None else None
+        if source is not None and width is None and height is None:
+            width, height = _snap_size(source.size, config)
         request = resolve_image_request(
             prompt, width=width, height=height, aspect=aspect, tier=tier, seed=seed, config=config
         )
@@ -1023,7 +1088,19 @@ class FramerGenerator:
             generator = torch.Generator(device=self.device).manual_seed(int(request.seed))
 
         context = self._text_context(request.prompt)
-        video = self._sample_video(request, frames_requested, fps, context, generator)
+        if source is not None:
+            if config.video_gen_arch != "spacetime_dit" or frames_requested > config.video_frames:
+                raise ValueError(
+                    "animating an image needs video_gen_arch='spacetime_dit' and a clip that "
+                    f"fits one window ({config.video_frames} frames)"
+                )
+            video = self.model.video_gen.sample(
+                1, context, self.device, frames=frames_requested, height=request.height,
+                width=request.width, fps=fps, generator=generator,
+                first_frame=_image_tensor(source, request.width, request.height).to(self.device),
+            )
+        else:
+            video = self._sample_video(request, frames_requested, fps, context, generator)
 
         frames = []
         video_np = video[0].cpu().permute(1, 2, 3, 0).numpy()  # (T, H, W, C)
@@ -1097,15 +1174,60 @@ class FramerGenerator:
         )
 
     @torch.no_grad()
-    def generate_audio(self, prompt: str) -> tuple:
+    def generate_audio(
+        self,
+        prompt: str,
+        speaker_audio: torch.Tensor = None,
+        reference_text: str = None,
+        seed: int = None,
+        temperature: float = None,
+        top_k: int = None,
+        prompt_seconds: float = 3.0,
+    ) -> tuple:
         """Generate an audio waveform from a text prompt.
+
+        ``speaker_audio`` is a mono reference clip at the codec's sample rate;
+        its speaker embedding conditions the voice. With ``reference_text``,
+        what the clip says, the clip's own last ``prompt_seconds`` of acoustic
+        tokens are continued as well, with the transcript placed ahead of the
+        prompt so the text the tokens follow lines up with them.
 
         Returns a tuple of (waveform numpy array, sample_rate).
         """
+        audio_gen = self.model.audio_gen
+        clones = speaker_audio is not None
+        if clones and not getattr(audio_gen, "can_clone", False):
+            raise ValueError(
+                "voice cloning needs audio_gen_arch='rvq_lm' with use_speaker_conditioning=True; "
+                "this model has neither"
+            )
+
+        kwargs = {}
+        if clones:
+            ref = speaker_audio.reshape(1, -1).to(self.device)
+            kwargs["speaker"] = audio_gen.speaker_embedding(ref)
+            if reference_text:
+                frames_per_second = audio_gen.sample_rate / self.model.config.codec_hop
+                # At most half the positions, so the prompt never crowds out
+                # the speech it is there to shape.
+                frames = min(int(prompt_seconds * frames_per_second), audio_gen.max_positions // 2)
+                kwargs["prompt_codes"] = audio_gen.voice_prompt(ref, max(1, frames))
+                prompt = f"{reference_text.strip()} {prompt}"
+        if hasattr(audio_gen, "can_clone"):
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if top_k is not None:
+                kwargs["top_k"] = top_k
+            if seed is not None:
+                kwargs["generator"] = _make_seed_generator(self.device, seed)
+
         context = self._text_context(prompt)
-        mel = self.model.audio_gen.sample(context, self.device)
-        waveform = self.model.audio_gen.mel_to_waveform(mel)
-        return waveform.cpu().numpy(), self.model.audio_gen.sample_rate
+        if hasattr(audio_gen, "can_clone"):
+            waveform = audio_gen.sample(context, self.device, **kwargs)
+            return waveform.reshape(-1).cpu().numpy(), audio_gen.sample_rate
+        mel = audio_gen.sample(context, self.device)
+        waveform = audio_gen.mel_to_waveform(mel)
+        return waveform.cpu().numpy(), audio_gen.sample_rate
 
     @torch.no_grad()
     def transcribe(
@@ -1114,13 +1236,62 @@ class FramerGenerator:
         prompt: str = "<audio><audio_end>Transcribe the audio:",
         max_new_tokens: int = 256,
     ) -> str:
-        """Transcribe or describe audio (audio understanding -> text)."""
-        return self.generate_text(
-            prompt,
-            allowed_special={"<audio>", "<audio_end>"},
-            max_new_tokens=max_new_tokens,
-            temperature=0.3,
-            top_k=40,
-            top_p=0.95,
-            audio=audio,
+        """Transcribe or describe audio (audio understanding -> text).
+
+        A recording longer than the encoder's window is cut at pauses into
+        windows that fit, each is transcribed, and the pieces are joined, so
+        nothing past the first window is dropped. Like generate_text, the
+        prompt leads the returned text and ``last_completion`` holds the
+        transcript alone.
+        """
+        from .audio_segment import split_on_silence
+
+        config = self.model.config
+        limit = int(getattr(config, "audio_max_frames", 0) or 0) * int(
+            getattr(config, "audio_hop_length", 0) or 0
         )
+        pieces = split_on_silence(audio, limit) if limit and audio.dim() == 1 else [audio]
+
+        texts = []
+        for piece in pieces:
+            self.generate_text(
+                prompt,
+                allowed_special={"<audio>", "<audio_end>"},
+                max_new_tokens=max_new_tokens,
+                temperature=0.3,
+                top_k=40,
+                top_p=0.95,
+                audio=piece,
+            )
+            texts.append(self.last_completion.strip())
+        transcript = " ".join(t for t in texts if t)
+        self.last_completion = transcript
+        return prompt + transcript
+
+
+def _open_image(source):
+    """A PIL image from a PIL image or a path, in RGB or L as given."""
+    if isinstance(source, Image.Image):
+        return source
+    return Image.open(source)
+
+
+def _snap_size(size, config):
+    """An image's own size, rounded to what the generators can produce."""
+    multiple = int(getattr(config, "vae_downsample", 8) or 8) * int(getattr(config, "dit_patch_size", 2) or 2)
+    width, height = size
+    snap = lambda v: max(multiple, int(round(v / multiple)) * multiple)  # noqa: E731
+    return snap(width), snap(height)
+
+
+def _image_tensor(image, width, height) -> torch.Tensor:
+    """``(1, 3, H, W)`` in ``[-1, 1]``."""
+    rgb = image.convert("RGB").resize((width, height), Image.BICUBIC)
+    arr = torch.from_numpy(np.asarray(rgb, dtype=np.float32) / 127.5 - 1.0)
+    return arr.permute(2, 0, 1).unsqueeze(0)
+
+
+def _mask_tensor(image, width, height) -> torch.Tensor:
+    """``(1, 1, H, W)`` in ``[0, 1]``, 1 where content is to be generated."""
+    gray = image.convert("L").resize((width, height), Image.NEAREST)
+    return torch.from_numpy(np.asarray(gray, dtype=np.float32) / 255.0)[None, None]

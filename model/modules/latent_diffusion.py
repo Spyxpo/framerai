@@ -123,14 +123,47 @@ class LatentImageGenerator(nn.Module):
         cfg_scale: float = None,
         steps: int = None,
         generator: torch.Generator = None,
+        init_images: torch.Tensor = None,
+        strength: float = 0.6,
+        mask: torch.Tensor = None,
+        shift: float = 1.0,
+        cfg_interval: tuple = None,
     ) -> torch.Tensor:
         """Generate images. ``shape`` is in pixel space, ``(B, C, H, W)``.
 
         Matches ``DiffusionModule.sample``'s signature so callers do not branch.
+
+        Editing: ``init_images`` ``(B, 3, H, W)`` in ``[-1, 1]`` is redrawn to the
+        degree ``strength`` says (1.0 starts from pure noise, 0.0 returns it
+        unchanged). With ``mask`` ``(B, 1, H, W)``, 1 where content is to be
+        generated, everything outside the mask is held to the original at
+        every step, noised to the step's time with the same noise the solver
+        started from, so the boundary is denoised as one image.
         """
         batch, _, height, width = shape
         latent_shape = self.vae.latent_shape(batch, height, width)
         scale = self.cfg_scale if cfg_scale is None else cfg_scale
+
+        init, start, clamp_fn = None, 0.0, None
+        noise = torch.randn(latent_shape, device=device, generator=generator)
+        if init_images is not None:
+            if not 0.0 <= strength <= 1.0:
+                raise ValueError(f"strength must be in [0, 1], got {strength}")
+            init = self.vae.encode_to_latent(init_images.to(device), sample=False)
+            if init.shape != tuple(latent_shape):
+                raise ValueError(
+                    f"init image encodes to {tuple(init.shape)}, expected {tuple(latent_shape)}; "
+                    f"resize it to {width}x{height}"
+                )
+            start = 0.0 if mask is not None else 1.0 - strength
+            if mask is not None:
+                keep = 1.0 - F.interpolate(
+                    mask.to(device).float(), size=latent_shape[-2:], mode="area"
+                ).clamp(0, 1)
+
+                def clamp_fn(x, t):
+                    known = self.flow.interpolate(noise, init, t.expand(x.shape[0]))
+                    return keep * known + (1.0 - keep) * x
 
         latents = self.sampler.sample(
             self.denoiser,
@@ -141,7 +174,15 @@ class LatentImageGenerator(nn.Module):
             device=device,
             steps=steps,
             generator=generator,
+            clamp_fn=clamp_fn,
+            init=init,
+            start=start,
+            noise=noise,
+            shift=shift,
+            cfg_interval=cfg_interval,
         )
+        if init is not None and mask is None and start >= 1.0:
+            latents = init
         return self.vae.decode(latents).clamp(-1, 1)
 
 

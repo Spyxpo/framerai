@@ -265,6 +265,10 @@ router.post(
     if (req.body.regenerateMessageId !== undefined) {
       regenerateMessageId = v.uuid("regenerateMessageId");
     }
+    let clientMessageId;
+    if (req.body.clientMessageId !== undefined) {
+      clientMessageId = v.uuid("clientMessageId");
+    }
     v.done();
 
     if (expectedVersion !== undefined && (conv.version || 1) !== expectedVersion) {
@@ -303,8 +307,16 @@ router.post(
     }
 
     if (!userMessage) {
+      // Already stored under the client's id, by a sync that got here first.
+      userMessage = conversations.findUserMessage(conv.id, clientMessageId);
+    }
+    if (!userMessage) {
       userMessage = {
         id: randomUUID(),
+        // The id the client knows the message by until it learns this one: a
+        // sync that still carries it is then matched to this message instead of
+        // storing the question again (Issue #471).
+        ...(clientMessageId ? { clientId: clientMessageId } : {}),
         role: "user",
         content,
         type,

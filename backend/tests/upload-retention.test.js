@@ -347,7 +347,7 @@ test("only managed names in managed buckets are touched", async (t) => {
 });
 
 test("the managed buckets and name shape are constrained", () => {
-  assert.deepEqual(retention.MANAGED_BUCKETS, ["images", "audio", "documents"]);
+  assert.deepEqual(retention.MANAGED_BUCKETS, ["images", "audio", "documents", "clips"]);
   assert.ok(retention.UPLOADS_ROOT.endsWith(`${path.sep}uploads`));
   // The shape the upload routes actually produce.
   assert.ok(retention.MANAGED_NAME.test(`${randomUUID()}.png`));
