@@ -84,6 +84,52 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/pricing": {
+        get: {
+          summary: "Derived rate card",
+          description:
+            "Returns per-model rates derived from GPU cost and measured throughput plus margin. Text and code are billed per million input, cached input and output tokens; media is billed per megapixel or per second. Chat and code responses carry metadata.usage with the tokens run and their cost.",
+          responses: {
+            "200": {
+              description: "Rate card",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["currency", "basis", "models"],
+                    properties: {
+                      currency: { type: "string", example: "USD" },
+                      basis: {
+                        type: "object",
+                        required: ["gpu_hour_usd", "margin"],
+                        properties: {
+                          gpu_hour_usd: { type: "number" },
+                          margin: { type: "number" },
+                        },
+                        additionalProperties: true,
+                      },
+                      models: {
+                        type: "object",
+                        additionalProperties: {
+                          type: "object",
+                          properties: {
+                            input_per_million: { type: "number" },
+                            cached_input_per_million: { type: "number" },
+                            output_per_million: { type: "number" },
+                            per_megapixel: { type: "number" },
+                            per_output_second: { type: "number" },
+                            per_input_second: { type: "number" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       "/openapi.json": {
         get: {
           summary: "Get OpenAPI schema specification",

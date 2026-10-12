@@ -789,6 +789,25 @@ tc = get_training_config("framer-small")   # or alias "small"
 config = FramerConfig.from_preset("framer-small", **tc)
 ```
 
+### Long-context training
+
+The 3B, 8B and 30B–200B presets serve a 131,072-token window. The trillion-scale presets serve 1,048,576 tokens. In every case the backbone is pretrained at a much shorter length (`rope_original_max_seq_len`, 4096–16384), and yarn RoPE scaling stretches it to the full window. That declaration only holds once the model has been trained on long sequences, so a run has two stages:
+
+1. **Pretrain at the original length.** Training sequences default to 1024 tokens, which fits one consumer GPU. Set `--seq-len` to the preset's `rope_original_max_seq_len` for a real run:
+
+   ```bash
+   python build.py --mode train --preset framer-8b --shard-dir data/shards --seq-len 8192
+   ```
+
+2. **Extend.** Resume from the stage-one checkpoint with long documents in the shards and a longer `--seq-len`. Use about 1–5% of the pretraining tokens, stepping the length up (for example 32K, then 128K):
+
+   ```bash
+   python build.py --mode train --preset framer-8b --shard-dir data/long_shards \
+       --seq-len 32768 --grad-checkpointing --resume checkpoints/model_final.pt
+   ```
+
+Then run the `long-context` evaluation suite (single-fact retrieval, multi-hop and aggregation across the window). It tells you whether the declared window is usable or only a number in the config. `--seq-len` also sets the SFT and DPO sequence length when given.
+
 ## Training on your own data
 
 FramerAI trains from scratch on a local corpus - there are no teacher models.

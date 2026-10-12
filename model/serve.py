@@ -205,6 +205,46 @@ def _window_report(gen, requested_max_new_tokens):
     return report
 
 
+def _fresh(gen):
+    """Forget the last completion, so a stale one is never mistaken for this one."""
+    try:
+        gen.last_completion = None
+    except AttributeError:
+        pass
+
+
+def _reply(gen, decoded, prompt=None):
+    """What the model said, without the prompt ``decoded`` begins with.
+
+    The generator records its continuation as it decodes; that is used when
+    this call set it. Otherwise the prompt's own text is cut from the front.
+    """
+    completion = getattr(gen, "last_completion", None)
+    if isinstance(completion, str):
+        return completion
+    if prompt is not None and not isinstance(prompt, str):
+        prompt = gen.tokenizer.decode(list(prompt))
+    if prompt and isinstance(decoded, str) and decoded.startswith(prompt):
+        return decoded[len(prompt):]
+    return decoded
+
+
+def _usage(gen):
+    """Tokens the last generation consumed and produced, for metering.
+
+    Read from the generator rather than recounted here, so the figure is what
+    the backbone actually ran after the window trimmed the prompt.
+    """
+    usage = {
+        "input_tokens": int(getattr(gen, "last_input_tokens", 0) or 0),
+        "output_tokens": int(getattr(gen, "last_output_tokens", 0) or 0),
+    }
+    cached = int(getattr(gen, "last_cached_input_tokens", 0) or 0)
+    if cached:
+        usage["cached_input_tokens"] = cached
+    return {"usage": usage}
+
+
 def _sampling(params):
     """Sampling controls the caller set, leaving the rest to the generator."""
     keys = ("temperature", "top_k", "top_p", "repetition_penalty", "stop", "seed")
@@ -253,6 +293,39 @@ MAX_ATTACHMENT_PAGES = 2000
 # document may carry what a message may. backend/src/modelLimits.js bounds a
 # message at the same three characters per token.
 ATTACHMENT_CHARS_PER_TOKEN = 3
+
+
+# How far past its share of the window a document is read when there is a
+# question to choose passages by. Reading more costs parse time, bounded here;
+# choosing from more is what lets the right passage be found at all.
+RETRIEVAL_READ_FACTOR = 8
+
+
+def _focus(text, query, budget):
+    """Fit document text to ``budget`` by keeping the passages ``query`` needs.
+
+    Returns ``(text, excerpted)``. Without a question, or when the text fits,
+    the text comes back unchanged and the caller cuts it as before.
+    """
+    from .document import DOC_END_TOKEN
+    from .retrieval import select_relevant
+
+    if budget is None or not query or len(text) <= budget:
+        return text, False
+    excerpt, selected = select_relevant(text, query, max(budget - len(DOC_END_TOKEN) - 1, 1))
+    if not selected:
+        return text, False
+    if DOC_END_TOKEN not in excerpt:
+        excerpt += "\n" + DOC_END_TOKEN
+    return excerpt, True
+
+
+def _last_user_text(messages, prompt):
+    """The question a turn asks: the latest user message, else the prompt."""
+    for message in reversed(messages or []):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return prompt or None
 
 
 def _attachment_chars(config):
@@ -312,7 +385,7 @@ def _load_image(path, config):
     return torch.from_numpy(np.asarray(img, dtype="float32")).permute(2, 0, 1) / 127.5 - 1.0
 
 
-def _read_attachments(gen, attachments):
+def _read_attachments(gen, attachments, query=None):
     """Turn resolved attachments into an image tensor and any document text.
 
     The backend has already checked that every path sits inside its uploads
@@ -340,13 +413,22 @@ def _read_attachments(gen, attachments):
             if pages_left <= 0 or (chars_left is not None and chars_left <= 0):
                 documents.append("[document skipped: the other attachments used up what a request may read]")
                 continue
+            # With a question, read further than fits and keep what it needs.
+            read_chars = chars_left
+            if query and chars_left is not None:
+                read_chars = chars_left * RETRIEVAL_READ_FACTOR
             try:
-                document = read_document(path, max_pages=pages_left, max_chars=chars_left)
+                document = read_document(path, max_pages=pages_left, max_chars=read_chars)
             except DocumentError as exc:
                 documents.append(f"[document could not be read: {exc}]")
                 continue
-            text = document.to_text()
-            if document.truncated:
+            text, excerpted = _focus(document.to_text(), query, chars_left)
+            truncated = document.truncated
+            if not excerpted and chars_left is not None and len(text) > chars_left:
+                text, truncated = text[:chars_left], True
+            if excerpted:
+                text += "\n[document excerpted: passages chosen for relevance to the question]"
+            elif truncated:
                 text += "\n[document truncated: the rest was not read]"
             documents.append(text)
             pages_left -= len(document)
@@ -513,7 +595,9 @@ def handle(gen, op, params, mind=None, tools=None):
             # the exchange lands in memory as one episode rather than four.
             prompt = f"{tool_trace.context()}\n\n{prompt}" if tool_trace.context() else prompt
 
-        image, documents = _read_attachments(gen, params.get("attachments"))
+        image, documents = _read_attachments(
+            gen, params.get("attachments"), query=_last_user_text(messages, prompt)
+        )
 
         template_version = params.get("chat_template_version")
         if not template_version:
@@ -613,6 +697,7 @@ def handle(gen, op, params, mind=None, tools=None):
                     "content": cleaned,
                     "finish_reason": finish_reason,
                     **_window_report(gen, max_new_tokens),
+                    **_usage(gen),
                 }
                 if return_reasoning:
                     res["reasoning"] = reasoning if reasoning is not None else ""
@@ -620,6 +705,7 @@ def handle(gen, op, params, mind=None, tools=None):
 
             return _stream_generator()
 
+        _fresh(gen)
         out = gen.generate_text(
             prompt if prompt_ids is None else prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -633,12 +719,16 @@ def handle(gen, op, params, mind=None, tools=None):
         else:
             content = out
             finish_reason = getattr(gen, "last_finish_reason", "eos") or "eos"
+        # generate_text hands back the prompt with the continuation; the reply
+        # is the continuation alone, or every earlier turn is sent back again.
+        content = _reply(gen, content, prompt if prompt_ids is None else prompt_ids)
 
         content, reasoning = _extract_reasoning(content)
         result = {
             "content": content,
             "finish_reason": finish_reason,
             **_window_report(gen, max_new_tokens),
+            **_usage(gen),
         }
         if return_reasoning:
             result["reasoning"] = reasoning if reasoning is not None else ""
@@ -679,7 +769,9 @@ def handle(gen, op, params, mind=None, tools=None):
             code_kwargs["max_new_tokens"] = params["max_new_tokens"]
         if params.get("temperature") is not None:
             code_kwargs["temperature"] = params["temperature"]
-        return {"content": gen.generate_code(prompt, **code_kwargs)}
+        _fresh(gen)
+        code = _reply(gen, gen.generate_code(prompt, **code_kwargs))
+        return {"content": code, **_usage(gen)}
 
     if op == "image":
         images, request = gen.generate_image(
@@ -726,11 +818,15 @@ def handle(gen, op, params, mind=None, tools=None):
         from model.data import load_waveform
 
         wav = load_waveform(params["audio_path"], gen.model.config.audio_sample_rate)
-        return {"content": gen.transcribe(wav)}
+        _fresh(gen)
+        return {"content": _reply(gen, gen.transcribe(wav)).strip()}
 
     if op == "understand":
         tensor = _load_image(params["image_path"], gen.model.config)
-        return {"content": gen.generate_text(params.get("prompt", "Describe this:"), image=tensor)}
+        question = params.get("prompt", "Describe this:")
+        _fresh(gen)
+        decoded = gen.generate_text(question, image=tensor)
+        return {"content": _reply(gen, decoded, question)}
 
     if op == "document":
         from .document import DOC_MARKERS, DocumentError, read_document
@@ -753,14 +849,23 @@ def handle(gen, op, params, mind=None, tools=None):
             "text": text,
         }
         if prompt:
+            budget = _attachment_chars(gen.model.config)
+            if budget is not None:
+                budget = max(budget - len(prompt) * 2, 1)
+            focused, excerpted = _focus(text, prompt, budget)
+            if excerpted:
+                result["excerpted"] = True
             doc_ids = gen.tokenizer.encode(
-                f"{text}\n\n", add_special=False, allowed_special=DOC_MARKERS
+                f"{focused}\n\n", add_special=False, allowed_special=DOC_MARKERS
             )
-            result["content"] = gen.generate_text(
-                doc_ids + gen.tokenizer.encode(prompt, add_special=False),
+            asked = doc_ids + gen.tokenizer.encode(prompt, add_special=False)
+            _fresh(gen)
+            decoded = gen.generate_text(
+                asked,
                 max_new_tokens=params.get("max_new_tokens", 256),
                 **_sampling(params),
             )
+            result["content"] = _reply(gen, decoded, asked)
         return result
 
     raise ValueError(f"Unknown op: {op}")
@@ -855,6 +960,23 @@ def load_mind(generator, path):
     return Mind.from_generator(generator)
 
 
+def _accelerate(gen, args):
+    """Attach the serving accelerators the arguments ask for."""
+    from model.generate import FramerGenerator
+    from model.prefix_cache import PrefixCache
+    from model.quantize import quantize_model
+
+    quantize_model(gen.model, args.weight_dtype)
+    if args.prefix_cache > 0:
+        gen.prefix_cache = PrefixCache(
+            max_entries=args.prefix_cache, max_tokens=args.prefix_cache_tokens
+        )
+    if args.draft:
+        draft = FramerGenerator.from_checkpoint(args.draft, args.tokenizer, args.device)
+        quantize_model(draft.model, args.weight_dtype)
+        gen.attach_draft(draft, k=args.speculate_k)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FramerAI inference worker")
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH"))
@@ -889,6 +1011,29 @@ def main():
         "--heartbeat-interval", type=float, default=float(os.environ.get("MODEL_HEARTBEAT_INTERVAL", 2.0)),
         help="seconds between liveness heartbeat signals; the bridge uses these to detect wedged workers",
     )
+    parser.add_argument(
+        "--weight-dtype", default=os.environ.get("MODEL_WEIGHT_DTYPE", "auto"), choices=("auto", "int8"),
+        help="int8 holds transformer weights as int8 with per-channel scales, halving or "
+             "quartering weight memory and the bytes read per decoded token",
+    )
+    parser.add_argument(
+        "--prefix-cache", type=int, default=int(os.environ.get("MODEL_PREFIX_CACHE", 16)),
+        help="prompt caches kept for reuse across requests; 0 turns reuse off",
+    )
+    parser.add_argument(
+        "--prefix-cache-tokens", type=int,
+        default=int(os.environ.get("MODEL_PREFIX_CACHE_TOKENS", 65536)),
+        help="ceiling on the tokens held across all reusable prompt caches",
+    )
+    parser.add_argument(
+        "--draft", default=os.environ.get("MODEL_DRAFT_PATH"),
+        help="checkpoint of a smaller FramerAI model sharing the tokenizer, used to "
+             "draft tokens for speculative decoding",
+    )
+    parser.add_argument(
+        "--speculate-k", type=int, default=int(os.environ.get("MODEL_SPECULATE_K", 4)),
+        help="tokens the draft proposes per verification step",
+    )
     args = parser.parse_args()
 
     if not args.model or not os.path.exists(args.model):
@@ -899,6 +1044,7 @@ def main():
         from model.generate import FramerGenerator
 
         gen = FramerGenerator.from_checkpoint(args.model, args.tokenizer, args.device)
+        _accelerate(gen, args)
     except Exception as exc:  # noqa: BLE001 - report any load failure to the caller
         _print({"ready": False, "error": str(exc)})
         sys.exit(1)

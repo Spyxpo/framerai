@@ -731,7 +731,7 @@ export default function Chat({
             </button>
 
             <input ref={attachInputRef} type="file" multiple
-              accept="image/*,application/pdf,text/plain,text/markdown"
+              accept="image/*,application/pdf,text/plain,text/markdown,.docx,.pptx,.xlsx,.csv,.html,.htm,.json,.py,.js,.mjs,.ts,.tsx,.jsx,.java,.go,.rs,.c,.h,.cpp,.cc,.hpp,.cs,.rb,.php,.sh,.sql,.css,.yaml,.yml,.toml"
               onChange={handleAttach} style={{ display: "none" }} aria-hidden="true" tabIndex={-1} />
 
             {/* Upload audio file button */}

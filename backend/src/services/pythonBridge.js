@@ -24,6 +24,9 @@ function resolvePath(p, base) {
 const MODEL_PATH = resolvePath(process.env.MODEL_PATH, BACKEND_ROOT);
 const TOKENIZER_PATH = resolvePath(process.env.TOKENIZER_PATH, BACKEND_ROOT);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+// A smaller FramerAI checkpoint for speculative decoding, resolved like
+// MODEL_PATH so a relative path means the same thing in both.
+const MODEL_DRAFT_PATH = resolvePath(process.env.MODEL_DRAFT_PATH, BACKEND_ROOT);
 const MODEL_ENABLED = (process.env.MODEL_ENABLED || "true").toLowerCase() !== "false";
 const REQUEST_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS || 180000);
 const STARTUP_TIMEOUT_MS = Number(process.env.MODEL_STARTUP_TIMEOUT_MS || 60000);
@@ -88,6 +91,7 @@ class Worker {
     this.ready = false;
     this.starting = false;
     this._startPromise = null;
+    this._spawnResolve = null;
     this.info = null;
     this.busy = false;
     this.currentRequest = null;
@@ -108,8 +112,16 @@ class Worker {
     const workerLog = createLogger({ route: `worker-${this.id}` });
     this.starting = true;
     return new Promise((resolve) => {
+      this._spawnResolve = resolve;
+      const settle = (val) => {
+        if (this._spawnResolve) {
+          this._spawnResolve = null;
+          resolve(val);
+        }
+      };
       const argv = ["-m", "model.serve", "--model", MODEL_PATH, "--tokenizer", TOKENIZER_PATH];
       if (MODEL_TOOLS) argv.push("--tools", MODEL_TOOLS);
+      if (MODEL_DRAFT_PATH) argv.push("--draft", MODEL_DRAFT_PATH);
       if (MODEL_TOOLS.includes("cli")) {
         argv.push("--cli-mode", MODEL_CLI_MODE, "--cli-root", MODEL_CLI_ROOT);
       }
@@ -119,7 +131,7 @@ class Worker {
       } catch (err) {
         this.starting = false;
         workerLog.warn("spawn failed", { error: err.message });
-        resolve(false);
+        settle(false);
         return;
       }
 
@@ -146,7 +158,7 @@ class Worker {
         // detaches the exit handler, so an 'exit' that still follows cannot
         // reach onExit and restart a worker already reported as failed.
         this.cleanup();
-        resolve(false);
+        settle(false);
       });
 
       // The pipe to the worker is a stream of its own with its own 'error' event, which the
@@ -204,11 +216,11 @@ class Worker {
               this._livenessTimer = _setTimeout(() => {
                 this.checkLiveness();
               }, HEARTBEAT_STARTUP_GRACE_MS);
-              resolve(true);
+              settle(true);
             } else {
               workerLog.warn("failed to load", { error: msg.error });
               this.ready = false;
-              resolve(false);
+              settle(false);
             }
             continue;
           }
@@ -312,7 +324,7 @@ class Worker {
         // this start() and the first request would wait forever.
         if (!resolved) {
           resolved = true;
-          resolve(false);
+          settle(false);
         }
         // Clear liveness timer
         if (this._livenessTimer) {
@@ -347,7 +359,7 @@ class Worker {
           this._safetyTimer = null;
           workerLog.warn("startup timeout, cleaning up", { timeoutMs: STARTUP_TIMEOUT_MS });
           this.cleanup();
-          resolve(false);
+          settle(false);
         }
       }, STARTUP_TIMEOUT_MS);
     });
@@ -556,16 +568,29 @@ class Worker {
         clearTimeout(timer);
         this.pending.delete(id);
         this.busy = false;
+        this.ready = false;
         this.currentRequest = null;
         this.currentRequestId = null;
         reject(err);
-        if (this.onAvailable) this.onAvailable(this);
+        if (this.child) {
+          try {
+            this.child.kill();
+          } catch {
+            // Process may already be dead
+          }
+        }
+        if (this.onExit) this.onExit(this);
       }
     });
   }
 
   cleanup() {
     this.starting = false;
+    if (this._spawnResolve) {
+      const settle = this._spawnResolve;
+      this._spawnResolve = null;
+      settle(false);
+    }
     if (this._safetyTimer) {
       _clearTimeout(this._safetyTimer);
       this._safetyTimer = null;
@@ -706,6 +731,7 @@ class WorkerPool {
       }
 
       this.starting = false;
+      disabled = false;
 
       for (let i = 0; i < this.size; i++) {
         if (results[i]) {
@@ -742,6 +768,9 @@ class WorkerPool {
     this.workers.splice(idx, 1);
     deadWorker.cleanup();
 
+    // Immediately dispatch queued tasks if healthy workers are available
+    this.dispatch();
+
     const isTimeout = Boolean(deadWorker && deadWorker.timedOut);
     const attempts = isTimeout ? 0 : (this._restartCounts.get(workerId) || 0) + 1;
 
@@ -750,6 +779,9 @@ class WorkerPool {
       this.poolLog.warn("worker restart limit exceeded", { workerId, maxAttempts: MAX_RESTART_ATTEMPTS });
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
+        if (this._restartTimers.size === 0) {
+          this.failQueuedRequests(new Error("no workers available"));
+        }
       }
       return;
     }
@@ -770,7 +802,7 @@ class WorkerPool {
     // Wait out the backoff (interruptible by shutdown)
     await new Promise((resolve) => {
       const timer = _setTimeout(resolve, delay);
-      this._restartTimers.set(workerId, timer);
+      this._restartTimers.set(workerId, { timer, resolve });
     });
     this._restartTimers.delete(workerId);
 
@@ -786,6 +818,8 @@ class WorkerPool {
 
     const success = await replacement.spawn();
     if (this.stopped) {
+      const repIdx = this.workers.indexOf(replacement);
+      if (repIdx >= 0) this.workers.splice(repIdx, 1);
       replacement.cleanup();
       return;
     }
@@ -798,8 +832,18 @@ class WorkerPool {
       this.dispatch();
     } else {
       this.poolLog.warn("replacement worker failed", { workerId });
+      if (!replacement.ready) {
+        const repIdx = this.workers.indexOf(replacement);
+        if (repIdx >= 0 && !replacement.child) {
+          this.workers.splice(repIdx, 1);
+          replacement.cleanup();
+        }
+      }
       if (this.workers.filter((w) => w.ready).length === 0) {
         disabled = true;
+        if (this._restartTimers.size === 0) {
+          this.failQueuedRequests(new Error("no workers available"));
+        }
       }
     }
   }
@@ -875,8 +919,12 @@ class WorkerPool {
     this.stopped = true;
     this.starting = false;
     // Cancel any pending backoff timers so restart loops stop immediately
-    for (const timer of this._restartTimers.values()) {
-      _clearTimeout(timer);
+    for (const item of this._restartTimers.values()) {
+      if (item) {
+        if (item.timer) _clearTimeout(item.timer);
+        else _clearTimeout(item);
+        if (typeof item.resolve === "function") item.resolve();
+      }
     }
     this._restartTimers.clear();
     for (const timer of this._stabilityTimers.values()) {

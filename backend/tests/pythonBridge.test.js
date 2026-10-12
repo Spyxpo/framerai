@@ -4759,3 +4759,478 @@ describe("Issue #427: a pool that failed to start can start again", { concurrenc
     assert.ok(entries.some((e) => e.message === "model pool recovered"), "the recovery should be logged");
   });
 });
+
+describe("Issue #462 regression: Worker pool deadlock under concurrent task failure and recovery", { concurrency: 1 }, () => {
+  let bridge = null;
+  let savedEnv = null;
+  let originalExistsSync = null;
+
+  const MANAGED_ENV = {
+    MODEL_ENABLED: "true",
+    MODEL_PATH: "/fake/model.pt",
+    TOKENIZER_PATH: "/fake/tokenizer",
+    MODEL_WORKERS: "2",
+    PYTHON_BIN: undefined,
+    MODEL_TOOLS: undefined,
+    MODEL_CLI_MODE: undefined,
+    MODEL_CLI_ROOT: undefined,
+    MODEL_TIMEOUT_MS: undefined,
+    MODEL_STARTUP_TIMEOUT_MS: undefined,
+    MODEL_WORKER_STABILITY_MS: undefined,
+    MODEL_KILL_GRACE_MS: undefined,
+    MODEL_HEARTBEAT_TIMEOUT_MS: undefined,
+    MODEL_HEARTBEAT_STARTUP_GRACE_MS: undefined,
+  };
+
+  const settlesWithin = (promise, ms) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("STILL PENDING"), ms);
+    });
+    return Promise.race([
+      promise.then(
+        (val) => (val === undefined ? "resolved: undefined" : val),
+        (err) => `rejected: ${err.message}`
+      ),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
+  };
+
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  beforeEach(() => {
+    delete require.cache[require.resolve("../src/services/pythonBridge")];
+    spawnedProcesses.length = 0;
+
+    savedEnv = {};
+    for (const [key, value] of Object.entries(MANAGED_ENV)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    const fs = require("fs");
+    originalExistsSync = fs.existsSync;
+    fs.existsSync = (p) => {
+      if (p && p.includes("model.pt")) return true;
+      return originalExistsSync ? originalExistsSync(p) : false;
+    };
+
+    mockSpawn = (command, args, options) => {
+      return new MockChildProcess(command, args, options);
+    };
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    if (originalExistsSync) {
+      const fs = require("fs");
+      fs.existsSync = originalExistsSync;
+      originalExistsSync = null;
+    }
+
+    mockSpawn = null;
+    spawnedProcesses.length = 0;
+    if (bridge && bridge._pool && bridge._pool()) {
+      try {
+        bridge._pool().shutdown();
+      } catch (e) {
+        // ignore
+      }
+    }
+  });
+
+  it("1. Worker failure while tasks are queued: queued tasks settle with error when restart cap is reached without hanging indefinitely", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    const task1 = settlesWithin(pool.execute("chat", { prompt: "first" }), 1000);
+    await tick();
+    const task2 = settlesWithin(pool.execute("chat", { prompt: "second" }), 1000);
+    await tick();
+    assert.strictEqual(pool.queue.length, 1, "task2 must be queued");
+
+    // Crash repeatedly to exhaust MAX_RESTART_ATTEMPTS (5)
+    for (let i = 0; i <= 6; i++) {
+      const proc = spawnedProcesses[spawnedProcesses.length - 1];
+      proc.simulateExit(1);
+      await tick();
+      await tick();
+    }
+
+    const r1 = await task1;
+    assert.strictEqual(r1, "rejected: worker exited", "task 1 must be rejected with worker exited");
+
+    const r2 = await task2;
+    assert.strictEqual(r2, "rejected: no workers available", "task 2 must settle with no workers available instead of deadlocking");
+    assert.strictEqual(pool.queue.length, 0, "queue must be empty");
+    assert.strictEqual(pool.workers.filter((w) => w.ready).length, 0, "no ready workers remain");
+    pool.shutdown();
+  });
+
+  it("2. Concurrent worker failures: multiple workers fail while tasks queued, recovery succeeds and dispatches queued tasks", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(2);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    spawnedProcesses[1].simulateReady(true);
+    await startP;
+
+    const taskA = settlesWithin(pool.execute("chat", { prompt: "taskA" }), 1000);
+    const taskB = settlesWithin(pool.execute("chat", { prompt: "taskB" }), 1000);
+    await tick();
+
+    const taskC = settlesWithin(pool.execute("chat", { prompt: "taskC" }), 1000);
+    const taskD = settlesWithin(pool.execute("chat", { prompt: "taskD" }), 1000);
+    await tick();
+    assert.strictEqual(pool.queue.length, 2, "tasks C and D must be queued");
+
+    // Both workers crash concurrently
+    spawnedProcesses[0].simulateExit(1);
+    spawnedProcesses[1].simulateExit(1);
+    await tick();
+
+    const [resA, resB] = await Promise.all([taskA, taskB]);
+    assert.strictEqual(resA, "rejected: worker exited");
+    assert.strictEqual(resB, "rejected: worker exited");
+
+    // Both replacement workers spawn and become ready
+    await tick();
+    const rep0 = spawnedProcesses[2];
+    const rep1 = spawnedProcesses[3];
+    assert.ok(rep0 && rep1, "both replacement workers must spawn");
+
+    rep0.simulateReady(true);
+    await tick();
+    rep1.simulateReady(true);
+    await tick();
+
+    // Replacements receive and complete queued tasks C and D
+    const msg0 = JSON.parse(rep0.lastWrite);
+    rep0.simulateResponse(msg0.id, true, { content: "reply-C" });
+    const msg1 = JSON.parse(rep1.lastWrite);
+    rep1.simulateResponse(msg1.id, true, { content: "reply-D" });
+
+    const [resC, resD] = await Promise.all([taskC, taskD]);
+
+    assert.deepStrictEqual(resC, { content: "reply-C" }, "task C must be completed by replacement worker");
+    assert.deepStrictEqual(resD, { content: "reply-D" }, "task D must be completed by replacement worker");
+    assert.strictEqual(pool.queue.length, 0, "queue must be emptied");
+    assert.strictEqual(pool.workers.filter((w) => w.ready && !w.busy).length, 2, "both workers must be ready and idle");
+    pool.shutdown();
+  });
+
+  it("3. Healthy worker continues accepting and processing tasks while failed worker is recovering", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(2);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    spawnedProcesses[1].simulateReady(true);
+    await startP;
+
+    const taskA = settlesWithin(pool.execute("chat", { prompt: "taskA" }), 1000);
+    const taskB = settlesWithin(pool.execute("chat", { prompt: "taskB" }), 1000);
+    await tick();
+
+    const taskC = settlesWithin(pool.execute("chat", { prompt: "taskC" }), 1000);
+    await tick();
+    assert.strictEqual(pool.queue.length, 1, "task C must be queued");
+
+    // Worker 0 crashes; Worker 1 is healthy and executing Task B
+    spawnedProcesses[0].simulateExit(1);
+    await tick();
+
+    const resA = await taskA;
+    assert.strictEqual(resA, "rejected: worker exited");
+
+    // Worker 1 completes Task B
+    const msgB = JSON.parse(spawnedProcesses[1].lastWrite);
+    spawnedProcesses[1].simulateResponse(msgB.id, true, { content: "reply-B" });
+    const resB = await taskB;
+    assert.deepStrictEqual(resB, { content: "reply-B" });
+
+    // Worker 1 must immediately pick up queued Task C without waiting for Worker 0's replacement
+    await tick();
+    const msgC = JSON.parse(spawnedProcesses[1].lastWrite);
+    assert.strictEqual(msgC.params.prompt, "taskC", "Worker 1 must pick up Task C immediately");
+    spawnedProcesses[1].simulateResponse(msgC.id, true, { content: "reply-C" });
+    const resC = await taskC;
+    assert.deepStrictEqual(resC, { content: "reply-C" });
+
+    // Worker 1 accepts another task while Worker 0 replacement is readying
+    const taskD = settlesWithin(pool.execute("chat", { prompt: "taskD" }), 1000);
+    await tick();
+    const msgD = JSON.parse(spawnedProcesses[1].lastWrite);
+    assert.strictEqual(msgD.params.prompt, "taskD");
+    spawnedProcesses[1].simulateResponse(msgD.id, true, { content: "reply-D" });
+    const resD = await taskD;
+    assert.deepStrictEqual(resD, { content: "reply-D" });
+
+    // Worker 0 replacement becomes ready
+    const rep0 = spawnedProcesses[2];
+    rep0.simulateReady(true);
+    await tick();
+
+    assert.strictEqual(pool.workers.filter((w) => w.ready).length, 2, "both workers must be ready");
+    pool.shutdown();
+  });
+
+  it("4. Replacement startup failure during recovery rejects queued tasks without deadlocking", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    const task1 = settlesWithin(pool.execute("chat", { prompt: "task1" }), 1000);
+    await tick();
+    const task2 = settlesWithin(pool.execute("chat", { prompt: "task2" }), 1000);
+    await tick();
+
+    // Worker crashes
+    spawnedProcesses[0].simulateExit(1);
+    await tick();
+
+    // Replacement fails to load
+    const rep = spawnedProcesses[spawnedProcesses.length - 1];
+    rep.simulateReady(false);
+    await tick();
+
+    const r2 = await task2;
+    assert.strictEqual(r2, "rejected: no workers available", "queued task must reject rather than deadlocking");
+    assert.strictEqual(pool.queue.length, 0);
+    pool.shutdown();
+  });
+
+  it("5. Worker stdin error terminates broken worker, triggers replacement, and does not corrupt subsequent queued tasks", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    const worker = pool.workers[0];
+    assert.strictEqual(worker.ready, true);
+
+    // Make stdin.write throw EPIPE
+    spawnedProcesses[0].onStdinWrite = () => {
+      throw new Error("write EPIPE");
+    };
+
+    const reqFail = pool.execute("chat", { prompt: "fail" }).catch((e) => `rejected: ${e.message}`);
+    const rFail = await reqFail;
+    assert.strictEqual(rFail, "rejected: write EPIPE");
+    assert.strictEqual(worker.ready, false, "broken worker must be marked not ready");
+    assert.strictEqual(pool.getAvailableWorker(), undefined, "broken worker must not be available");
+
+    // Replacement worker spawns and becomes ready
+    await tick();
+    const rep = spawnedProcesses[spawnedProcesses.length - 1];
+    assert.notStrictEqual(rep, spawnedProcesses[0], "replacement must spawn");
+    rep.simulateReady(true);
+    await tick();
+
+    const reqSuccess = pool.execute("chat", { prompt: "after-epipe" });
+    await tick();
+    const msg = JSON.parse(rep.lastWrite);
+    rep.simulateResponse(msg.id, true, { content: "recovered-after-epipe" });
+    const rSuccess = await settlesWithin(reqSuccess, 1000);
+    assert.deepStrictEqual(rSuccess, { content: "recovered-after-epipe" });
+
+    pool.shutdown();
+  });
+
+  it("6. Pool shutdown during restart backoff settles pending backoff promise and does not hang", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    // Worker crashes, entering restart backoff
+    spawnedProcesses[0].simulateExit(1);
+    await tick();
+
+    assert.strictEqual(pool._restartTimers.size, 1, "restart timer must be armed");
+
+    // Shutdown while backoff is pending
+    pool.shutdown();
+    assert.strictEqual(pool.stopped, true);
+    assert.strictEqual(pool._restartTimers.size, 0);
+
+    // Wait a tick and verify no further workers are spawned
+    const countBefore = spawnedProcesses.length;
+    await tick();
+    assert.strictEqual(spawnedProcesses.length, countBefore, "no workers spawned after shutdown");
+  });
+
+  it("7. Late result from timed-out or terminated worker does not settle task twice or corrupt new requests", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    // Execute task with 20ms timeout
+    const req1 = pool.execute("chat", { prompt: "req1" }, { timeoutMs: 20, requestId: "req-1" }).catch((e) => `rejected: ${e.message}`);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const r1 = await settlesWithin(req1, 1000);
+    assert.strictEqual(r1, "rejected: inference timed out");
+
+    // Replacement spawns
+    await tick();
+    const rep = spawnedProcesses[spawnedProcesses.length - 1];
+    rep.simulateReady(true);
+    await tick();
+
+    // Submit new request
+    const req2 = pool.execute("chat", { prompt: "req2" }, { requestId: "req-2" });
+    await tick();
+
+    // Late response arrives on old process
+    spawnedProcesses[0].simulateResponse(1, true, { content: "stale-result" });
+    await tick();
+
+    // Confirm req2 is still pending, then complete it on replacement
+    const msg2 = JSON.parse(rep.lastWrite);
+    rep.simulateResponse(msg2.id, true, { content: "fresh-result" });
+    const r2 = await settlesWithin(req2, 1000);
+    assert.deepStrictEqual(r2, { content: "fresh-result" });
+
+    pool.shutdown();
+  });
+
+  it("8. Worker cleanup before spawn settles resolves spawn promise cleanly without hanging", async () => {
+    bridge = require("../src/services/pythonBridge");
+    const worker = new bridge.Worker(0);
+    const spawnP = worker.spawn();
+    await tick();
+
+    // Call cleanup while spawn is still in progress
+    worker.cleanup();
+
+    const spawnRes = await settlesWithin(spawnP, 1000);
+    assert.strictEqual(spawnRes, false, "spawn promise must settle to false after cleanup");
+    assert.strictEqual(worker.ready, false);
+    assert.strictEqual(worker.child, null);
+  });
+
+  it("9. Pool remains fully usable and accepts new tasks after recovery", async () => {
+    bridge = require("../src/services/pythonBridge");
+    bridge._setTimerImpl(
+      (fn, ms) => {
+        if (ms >= 10000) return { longTimer: true };
+        return setImmediate(fn);
+      },
+      (t) => {
+        if (t && t.longTimer) return;
+        clearImmediate(t);
+      }
+    );
+
+    const pool = new bridge.WorkerPool(1);
+    const startP = pool.start();
+    await tick();
+    spawnedProcesses[0].simulateReady(true);
+    await startP;
+
+    // Worker crashes and recovers
+    spawnedProcesses[0].simulateExit(1);
+    await tick();
+    const rep = spawnedProcesses[spawnedProcesses.length - 1];
+    rep.simulateReady(true);
+    await tick();
+
+    // Pool accepts new task
+    const req = pool.execute("chat", { prompt: "post-recovery" });
+    await tick();
+    const msg = JSON.parse(rep.lastWrite);
+    rep.simulateResponse(msg.id, true, { content: "post-recovery-ok" });
+    const res = await settlesWithin(req, 1000);
+    assert.deepStrictEqual(res, { content: "post-recovery-ok" });
+
+    assert.strictEqual(pool.workers.filter((w) => w.ready && !w.busy).length, 1);
+    pool.shutdown();
+  });
+});
