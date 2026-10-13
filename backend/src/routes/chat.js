@@ -291,6 +291,10 @@ router.post(
           timestamp: new Date().toISOString(),
         };
         conversations.truncateAfter(conv.id, editMessageId);
+        // A reply a WebSocket turn is still generating for this question answers
+        // its old wording; this request's reply is the answer to the edit, so
+        // that one is not stored when it finishes (Issue #483).
+        conversations.supersedeRepliesTo(conv.id, editMessageId);
         userMessage = conv.messages[editIdx];
       }
     } else if (regenerateMessageId) {
