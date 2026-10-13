@@ -9,7 +9,7 @@ ruff>=0.14.0
 # safetensors and onnx are optional runtime extras, but export paths are covered by
 # CI, so they are not optional here.
 safetensors>=0.7.0
-onnx>=1.16.0
+onnx>=1.23.2
 onnxruntime>=1.18.0
 # pypdf is optional at runtime, but the PDF limits in model/document.py are only
 # exercised with it installed (6.18+ for the page-tree ceiling).
