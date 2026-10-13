@@ -313,7 +313,8 @@ function generateOpenApiSpec() {
                     regenerateMessageId: {
                       type: "string",
                       format: "uuid",
-                      description: "ID of an assistant message to regenerate",
+                      description:
+                        "ID of an assistant message to regenerate: a stored reply, or one a WebSocket turn is still generating, which this request then replaces. Any other id is answered with 404.",
                     },
                     clientMessageId: {
                       type: "string",
@@ -337,7 +338,7 @@ function generateOpenApiSpec() {
               },
             },
             "400": errorResponseRef(400, "Validation error"),
-            "404": errorResponseRef(404, "Conversation not found"),
+            "404": errorResponseRef(404, "Conversation not found, or the message to regenerate is neither stored nor being generated"),
             "409": errorResponseRef(409, "Version conflict"),
             "429": errorResponseRef(429, "Rate limit exceeded"),
           },

@@ -295,7 +295,17 @@ router.post(
       }
     } else if (regenerateMessageId) {
       const regenIdx = conv.messages ? conv.messages.findIndex((m) => m.id === regenerateMessageId) : -1;
-      if (regenIdx !== -1) {
+      if (regenIdx === -1) {
+        // Not stored yet: a reply a WebSocket turn is still generating. This
+        // request replaces it, so it is not stored when it finishes. Anything
+        // else is not a reply this conversation has; it used to be stored as a
+        // new question and answered again (Issue #477).
+        const pending = conversations.pendingReply(conv.id, regenerateMessageId);
+        const parent = pending ? conv.messages.find((m) => m.id === pending.parentId && m.role === "user") : null;
+        if (!parent) throw ApiError.notFound("Message to regenerate not found in conversation");
+        conversations.supersedeReply(conv.id, regenerateMessageId);
+        userMessage = parent;
+      } else {
         conversations.truncateFrom(conv.id, regenerateMessageId);
         for (let i = conv.messages.length - 1; i >= 0; i--) {
           if (conv.messages[i]?.role === "user") {
