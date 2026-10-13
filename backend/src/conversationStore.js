@@ -306,11 +306,16 @@ function truncateAfter(id, messageId) {
   const conv = conversations.get(id);
   if (!conv || !Array.isArray(conv.messages)) return false;
   _touch(conv);
-  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  const idx = conv.messages.findIndex((m) => m.id === messageId || m.clientId === messageId);
   if (idx === -1) return false;
   const removed = conv.messages.splice(idx + 1);
   if (removed.length > 0) {
-    _trackDeleted(conv, removed.map((m) => m?.id));
+    const ids = [];
+    for (const m of removed) {
+      if (m?.id) ids.push(m.id);
+      if (m?.clientId) ids.push(m.clientId);
+    }
+    _trackDeleted(conv, ids);
   }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
@@ -324,11 +329,16 @@ function truncateFrom(id, messageId) {
   const conv = conversations.get(id);
   if (!conv || !Array.isArray(conv.messages)) return false;
   _touch(conv);
-  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  const idx = conv.messages.findIndex((m) => m.id === messageId || m.clientId === messageId);
   if (idx === -1) return false;
   const removed = conv.messages.splice(idx);
   if (removed.length > 0) {
-    _trackDeleted(conv, removed.map((m) => m?.id));
+    const ids = [];
+    for (const m of removed) {
+      if (m?.id) ids.push(m.id);
+      if (m?.clientId) ids.push(m.clientId);
+    }
+    _trackDeleted(conv, ids);
   }
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
@@ -342,10 +352,13 @@ function deleteMessage(id, messageId) {
   const conv = conversations.get(id);
   if (!conv || !Array.isArray(conv.messages)) return false;
   _touch(conv);
-  const idx = conv.messages.findIndex((m) => m.id === messageId);
+  const idx = conv.messages.findIndex((m) => m.id === messageId || m.clientId === messageId);
   if (idx === -1) return false;
-  conv.messages.splice(idx, 1);
-  _trackDeleted(conv, [messageId]);
+  const [removed] = conv.messages.splice(idx, 1);
+  const ids = [messageId];
+  if (removed?.id) ids.push(removed.id);
+  if (removed?.clientId) ids.push(removed.clientId);
+  _trackDeleted(conv, ids);
   conv.version = (conv.version || 1) + 1;
   conv.updatedAt = new Date().toISOString();
   return true;
@@ -385,7 +398,10 @@ function sync(id, clientState = {}, options = {}) {
   const serverIds = new Set(conv.messages.map((m) => m?.id).filter(Boolean));
   const serverClientIds = new Set(conv.messages.map((m) => m?.clientId).filter(Boolean));
   const storedHere = (m) =>
-    serverIds.has(m.id) || (m.clientId && serverIds.has(m.clientId)) || serverClientIds.has(m.id);
+    serverIds.has(m.id) ||
+    (m.clientId && serverIds.has(m.clientId)) ||
+    serverClientIds.has(m.id) ||
+    (m.clientId && serverClientIds.has(m.clientId));
   const client = {
     ...clientState,
     // The server owns the version. A client claiming one ahead of it would
