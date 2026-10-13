@@ -409,10 +409,29 @@ function setupWebSocket(wss) {
               timestamp: new Date().toISOString(),
             };
             conversations.truncateAfter(conversationId, frame.editMessageId);
-          } else if (!frame.editMessageId && frame.regenerateMessageId && conversationId && conversations.has(conversationId)) {
-            const conv = conversations.get(conversationId);
-            const regenIdx = conv.messages ? conv.messages.findIndex((m) => m.id === frame.regenerateMessageId) : -1;
-            if (regenIdx !== -1) {
+          } else if (!frame.editMessageId && frame.regenerateMessageId) {
+            const conv = conversationId ? conversations.get(conversationId) : null;
+            const regenIdx = conv?.messages ? conv.messages.findIndex((m) => m.id === frame.regenerateMessageId) : -1;
+            if (regenIdx === -1) {
+              // Not stored yet: a reply still being generated, which a dropped
+              // connection left on the client under its real id. This turn
+              // replaces it, so it is not stored when it finishes. Anything else
+              // is not a reply this conversation has, and generating anyway
+              // answered the question twice (Issue #477).
+              const pending = conversations.pendingReply(conversationId, frame.regenerateMessageId);
+              const parent = pending && conv ? conv.messages.find((m) => m.id === pending.parentId && m.role === "user") : null;
+              if (!parent) {
+                safeSend(ws, {
+                  type: "error",
+                  conversationId,
+                  code: "NOT_FOUND",
+                  message: "Message to regenerate not found in conversation",
+                });
+                return;
+              }
+              conversations.supersedeReply(conversationId, frame.regenerateMessageId);
+              userMessageId = parent.id;
+            } else {
               conversations.truncateFrom(conversationId, frame.regenerateMessageId);
               let prevUser = null;
               for (let i = conv.messages.length - 1; i >= 0; i--) {
@@ -449,6 +468,10 @@ function setupWebSocket(wss) {
 
           const currentConv = conversationId ? conversations.get(conversationId) : null;
           const currentVersion = currentConv ? currentConv.version : 1;
+
+          // The ack names the reply before it is stored, so from here a
+          // regeneration may target it (Issue #477).
+          conversations.startReply(conversationId, assistantMessageId, userMessageId);
 
           // Send acknowledgment
           safeSend(ws, {
@@ -512,13 +535,22 @@ function setupWebSocket(wss) {
             }
           };
 
-          const response = await model.processMessage(
-            messages,
-            messageType,
-            settings,
-            { onApprovalRequest, operatorCtx, onStream },
-            operatorCtx
-          );
+          let response;
+          let superseded = false;
+          try {
+            response = await model.processMessage(
+              messages,
+              messageType,
+              settings,
+              { onApprovalRequest, operatorCtx, onStream },
+              operatorCtx
+            );
+          } finally {
+            superseded = conversations.finishReply(conversationId, assistantMessageId);
+          }
+          // A regeneration replaced this reply while it was being generated: the
+          // replacement is the answer, so this one is neither stored nor sent.
+          if (superseded) return;
 
           // modelChat hands the worker's result.content through verbatim, so it
           // is not guaranteed to be a string. Normalise it before the turn is

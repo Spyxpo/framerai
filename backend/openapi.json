@@ -424,7 +424,7 @@
                   "regenerateMessageId": {
                     "type": "string",
                     "format": "uuid",
-                    "description": "ID of an assistant message to regenerate"
+                    "description": "ID of an assistant message to regenerate: a stored reply, or one a WebSocket turn is still generating, which this request then replaces. Any other id is answered with 404."
                   },
                   "clientMessageId": {
                     "type": "string",
@@ -469,7 +469,7 @@
             }
           },
           "404": {
-            "description": "Conversation not found",
+            "description": "Conversation not found, or the message to regenerate is neither stored nor being generated",
             "content": {
               "application/json": {
                 "schema": {

@@ -273,6 +273,48 @@ function update(id, fields = {}, options = {}) {
 
 function clear() {
   conversations.clear();
+  pendingReplies.clear();
+}
+
+// Replies a WebSocket turn has named in its ack but not stored yet, by
+// conversation and reply id, with the user message each answers (Issue #477).
+// A client can hold such a reply under its real id - a dropped connection
+// leaves what had streamed on screen while the server keeps generating - and
+// ask to regenerate it before the server has stored it. Entries live from the
+// ack until the turn finishes, however it finishes.
+const pendingReplies = new Map();
+
+function startReply(conversationId, replyId, parentId) {
+  if (!conversationId || !replyId) return;
+  let replies = pendingReplies.get(conversationId);
+  if (!replies) {
+    replies = new Map();
+    pendingReplies.set(conversationId, replies);
+  }
+  replies.set(replyId, { parentId, superseded: false });
+}
+
+/** A reply still being generated and not yet replaced, or null. */
+function pendingReply(conversationId, replyId) {
+  const entry = pendingReplies.get(conversationId)?.get(replyId);
+  return entry && !entry.superseded ? entry : null;
+}
+
+/** Mark a pending reply replaced by a regeneration, so it is never stored. */
+function supersedeReply(conversationId, replyId) {
+  const entry = pendingReply(conversationId, replyId);
+  if (entry) entry.superseded = true;
+  return Boolean(entry);
+}
+
+/** Forget a finished reply. True when it was replaced and must not be stored. */
+function finishReply(conversationId, replyId) {
+  const replies = pendingReplies.get(conversationId);
+  const entry = replies?.get(replyId);
+  if (!entry) return false;
+  replies.delete(replyId);
+  if (replies.size === 0) pendingReplies.delete(conversationId);
+  return entry.superseded;
 }
 
 const conversationSync = require("./conversationSync");
@@ -473,6 +515,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 module.exports = {
   create, get, has, remove, list, messages, append, update, clear,
   truncateAfter, truncateFrom, updateMessage, deleteMessage, sync, findUserMessage,
+  startReply, pendingReply, supersedeReply, finishReply,
   maxMessages, MAX_DELETED_IDS,
   _map: conversations,
   _evict,
