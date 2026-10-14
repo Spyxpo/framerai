@@ -11,6 +11,14 @@ import { dedupeMessages } from "./dedupe";
 
 export const BACKUP_VERSION = 1;
 export const SUPPORTED_BACKUP_VERSIONS = [1];
+export const MAX_IMPORT_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
+
+function generateUuid() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `import-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
 
 /**
  * Creates a versioned backup payload from an array of conversations (or a single conversation).
@@ -64,7 +72,15 @@ export function exportConversationToMarkdown(conversation) {
 
   for (const m of messages) {
     const roleLabel =
-      m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : (m.role || "Unknown");
+      m.role === "user"
+        ? "User"
+        : m.role === "assistant"
+        ? "Assistant"
+        : m.role === "system"
+        ? "System"
+        : m.role
+        ? m.role.charAt(0).toUpperCase() + m.role.slice(1)
+        : "Unknown";
     const timeStr = m.timestamp ? ` (${m.timestamp})` : "";
     lines.push(`### ${roleLabel}${timeStr}`);
     lines.push("");
@@ -113,30 +129,269 @@ export function exportConversationToPlainText(conversation) {
 }
 
 /**
- * Validates a backup payload or raw JSON string before any mutations occur.
+ * Parses a Markdown-formatted conversation into a structured conversation object.
+ * Preserves message ordering, roles, timestamps, attachments, code blocks,
+ * multiline text, Unicode, and branching metadata.
  *
- * @param {string|Object} backupData - Raw JSON string or parsed backup object
- * @returns {{ valid: boolean, error?: string, backup?: Object }} Validation result
+ * @param {string} markdownText - Raw markdown text
+ * @returns {{ success: boolean, conversation?: Object, error?: string }}
  */
-export function validateBackup(backupData) {
+export function parseMarkdownConversation(markdownText) {
+  if (typeof markdownText !== "string") {
+    return { success: false, error: "Invalid Markdown content: expected string." };
+  }
+  const trimmed = markdownText.trim();
+  if (!trimmed) {
+    return { success: false, error: "Empty Markdown content: no content provided." };
+  }
+
+  const lines = markdownText.split(/\r?\n/);
+  let title = "Imported Conversation";
+  let parentConversationId = undefined;
+  let branchedFromMessageId = undefined;
+  const messages = [];
+
+  let currentRole = null;
+  let currentTimestamp = null;
+  let currentLines = [];
+  let currentAttachments = [];
+  let inCodeBlock = false;
+
+  const flushMessage = () => {
+    if (currentRole) {
+      const content = currentLines.join("\n").trim();
+      const msg = {
+        id: generateUuid(),
+        role: currentRole,
+        content: content,
+        type: "text",
+      };
+      if (currentTimestamp) {
+        msg.timestamp = currentTimestamp;
+      }
+      if (currentAttachments.length > 0) {
+        msg.attachments = [...currentAttachments];
+      }
+      messages.push(msg);
+    }
+    currentRole = null;
+    currentTimestamp = null;
+    currentLines = [];
+    currentAttachments = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Code block fences toggle code block mode
+    if (/^\s*```/.test(line)) {
+      inCodeBlock = !inCodeBlock;
+      if (currentRole) {
+        currentLines.push(line);
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      if (currentRole) {
+        currentLines.push(line);
+      }
+      continue;
+    }
+
+    // Header metadata before the first message begins
+    if (!currentRole && messages.length === 0) {
+      const titleMatch = line.match(/^#\s+(.+)$/);
+      if (titleMatch) {
+        title = titleMatch[1].trim();
+        continue;
+      }
+      const parentMatch = line.match(/^\*Parent Conversation:\s*`?([^`*]+)`?\*/i);
+      if (parentMatch) {
+        parentConversationId = parentMatch[1].trim();
+        continue;
+      }
+      const branchMatch = line.match(/^\*Branched from Message:\s*`?([^`*]+)`?\*/i);
+      if (branchMatch) {
+        branchedFromMessageId = branchMatch[1].trim();
+        continue;
+      }
+    }
+
+    // Role header matches:
+    // ### User (2026-08-01T12:00:00.000Z)
+    // ### Assistant
+    // ## User
+    // #### Assistant
+    // **User**:
+    // **User** (2026-08-01T10:00:00.000Z):
+    // User:
+    const roleMatch =
+      line.match(/^(?:#{1,6}\s+|\*\*)?(User|Assistant|System|Human|AI)(?:\*\*)?(?:\s*\(([^)]+)\))?\s*:?\s*$/i);
+
+    if (roleMatch) {
+      flushMessage();
+      const rawRole = roleMatch[1].toLowerCase();
+      currentRole = rawRole === "human" ? "user" : rawRole === "ai" ? "assistant" : rawRole;
+      const rawTime = roleMatch[2]?.trim();
+      if (rawTime) {
+        currentTimestamp = rawTime;
+      }
+      continue;
+    }
+
+    if (currentRole) {
+      // Horizontal rule line separating messages
+      if (/^---+$/.test(line.trim())) {
+        flushMessage();
+        continue;
+      }
+
+      // Attachments metadata
+      const attachMatch = line.match(/^\*Attachments:\s*(.+)\*$/i);
+      if (attachMatch) {
+        currentAttachments = attachMatch[1]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        continue;
+      }
+
+      currentLines.push(line);
+    }
+  }
+
+  flushMessage();
+
+  const convId = generateUuid();
+  const conversation = {
+    id: convId,
+    title,
+    messages,
+    createdAt: messages[0]?.timestamp || new Date().toISOString(),
+    updatedAt: messages[messages.length - 1]?.timestamp || new Date().toISOString(),
+    ...(parentConversationId ? { parentConversationId } : {}),
+    ...(branchedFromMessageId ? { branchedFromMessageId } : {}),
+  };
+
+  return {
+    success: true,
+    conversation,
+  };
+}
+
+/**
+ * Validates a backup payload or raw JSON/Markdown string before any mutations occur.
+ *
+ * @param {string|Object} backupData - Raw JSON/Markdown string or parsed backup object
+ * @param {Object} [options={}] - Optional metadata such as filename
+ * @returns {{ valid: boolean, error?: string, backup?: Object, format?: string }} Validation result
+ */
+export function validateBackup(backupData, options = {}) {
   if (backupData === null || backupData === undefined) {
     return { valid: false, error: "Empty backup data: no content provided." };
   }
 
-  let parsed = backupData;
+  // Size limit validation
+  if (backupData && typeof backupData === "object" && typeof backupData.size === "number") {
+    if (backupData.size > MAX_IMPORT_FILE_SIZE) {
+      return { valid: false, error: "File exceeds maximum allowed size of 10MB." };
+    }
+  }
+  if (typeof Blob !== "undefined" && backupData instanceof Blob) {
+    if (backupData.size > MAX_IMPORT_FILE_SIZE) {
+      return { valid: false, error: "File exceeds maximum allowed size of 10MB." };
+    }
+  }
   if (typeof backupData === "string") {
-    if (!backupData.trim()) {
+    let stringBytes;
+    if (typeof Blob !== "undefined") {
+      stringBytes = new Blob([backupData]).size;
+    } else if (typeof globalThis !== "undefined" && globalThis.Buffer) {
+      stringBytes = globalThis.Buffer.byteLength(backupData, "utf8");
+    } else {
+      stringBytes = backupData.length;
+    }
+    if (stringBytes > MAX_IMPORT_FILE_SIZE) {
+      return { valid: false, error: "File exceeds maximum allowed size of 10MB." };
+    }
+  }
+
+  let parsed = backupData;
+  let isMarkdown = false;
+
+  if (typeof backupData === "string") {
+    const trimmed = backupData.trim();
+    if (!trimmed) {
       return { valid: false, error: "Empty backup file: no content provided." };
     }
-    try {
-      parsed = JSON.parse(backupData);
-    } catch {
-      return { valid: false, error: "Malformed JSON file: failed to parse backup data." };
+
+    const filename = options?.filename || "";
+    const isMdExt = /\.(md|markdown)$/i.test(filename);
+
+    if (isMdExt) {
+      const mdResult = parseMarkdownConversation(backupData);
+      if (mdResult.success) {
+        parsed = {
+          version: BACKUP_VERSION,
+          framerai_backup: true,
+          exportedAt: new Date().toISOString(),
+          conversationCount: 1,
+          conversations: [mdResult.conversation],
+        };
+        isMarkdown = true;
+      } else {
+        return { valid: false, error: mdResult.error || "Failed to parse Markdown file." };
+      }
+    } else {
+      try {
+        parsed = JSON.parse(backupData);
+      } catch {
+        const looksLikeJson = /^\s*[[{]/.test(trimmed);
+        if (!looksLikeJson) {
+          const mdResult = parseMarkdownConversation(backupData);
+          if (mdResult.success && mdResult.conversation.messages.length > 0) {
+            parsed = {
+              version: BACKUP_VERSION,
+              framerai_backup: true,
+              exportedAt: new Date().toISOString(),
+              conversationCount: 1,
+              conversations: [mdResult.conversation],
+            };
+            isMarkdown = true;
+          } else {
+            return { valid: false, error: "Malformed JSON file: failed to parse backup data." };
+          }
+        } else {
+          return { valid: false, error: "Malformed JSON file: failed to parse backup data." };
+        }
+      }
     }
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { valid: false, error: "Invalid backup format: root must be a JSON object." };
+  }
+
+  // Handle single-conversation JSON export format
+  if (!Array.isArray(parsed.conversations) && Array.isArray(parsed.messages)) {
+    parsed = {
+      version: typeof parsed.version === "number" ? parsed.version : BACKUP_VERSION,
+      framerai_backup: true,
+      exportedAt: parsed.exportedAt || new Date().toISOString(),
+      conversationCount: 1,
+      conversations: [
+        {
+          id: typeof parsed.id === "string" && parsed.id.trim() ? parsed.id : generateUuid(),
+          title: typeof parsed.title === "string" ? parsed.title : "Imported Conversation",
+          messages: parsed.messages,
+          ...(parsed.parentConversationId ? { parentConversationId: parsed.parentConversationId } : {}),
+          ...(parsed.branchedFromMessageId ? { branchedFromMessageId: parsed.branchedFromMessageId } : {}),
+          ...(parsed.createdAt ? { createdAt: parsed.createdAt } : {}),
+          ...(parsed.updatedAt ? { updatedAt: parsed.updatedAt } : {}),
+        },
+      ],
+    };
   }
 
   if (typeof parsed.version !== "number") {
@@ -221,19 +476,20 @@ export function validateBackup(backupData) {
     }
   }
 
-  return { valid: true, backup: parsed };
+  return { valid: true, backup: parsed, format: isMarkdown ? "markdown" : "json" };
 }
 
 /**
  * Restores conversations from a validated backup payload, resolving ID collisions
  * without overwriting existing conversations while preserving branch hierarchies.
  *
- * @param {string|Object} backupData - Raw JSON string or parsed backup object
+ * @param {string|Object} backupData - Raw JSON/Markdown string or parsed backup object
  * @param {Array<Object>} existingConversations - Currently existing conversations
+ * @param {Object} [options={}] - Optional metadata such as filename
  * @returns {{ success: boolean, error?: string, conversations?: Array<Object>, count?: number }}
  */
-export function restoreBackup(backupData, existingConversations = []) {
-  const validation = validateBackup(backupData);
+export function restoreBackup(backupData, existingConversations = [], options = {}) {
+  const validation = validateBackup(backupData, options);
   if (!validation.valid) {
     return { success: false, error: validation.error };
   }
@@ -255,13 +511,6 @@ export function restoreBackup(backupData, existingConversations = []) {
   const seenImportConvIds = new Set();
   const seenImportMsgIds = new Set();
 
-  const generateUuid = () => {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
-    }
-    return `import-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  };
-
   for (const conv of backup.conversations) {
     if (existingConvIds.has(conv.id) || seenImportConvIds.has(conv.id)) {
       const newId = generateUuid();
@@ -273,6 +522,7 @@ export function restoreBackup(backupData, existingConversations = []) {
     }
 
     for (const msg of conv.messages) {
+      if (!msg?.id) continue;
       if (existingMsgIds.has(msg.id) || seenImportMsgIds.has(msg.id)) {
         const newMsgId = generateUuid();
         msgIdMap.set(msg.id, newMsgId);
@@ -285,6 +535,7 @@ export function restoreBackup(backupData, existingConversations = []) {
   }
 
   const restoredConversations = [];
+  const seenAllMsgIds = new Set(existingMsgIds);
 
   for (const conv of backup.conversations) {
     const targetConvId = convIdMap.get(conv.id) || conv.id;
@@ -295,15 +546,24 @@ export function restoreBackup(backupData, existingConversations = []) {
       ? msgIdMap.get(conv.branchedFromMessageId) || conv.branchedFromMessageId
       : undefined;
 
-    const mappedMessages = conv.messages
-      .map((m) => {
-        const targetMsgId = msgIdMap.get(m.id) || m.id;
-        return sanitizeMessage({
-          ...m,
-          id: targetMsgId,
-        });
-      })
-      .filter(Boolean);
+    const mappedMessages = [];
+    const seenInConv = new Set();
+    for (const m of conv.messages) {
+      let targetMsgId = msgIdMap.get(m.id) || m.id;
+      if (!targetMsgId || seenInConv.has(targetMsgId) || seenAllMsgIds.has(targetMsgId)) {
+        targetMsgId = generateUuid();
+      }
+      seenInConv.add(targetMsgId);
+      seenAllMsgIds.add(targetMsgId);
+
+      const sanitized = sanitizeMessage({
+        ...m,
+        id: targetMsgId,
+      });
+      if (sanitized) {
+        mappedMessages.push(sanitized);
+      }
+    }
 
     // Reuse dedupeMessages to eliminate duplicate message IDs within the conversation
     const dedupedMessages = dedupeMessages(mappedMessages);

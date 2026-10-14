@@ -13,6 +13,7 @@ import {
   exportConversationToPlainText,
   restoreBackup,
   downloadFile,
+  MAX_IMPORT_FILE_SIZE,
 } from "../utils/backup";
 
 /**
@@ -1357,48 +1358,67 @@ export function useChat(settings) {
   );
 
   const exportConversation = useCallback((convId, format = "json") => {
-    const targetId = convId || activeConversationRef.current;
-    const conv = conversationsRef.current.find((c) => c.id === targetId);
-    if (!conv) {
-      throw new Error("Conversation not found to export.");
+    setError(null);
+    try {
+      const targetId = convId || activeConversationRef.current;
+      const conv = conversationsRef.current.find((c) => c.id === targetId);
+      if (!conv) {
+        throw new Error("Conversation not found to export.");
+      }
+      const safeTitle = (conv.title || "conversation").replace(/[^a-z0-9_-]/gi, "_");
+      if (format === "markdown" || format === "md") {
+        const md = exportConversationToMarkdown(conv);
+        downloadFile(md, `${safeTitle}.md`, "text/markdown");
+        return md;
+      }
+      if (format === "text" || format === "txt") {
+        const txt = exportConversationToPlainText(conv);
+        downloadFile(txt, `${safeTitle}.txt`, "text/plain");
+        return txt;
+      }
+      const backup = createBackup([conv]);
+      const jsonStr = JSON.stringify(backup, null, 2);
+      downloadFile(jsonStr, `framerai-conversation-${safeTitle}-${conv.id}.json`, "application/json");
+      return backup;
+    } catch (err) {
+      setError(`Export failed: ${err.message}`);
+      throw err;
     }
-    const safeTitle = (conv.title || "conversation").replace(/[^a-z0-9_-]/gi, "_");
-    if (format === "markdown" || format === "md") {
-      const md = exportConversationToMarkdown(conv);
-      downloadFile(md, `${safeTitle}.md`, "text/markdown");
-      return md;
-    }
-    if (format === "text" || format === "txt") {
-      const txt = exportConversationToPlainText(conv);
-      downloadFile(txt, `${safeTitle}.txt`, "text/plain");
-      return txt;
-    }
-    const backup = createBackup([conv]);
-    const jsonStr = JSON.stringify(backup, null, 2);
-    downloadFile(jsonStr, `framerai-conversation-${safeTitle}-${conv.id}.json`, "application/json");
-    return backup;
   }, []);
 
   const exportAllConversations = useCallback(() => {
-    const currentList = conversationsRef.current;
-    if (!currentList || currentList.length === 0) {
-      throw new Error("No conversations to export.");
+    setError(null);
+    try {
+      const currentList = conversationsRef.current;
+      if (!currentList || currentList.length === 0) {
+        throw new Error("No conversations to export.");
+      }
+      const backup = createBackup(currentList);
+      const dateStr = new Date().toISOString().split("T")[0];
+      const jsonStr = JSON.stringify(backup, null, 2);
+      downloadFile(jsonStr, `framerai-backup-${dateStr}.json`, "application/json");
+      return backup;
+    } catch (err) {
+      setError(`Export failed: ${err.message}`);
+      throw err;
     }
-    const backup = createBackup(currentList);
-    const dateStr = new Date().toISOString().split("T")[0];
-    const jsonStr = JSON.stringify(backup, null, 2);
-    downloadFile(jsonStr, `framerai-backup-${dateStr}.json`, "application/json");
-    return backup;
   }, []);
 
   const importBackup = useCallback(async (backupDataOrFile) => {
     setError(null);
     try {
       let rawData = backupDataOrFile;
+      let filename = "";
       if (typeof File !== "undefined" && backupDataOrFile instanceof File) {
+        filename = backupDataOrFile.name;
+        if (backupDataOrFile.size > MAX_IMPORT_FILE_SIZE) {
+          const err = "File exceeds maximum allowed size of 10MB.";
+          setError(`Import failed: ${err}`);
+          return { success: false, error: err };
+        }
         rawData = await backupDataOrFile.text();
       }
-      const result = restoreBackup(rawData, conversationsRef.current);
+      const result = restoreBackup(rawData, conversationsRef.current, { filename });
       if (!result.success) {
         setError(`Import failed: ${result.error}`);
         return result;
