@@ -280,8 +280,9 @@ function clear() {
 // conversation and reply id, with the user message each answers (Issue #477).
 // A client can hold such a reply under its real id - a dropped connection
 // leaves what had streamed on screen while the server keeps generating - and
-// ask to regenerate it before the server has stored it. Entries live from the
-// ack until the turn finishes, however it finishes.
+// ask to regenerate it, or edit the question it answers (Issue #483), before
+// the server has stored it. Entries live from the ack until the turn finishes,
+// however it finishes.
 const pendingReplies = new Map();
 
 function startReply(conversationId, replyId, parentId) {
@@ -305,6 +306,23 @@ function supersedeReply(conversationId, replyId) {
   const entry = pendingReply(conversationId, replyId);
   if (entry) entry.superseded = true;
   return Boolean(entry);
+}
+
+/**
+ * Mark every pending reply to `parentId` replaced, so none is stored. An edit
+ * rewrites that question, and those replies answer its old wording (Issue #483).
+ */
+function supersedeRepliesTo(conversationId, parentId) {
+  const replies = pendingReplies.get(conversationId);
+  if (!replies || !parentId) return 0;
+  let count = 0;
+  for (const entry of replies.values()) {
+    if (!entry.superseded && entry.parentId === parentId) {
+      entry.superseded = true;
+      count++;
+    }
+  }
+  return count;
 }
 
 /** Forget a finished reply. True when it was replaced and must not be stored. */
@@ -531,7 +549,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 module.exports = {
   create, get, has, remove, list, messages, append, update, clear,
   truncateAfter, truncateFrom, updateMessage, deleteMessage, sync, findUserMessage,
-  startReply, pendingReply, supersedeReply, finishReply,
+  startReply, pendingReply, supersedeReply, supersedeRepliesTo, finishReply,
   maxMessages, MAX_DELETED_IDS,
   _map: conversations,
   _evict,
