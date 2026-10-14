@@ -409,6 +409,10 @@ function setupWebSocket(wss) {
               timestamp: new Date().toISOString(),
             };
             conversations.truncateAfter(conversationId, frame.editMessageId);
+            // A reply still being generated for this question answers its old
+            // wording; the one generated below is the answer to the edit, so
+            // that one is not stored when it finishes (Issue #483).
+            conversations.supersedeRepliesTo(conversationId, frame.editMessageId);
           } else if (!frame.editMessageId && frame.regenerateMessageId) {
             const conv = conversationId ? conversations.get(conversationId) : null;
             const regenIdx = conv?.messages ? conv.messages.findIndex((m) => m.id === frame.regenerateMessageId) : -1;
@@ -548,8 +552,9 @@ function setupWebSocket(wss) {
           } finally {
             superseded = conversations.finishReply(conversationId, assistantMessageId);
           }
-          // A regeneration replaced this reply while it was being generated: the
-          // replacement is the answer, so this one is neither stored nor sent.
+          // A regeneration, or an edit of its question, replaced this reply while
+          // it was being generated: the replacement is the answer, so this one is
+          // neither stored nor sent.
           if (superseded) return;
 
           // modelChat hands the worker's result.content through verbatim, so it
