@@ -11,9 +11,21 @@ const request = require("supertest");
 const WebSocket = require("ws");
 
 const { mockModel, loadApp, newConversation, startServer } = require("./helpers");
+const conversations = require("../src/conversationStore");
 
 // Conversation ids are validated at the WebSocket boundary (#352).
 const TRACE_CONV_ID = "88888888-8888-4888-8888-888888888888";
+
+test.beforeEach(() => {
+  if (!conversations.has(TRACE_CONV_ID)) {
+    conversations.create({
+      id: TRACE_CONV_ID,
+      title: "Trace Conv",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+});
 
 // Cache paths for clearing between tests
 const APP_PATH = require.resolve("../src/app");

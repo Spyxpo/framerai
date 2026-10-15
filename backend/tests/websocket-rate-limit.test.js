@@ -45,12 +45,23 @@ function resetGenerationCounter() {
   generationCounter.lastSweep = 0;
 }
 
+const conversations = require("../src/conversationStore");
+const RATE_LIMIT_CONV_ID = "66666666-6666-4666-8666-666666666666";
+
 /**
  * Open a WS connection with the given headers, send one chat frame, and wait
  * for the first error frame or completed stream.
  * Returns { rateLimited, messages }.
  */
 function wsChat(wsUrl, extraHeaders = {}) {
+  if (!conversations.has(RATE_LIMIT_CONV_ID)) {
+    conversations.create({
+      id: RATE_LIMIT_CONV_ID,
+      title: "Rate Limit Test",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl, { headers: extraHeaders });
     const messages = [];
@@ -61,7 +72,7 @@ function wsChat(wsUrl, extraHeaders = {}) {
 
     ws.on("error", reject);
     ws.on("open", () =>
-      ws.send(JSON.stringify({ type: "chat", content: "hi", conversationId: "66666666-6666-4666-8666-666666666666" }))
+      ws.send(JSON.stringify({ type: "chat", content: "hi", conversationId: RATE_LIMIT_CONV_ID }))
     );
     ws.on("message", (data) => {
       const msg = JSON.parse(data);
