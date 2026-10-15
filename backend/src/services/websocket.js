@@ -356,8 +356,16 @@ function setupWebSocket(wss) {
           conversationId = frame.conversationId;
           const { content, messageType, settings, attachments, expectedVersion } = frame;
 
-          // Check optimistic concurrency / version conflict if conversation exists and expectedVersion was provided (#438)
-          if (conversationId && conversations.has(conversationId)) {
+          if (conversationId) {
+            if (!conversations.has(conversationId)) {
+              safeSend(ws, {
+                type: "error",
+                conversationId,
+                code: "NOT_FOUND",
+                message: "Conversation not found",
+              });
+              return;
+            }
             const existingConv = conversations.get(conversationId);
             if (expectedVersion !== undefined && (existingConv.version || 1) !== expectedVersion) {
               safeSend(ws, {

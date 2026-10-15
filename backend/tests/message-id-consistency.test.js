@@ -292,7 +292,7 @@ test("a WebSocket turn leaves the ids of earlier messages alone", async (t) => {
   assert.ok(stored.every((m) => UUID.test(m.id)), "every stored message has an id");
 });
 
-test("a turn for a conversation the server does not hold still gets an ack id and a reply", async (t) => {
+test("a turn for a conversation the server does not hold is rejected with NOT_FOUND error (#504)", async (t) => {
   const server = await startServer();
   t.after(() => server.stop());
   const ws = await openSocket(server.wsUrl);
@@ -301,8 +301,11 @@ test("a turn for a conversation the server does not hold still gets an ack id an
 
   const frames = await runTurn(ws, { content: "hello", conversationId: unknown });
 
-  assert.match(frames.find((f) => f.type === "ack").messageId, UUID);
-  assert.equal(frames[frames.length - 1].done, true);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].type, "error");
+  assert.equal(frames[0].code, "NOT_FOUND");
+  assert.equal(frames[0].conversationId, unknown);
+  assert.equal(frames[0].message, "Conversation not found");
   const res = await request(server.app).get(`/api/chat/conversations/${unknown}`);
   assert.equal(res.status, 404, "nothing was recorded, as before");
 });

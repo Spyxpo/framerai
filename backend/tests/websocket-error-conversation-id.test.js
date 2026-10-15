@@ -33,10 +33,22 @@ const WebSocket = require("ws");
 
 const { mockModel, startServer } = require("./helpers");
 const { generationCounter } = require("../src/middleware/limiters");
+const conversations = require("../src/conversationStore");
 
 mockModel();
 
 const CONV_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+
+test.beforeEach(() => {
+  if (!conversations.has(CONV_ID)) {
+    conversations.create({
+      id: CONV_ID,
+      title: "Error Test Conv",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+});
 
 function exchange(wsUrl, frame, { timeoutMs = 4000 } = {}) {
   return new Promise((resolve, reject) => {

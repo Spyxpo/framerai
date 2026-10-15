@@ -12,9 +12,21 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { mockModel, startServer, createTestWav } = require("./helpers");
+const conversations = require("../src/conversationStore");
 
 // Conversation ids are validated at the WebSocket boundary (#352).
 const AUDIO_CONV_ID = "77777777-7777-4777-8777-777777777777";
+
+test.beforeEach(() => {
+  if (!conversations.has(AUDIO_CONV_ID)) {
+    conversations.create({
+      id: AUDIO_CONV_ID,
+      title: "Audio Conv",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+});
 
 // Mock processMessage to return audio responses
 mockModel({

@@ -194,6 +194,12 @@ test("5. Error events target the correct conversation ID", async (t) => {
   t.after(() => server.stop());
 
   const branchId = randomUUID();
+  conversations.create({
+    id: branchId,
+    title: "Branch Conv",
+    messages: [],
+    createdAt: new Date().toISOString(),
+  });
   const ws = await connectWebSocket(server.wsUrl);
   t.after(() => ws.close());
 

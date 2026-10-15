@@ -37,6 +37,17 @@ const conversations = require("../src/conversationStore");
 
 const VALID_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 
+test.beforeEach(() => {
+  if (!conversations.has(VALID_ID)) {
+    conversations.create({
+      id: VALID_ID,
+      title: "Valid Conv",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+});
+
 /**
  * Open a connection, send one frame, and collect every reply until the stream
  * finishes, an error arrives, or the wait times out.

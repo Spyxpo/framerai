@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
 const { mockModel, startServer } = require("./helpers");
+const conversations = require("../src/conversationStore");
 
 // Default mock for most tests
 mockModel();
@@ -17,6 +18,19 @@ const CONV = {
   disconnect: "44444444-4444-4444-8444-444444444444",
   deny: "55555555-5555-4555-8555-555555555555",
 };
+
+test.beforeEach(() => {
+  for (const id of Object.values(CONV)) {
+    if (!conversations.has(id)) {
+      conversations.create({
+        id,
+        title: "Test Conversation",
+        messages: [],
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+});
 
 /**
  * Open a connection, send one frame, and collect every reply until the stream

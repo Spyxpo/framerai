@@ -36,10 +36,22 @@ const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
 const { mockModel, startServer } = require("./helpers");
+const conversations = require("../src/conversationStore");
 
 mockModel();
 
 const CONV_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+
+test.beforeEach(() => {
+  if (!conversations.has(CONV_ID)) {
+    conversations.create({
+      id: CONV_ID,
+      title: "Stream Amp Conv",
+      messages: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+});
 
 // Mirrors MAX_SIMULATED_FRAMES in src/services/websocket.js.
 const MAX_SIMULATED_FRAMES = 64;
