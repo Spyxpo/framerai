@@ -231,7 +231,13 @@ describe("E2E Smoke Tests (Process-Level)", () => {
         assert.ok(pong, "WebSocket should respond to ping with pong");
 
         // Test WS chat streaming (send prompt "hello" for short response)
-        const wsChatId = "99999999-9999-4999-8999-999999999999";
+        const wsConvRes = await requestJson(
+          `${baseUrl}/api/chat/conversations`,
+          { method: "POST" }
+        );
+        assert.strictEqual(wsConvRes.status, 200, "create WS conversation should return 200");
+        const wsChatId = wsConvRes.body.id;
+        assert.ok(wsChatId, "ws conversation id should be defined");
         ws.send(JSON.stringify({ type: "chat", content: "hello", conversationId: wsChatId }));
 
         let streamDone = false;
