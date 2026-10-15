@@ -31,12 +31,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
-const { mockModel, startServer } = require("./helpers");
+const { mockModel, startServer, holdConversations } = require("./helpers");
 const { generationCounter } = require("../src/middleware/limiters");
 
 mockModel();
 
 const CONV_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversation these turns join is held before each test.
+test.beforeEach(() => holdConversations(CONV_ID));
 
 function exchange(wsUrl, frame, { timeoutMs = 4000 } = {}) {
   return new Promise((resolve, reject) => {

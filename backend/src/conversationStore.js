@@ -122,6 +122,18 @@ function create(conversation) {
   return conversation;
 }
 
+/**
+ * Store `conversation` under its own id only if no conversation has that id, and
+ * return it; null when one does, which is then left exactly as it was. create()
+ * would replace a held conversation that looks no older. Nothing awaits between
+ * the check and the insert, so no other request can create the id in between
+ * (Issue #503).
+ */
+function createIfAbsent(conversation) {
+  if (!conversation?.id || conversations.has(conversation.id)) return null;
+  return create(conversation);
+}
+
 function get(id) {
   const conv = conversations.get(id) || null;
   if (conv) {
@@ -547,7 +559,7 @@ function _resetLimits({ max, ttl, maxMessages } = {}) {
 }
 
 module.exports = {
-  create, get, has, remove, list, messages, append, update, clear,
+  create, createIfAbsent, get, has, remove, list, messages, append, update, clear,
   truncateAfter, truncateFrom, updateMessage, deleteMessage, sync, findUserMessage,
   startReply, pendingReply, supersedeReply, supersedeRepliesTo, finishReply,
   maxMessages, MAX_DELETED_IDS,

@@ -25,6 +25,8 @@ export default function Chat({
   streaming,
   loadingMessages,
   error,
+  recoveryBlocked = false,
+  onStartNewChat,
   pendingApproval,
   onApproveCommand,
   onDenyCommand,
@@ -340,7 +342,9 @@ export default function Chat({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const isBusy = loading || streaming || loadingMessages || submitting;
+  // A conversation the server lost and that could not be restored takes no more
+  // messages (#503): an answer would not know the ones above it.
+  const isBusy = loading || streaming || loadingMessages || submitting || recoveryBlocked;
 
   const handleSubmit = async (e) => {
     e?.preventDefault?.();
@@ -502,6 +506,22 @@ export default function Chat({
           <button className="error-banner-dismiss" onClick={onDismissError} aria-label="Dismiss error">
             <X size={14} aria-hidden="true" />
           </button>
+        </div>
+      )}
+
+      {/* A conversation the server lost and that could not be restored (#503) */}
+      {recoveryBlocked && (
+        <div className="error-banner" role="alert" aria-live="assertive">
+          <AlertTriangle size={15} className="error-banner-icon" aria-hidden="true" />
+          <span>
+            This conversation could not be restored on the server, so sending in it is paused: a reply now would not
+            know the messages above it. Your messages are still saved in this browser.
+          </span>
+          {onStartNewChat && (
+            <button type="button" className="recovery-banner-action" onClick={onStartNewChat}>
+              Start a new chat
+            </button>
+          )}
         </div>
       )}
 
@@ -783,7 +803,13 @@ export default function Chat({
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder={loadingMessages ? "Loading conversation…" : "Message FramerAI…"}
+            placeholder={
+              loadingMessages
+                ? "Loading conversation…"
+                : recoveryBlocked
+                  ? "Sending is paused in this conversation"
+                  : "Message FramerAI…"
+            }
             rows={1}
             disabled={isBusy}
             aria-label="Message input"

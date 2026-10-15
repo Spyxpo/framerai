@@ -31,6 +31,7 @@ export default function App() {
     messages,
     loading,
     streaming,
+    recoveryBlocked,
     loadingConversations,
     loadingMessages,
     error,
@@ -206,6 +207,8 @@ export default function App() {
         streaming={streaming}
         loadingMessages={loadingMessages}
         error={error}
+        recoveryBlocked={recoveryBlocked}
+        onStartNewChat={createConversation}
         pendingApproval={pendingApproval}
         onApproveCommand={approveCommand}
         onDenyCommand={denyCommand}

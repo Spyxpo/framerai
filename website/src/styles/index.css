@@ -1094,6 +1094,23 @@ body {
   background: rgba(239, 68, 68, 0.2);
 }
 
+.recovery-banner-action {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: var(--radius-sm);
+  color: #fca5a5;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.recovery-banner-action:hover,
+.recovery-banner-action:focus-visible {
+  background: rgba(239, 68, 68, 0.2);
+}
+
 .success-banner {
   display: flex;
   align-items: center;

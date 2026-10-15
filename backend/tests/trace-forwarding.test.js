@@ -10,10 +10,13 @@ const assert = require("node:assert/strict");
 const request = require("supertest");
 const WebSocket = require("ws");
 
-const { mockModel, loadApp, newConversation, startServer } = require("./helpers");
+const { mockModel, loadApp, newConversation, holdConversations, startServer } = require("./helpers");
 
 // Conversation ids are validated at the WebSocket boundary (#352).
 const TRACE_CONV_ID = "88888888-8888-4888-8888-888888888888";
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversation these turns join is held before each test.
+test.beforeEach(() => holdConversations(TRACE_CONV_ID));
 
 // Cache paths for clearing between tests
 const APP_PATH = require.resolve("../src/app");
