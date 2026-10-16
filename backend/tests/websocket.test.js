@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
-const { mockModel, startServer } = require("./helpers");
+const { mockModel, startServer, holdConversations } = require("./helpers");
 
 // Default mock for most tests
 mockModel();
@@ -17,6 +17,9 @@ const CONV = {
   disconnect: "44444444-4444-4444-8444-444444444444",
   deny: "55555555-5555-4555-8555-555555555555",
 };
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversations these turns join are held before each test.
+test.beforeEach(() => holdConversations(...Object.values(CONV)));
 
 /**
  * Open a connection, send one frame, and collect every reply until the stream

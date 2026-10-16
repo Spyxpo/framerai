@@ -230,8 +230,12 @@ describe("E2E Smoke Tests (Process-Level)", () => {
         const pong = wsMessages.find((m) => m.type === "pong");
         assert.ok(pong, "WebSocket should respond to ping with pong");
 
-        // Test WS chat streaming (send prompt "hello" for short response)
-        const wsChatId = "99999999-9999-4999-8999-999999999999";
+        // Test WS chat streaming (send prompt "hello" for short response). The turn
+        // joins a conversation created the way the website creates one: the server
+        // refuses a turn for a conversation it does not hold (Issue #503).
+        const wsConvRes = await requestJson(`${baseUrl}/api/chat/conversations`, { method: "POST" });
+        assert.strictEqual(wsConvRes.status, 200, "create conversation for the WebSocket chat should return 200");
+        const wsChatId = wsConvRes.body.id;
         ws.send(JSON.stringify({ type: "chat", content: "hello", conversationId: wsChatId }));
 
         let streamDone = false;
@@ -242,7 +246,12 @@ describe("E2E Smoke Tests (Process-Level)", () => {
             break;
           }
         }
-        assert.ok(streamDone, "WebSocket chat should complete stream with done: true");
+        assert.ok(
+          streamDone,
+          `WebSocket chat should complete stream with done: true; got ${JSON.stringify(
+            wsMessages.map((m) => (m.code ? `${m.type}:${m.code}` : m.type))
+          )}`
+        );
 
         ws.close();
         await new Promise((r) => setTimeout(r, 50));

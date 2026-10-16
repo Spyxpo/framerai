@@ -35,11 +35,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
-const { mockModel, startServer } = require("./helpers");
+const { mockModel, startServer, holdConversations } = require("./helpers");
 
 mockModel();
 
 const CONV_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversation these turns join is held before each test.
+test.beforeEach(() => holdConversations(CONV_ID));
 
 // Mirrors MAX_SIMULATED_FRAMES in src/services/websocket.js.
 const MAX_SIMULATED_FRAMES = 64;

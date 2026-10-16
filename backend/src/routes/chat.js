@@ -220,6 +220,48 @@ router.post("/conversations/:id/sync", (req, res) => {
   res.json(syncResult);
 });
 
+// Restore a conversation the server no longer holds, from the copy the website
+// kept (Issue #503). The store is in memory, so a restart empties it and the
+// idle sweep drops a conversation past its TTL, while the website still holds
+// every conversation and goes on using it. /sync cannot put one back: it never
+// adds an assistant reply the server did not store (Issue #456). This only ever
+// creates, under the conversation's own id, and a conversation the server holds
+// is answered with 409 and left exactly as it is. Messages are held to the
+// rules a synced message is; a reply the website did not see finish is left
+// out, so a partial answer never becomes history.
+router.post("/conversations/:id/restore", (req, res) => {
+  const id = conversationId(req);
+
+  const v = validator(req.body);
+  const title = v.string("title", { min: 1, max: 200, optional: true });
+  const messages = readSyncMessages(v);
+  // Every later lookup goes by id, so one id must mean one message.
+  const seen = new Set();
+  messages.forEach((m, i) => {
+    if (!m.id) return;
+    if (seen.has(m.id)) v.fail(`messages.${i}.id`, "must be unique within the conversation");
+    seen.add(m.id);
+  });
+  v.done();
+
+  const now = new Date().toISOString();
+  const restored = conversations.createIfAbsent({
+    id,
+    title: title || "New Chat",
+    // `completed` is the website's own bookkeeping, not part of a stored message.
+    messages: messages
+      .filter((m) => m.role !== "assistant" || m.completed === true)
+      .map(({ completed, ...message }) => message),
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+  if (!restored) {
+    throw new ApiError(409, "Conversation already exists", "CONVERSATION_EXISTS");
+  }
+  res.status(201).json(restored);
+});
+
 // Delete message from conversation
 router.delete("/conversations/:id/messages/:messageId", (req, res) => {
   const id = conversationId(req);

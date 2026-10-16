@@ -472,6 +472,70 @@ function generateOpenApiSpec() {
           },
         },
       },
+      "/chat/conversations/{id}/restore": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "UUID the conversation had before the server lost it",
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+        post: {
+          summary: "Restore a conversation the server no longer holds",
+          description:
+            "Creates a conversation under the given id from the history a client kept, for one the server lost to a restart or the idle sweep. Unlike /sync, assistant replies are restored, but only those marked completed. Messages are validated as /sync validates them, and their ids must be unique. Only ever creates: a conversation the server holds is answered with 409 and left unchanged.",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    title: {
+                      type: "string",
+                      minLength: 1,
+                      maxLength: 200,
+                      description: "Conversation title; \"New Chat\" when omitted",
+                    },
+                    messages: {
+                      type: "array",
+                      description: "The conversation's messages, in order. At most the per-conversation message limit.",
+                      items: {
+                        allOf: [
+                          { $ref: "#/components/schemas/ChatMessage" },
+                          {
+                            type: "object",
+                            properties: {
+                              completed: {
+                                type: "boolean",
+                                description: "Whether the client saw this reply finish. An assistant message is restored only when true.",
+                              },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "The restored conversation",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Conversation" },
+                },
+              },
+            },
+            "400": errorResponseRef(400, "Validation error"),
+            "409": errorResponseRef(409, "A conversation with this id exists (code CONVERSATION_EXISTS); it is left unchanged"),
+          },
+        },
+      },
       "/chat/conversations/{id}/messages/{messageId}": {
         parameters: [
           {
@@ -1198,6 +1262,7 @@ function generateOpenApiSpec() {
                 "PAYLOAD_TOO_LARGE",
                 "UPLOAD_ERROR",
                 "RATE_LIMITED",
+                "CONVERSATION_EXISTS",
                 "INTERNAL_ERROR",
               ],
               description: "Machine-readable error code",

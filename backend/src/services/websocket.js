@@ -356,6 +356,24 @@ function setupWebSocket(wss) {
           conversationId = frame.conversationId;
           const { content, messageType, settings, attachments, expectedVersion } = frame;
 
+          // A conversation the server does not hold, lost to a restart or the
+          // idle sweep, is refused as REST refuses it, before anything is
+          // charged, acked or run. Answering would use the last message alone
+          // and store nothing, a reply that only looked like it followed the
+          // conversation (Issue #503). The website restores the conversation and
+          // sends the message again; clientMessageId tells it which message.
+          // A frame with no conversation id is still a one-off chat.
+          if (conversationId && !conversations.has(conversationId)) {
+            safeSend(ws, {
+              type: "error",
+              conversationId,
+              code: "CONVERSATION_NOT_FOUND",
+              message: "Conversation not found",
+              ...(frame.clientMessageId ? { clientMessageId: frame.clientMessageId } : {}),
+            });
+            return;
+          }
+
           // Check optimistic concurrency / version conflict if conversation exists and expectedVersion was provided (#438)
           if (conversationId && conversations.has(conversationId)) {
             const existingConv = conversations.get(conversationId);
