@@ -565,8 +565,11 @@ def _fit_frames(mel: torch.Tensor, n_frames: int) -> torch.Tensor:
     return torch.cat([mel, pad], dim=1)
 
 
-def load_waveform(path: str, target_sr: int) -> torch.Tensor:
+def load_waveform(path: str, target_sr: int | None) -> torch.Tensor:
     """Load an audio file as a mono waveform tensor at target_sr.
+
+    ``target_sr=None`` keeps the file's own rate, for a caller that needs the
+    samples exactly as they were written (the watermark check, Issue #509).
 
     Uses soundfile if available, otherwise torchaudio. Raises a clear error if
     neither is installed.
@@ -588,7 +591,7 @@ def load_waveform(path: str, target_sr: int) -> torch.Tensor:
                 "Install them with: pip install soundfile torchaudio"
             ) from exc
 
-    if sr != target_sr:
+    if target_sr is not None and sr != target_sr:
         wav = _resample(wav, sr, target_sr)
     return wav
 

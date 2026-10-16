@@ -192,6 +192,103 @@ def test_the_worker_verifies_a_file(tmp_path):
     assert handle(gen, "verify_audio", {"audio_path": str(path), "out_dir": str(tmp_path)})["watermarked"]
 
 
+# ── Verifying speech at the rate it was made (Issue #509) ─────────────────
+#
+# The mark is laid sample by sample at the rate the generator produced, and
+# resampling scrambles it. mel_diffusion, the default generator, produces
+# audio_sample_rate (16 kHz); rvq_lm produces codec_sample_rate (24 kHz).
+# verify_audio used to read every clip at the codec rate, so speech from a
+# 16 kHz preset was resampled first and always came back unmarked.
+
+
+def _generated(gen, tmp_path, monkeypatch, rate, seconds=4.0, **params):
+    """The audio op's own output, with only the model's raw waveform stood in."""
+    monkeypatch.setattr(gen, "generate_audio", lambda *a, **k: (_speech(seconds, sr=rate), rate))
+    res = handle(gen, "audio", {"prompt": "read this aloud", "out_dir": str(tmp_path), **params})
+    return res, tmp_path / res["file"]
+
+
+def _verify(gen, path, tmp_path):
+    return handle(gen, "verify_audio", {"audio_path": str(path), "out_dir": str(tmp_path)})
+
+
+@pytest.mark.parametrize("arch", ["mel_diffusion", "rvq_lm"])
+def test_the_worker_verifies_the_speech_it_generates(tmp_path, monkeypatch, arch):
+    import soundfile as sf
+
+    gen = _gen(audio_gen_arch=arch)
+    rate = gen.model.audio_gen.sample_rate
+    res, path = _generated(gen, tmp_path, monkeypatch, rate)
+    assert res["watermarked"]
+    assert sf.info(str(path)).samplerate == rate, "saved at the generator's own rate"
+
+    verdict = _verify(gen, path, tmp_path)
+    assert verdict["watermarked"], f"{arch} speech saved at {rate} Hz verified as {verdict}"
+
+
+def _generator_rate(config):
+    """The rate build_audio_generator gives the configured generator."""
+    return config.codec_sample_rate if config.audio_gen_arch == "rvq_lm" else config.audio_sample_rate
+
+
+@pytest.mark.parametrize("preset", ["framer-tiny", "framer-small", "framer-8b", "framer-160b-a16b"])
+def test_every_preset_verifies_its_own_speech(tmp_path, monkeypatch, preset):
+    """16 kHz and 24 kHz presets alike; the config is the shipped preset's."""
+    from types import SimpleNamespace
+
+    from model.configs.presets import build_preset_config
+
+    config = build_preset_config(preset)
+    rate = _generator_rate(config)
+    gen = SimpleNamespace(model=SimpleNamespace(config=config), generate_audio=None)
+    _, path = _generated(gen, tmp_path, monkeypatch, rate)
+    verdict = _verify(gen, path, tmp_path)
+    assert verdict["watermarked"], f"{preset} ({config.audio_gen_arch}, {rate} Hz) verified as {verdict}"
+
+
+@pytest.mark.parametrize("arch", ["mel_diffusion", "rvq_lm"])
+def test_speech_generated_unmarked_is_not_reported_marked(tmp_path, monkeypatch, arch):
+    gen = _gen(audio_gen_arch=arch)
+    res, path = _generated(gen, tmp_path, monkeypatch, gen.model.audio_gen.sample_rate, watermark=False)
+    assert not res["watermarked"]
+    assert not _verify(gen, path, tmp_path)["watermarked"]
+
+
+def test_a_marked_clip_resampled_afterwards_is_not_claimed(tmp_path):
+    """The documented limit stands: the check follows the file's rate, it does not undo a resample."""
+    import soundfile as sf
+
+    from model.data import _resample
+
+    gen = _gen()
+    marked = audio_watermark.embed(_speech(4.0, sr=16000))
+    path = tmp_path / "resampled.wav"
+    sf.write(path, _resample(torch.from_numpy(marked), 16000, 24000).numpy(), 24000)
+    assert not _verify(gen, path, tmp_path)["watermarked"]
+
+
+def test_an_empty_clip_is_unmarked(tmp_path):
+    import soundfile as sf
+
+    gen = _gen()
+    path = tmp_path / "empty.wav"
+    sf.write(path, np.zeros(0, dtype="float32"), 16000)
+    verdict = _verify(gen, path, tmp_path)
+    assert not verdict["watermarked"]
+    assert verdict["score"] == 0.0
+
+
+def test_a_file_that_is_not_audio_is_refused(tmp_path):
+    gen = _gen()
+    path = tmp_path / "not-audio.wav"
+    path.write_bytes(b"this is not a wav file")
+    # The worker loop answers a raised error with ok: false, never with a verdict.
+    with pytest.raises(RuntimeError, match="Error opening"):
+        _verify(gen, path, tmp_path)
+    with pytest.raises(RuntimeError, match="Error opening"):
+        _verify(gen, tmp_path / "missing.wav", tmp_path)
+
+
 # ── Long transcription ────────────────────────────────────────────────────
 
 def test_short_audio_is_one_piece():

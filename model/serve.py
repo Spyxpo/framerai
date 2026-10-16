@@ -908,8 +908,11 @@ def handle(gen, op, params, mind=None, tools=None):
 
         from . import audio_watermark
 
-        rate = getattr(gen.model.config, "codec_sample_rate", 24000)
-        wav = load_waveform(params["audio_path"], rate)
+        # Read at the file's own rate. The mark is laid sample by sample at the
+        # rate the speech was generated and saved at, 16 kHz for mel_diffusion and
+        # 24 kHz for rvq_lm, and resampling scrambles it: reading every clip at the
+        # codec's rate reported a 16 kHz preset's own speech as unmarked (Issue #509).
+        wav = load_waveform(params["audio_path"], None)
         return audio_watermark.detect(wav.numpy())
 
     if op == "transcribe":
