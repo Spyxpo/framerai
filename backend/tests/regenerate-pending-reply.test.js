@@ -240,9 +240,10 @@ test("#477: regenerating an id that is neither stored nor being generated is ref
     const refused = await send(ws, { content: "hello", conversationId, regenerateMessageId: randomUUID() }, (f) => f.type === "error");
     assert.equal(refused.frame.code, "NOT_FOUND");
     assert.equal(refused.frame.conversationId, conversationId);
-    // A conversation the server does not have at all is refused the same way.
+    // A conversation the server does not have at all is refused too, as one it
+    // does not hold, before the regeneration is looked at (Issue #503).
     const unknownConversation = await send(ws, { content: "hello", conversationId: randomUUID(), regenerateMessageId: randomUUID() }, (f) => f.type === "error");
-    assert.equal(unknownConversation.frame.code, "NOT_FOUND");
+    assert.equal(unknownConversation.frame.code, "CONVERSATION_NOT_FOUND");
     ws.close();
 
     assert.deepEqual(shape(conversationId), ["Q:hello", "A:reply to: hello"]);

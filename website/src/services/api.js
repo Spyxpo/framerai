@@ -73,6 +73,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(syncPayload),
     }),
+  // Put back a conversation the server lost, under its own id, from the copy kept
+  // here (Issue #503). 409 when the server holds one by that id.
+  restoreConversation: (id, payload = {}) =>
+    request(`/chat/conversations/${id}/restore`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   branchConversation: (conversationId, messageId, expectedVersion) =>
     request(`/chat/conversations/${conversationId}/branch`, {
       method: "POST",

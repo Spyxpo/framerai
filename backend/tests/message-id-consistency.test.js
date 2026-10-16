@@ -292,19 +292,24 @@ test("a WebSocket turn leaves the ids of earlier messages alone", async (t) => {
   assert.ok(stored.every((m) => UUID.test(m.id)), "every stored message has an id");
 });
 
-test("a turn for a conversation the server does not hold still gets an ack id and a reply", async (t) => {
+// It used to get an ack id and a reply that were stored nowhere, so the ids named
+// nothing the server held. Since #503 the turn is refused before any id is handed
+// out, and the refusal names the message by the id the client sent it with.
+test("a turn for a conversation the server does not hold is refused before any id is handed out", async (t) => {
   const server = await startServer();
   t.after(() => server.stop());
   const ws = await openSocket(server.wsUrl);
   t.after(() => ws.close());
   const unknown = randomUUID();
+  const clientMessageId = randomUUID();
 
-  const frames = await runTurn(ws, { content: "hello", conversationId: unknown });
+  const frames = await runTurn(ws, { content: "hello", conversationId: unknown, clientMessageId });
 
-  assert.match(frames.find((f) => f.type === "ack").messageId, UUID);
-  assert.equal(frames[frames.length - 1].done, true);
+  assert.deepEqual(frames.map((f) => f.type), ["error"], "no ack, so no id for a turn that is not stored");
+  assert.equal(frames[0].code, "CONVERSATION_NOT_FOUND");
+  assert.equal(frames[0].clientMessageId, clientMessageId);
   const res = await request(server.app).get(`/api/chat/conversations/${unknown}`);
-  assert.equal(res.status, 404, "nothing was recorded, as before");
+  assert.equal(res.status, 404, "nothing was recorded");
 });
 
 test("the audio reply is named by its last frame, chunked or not", async (t) => {

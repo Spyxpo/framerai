@@ -35,9 +35,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
-const { mockModel, startServer } = require("./helpers");
+const { mockModel, startServer, holdConversations } = require("./helpers");
 
 mockModel();
+
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversation wsChat's turns join is held before each test.
+test.beforeEach(() => holdConversations("66666666-6666-4666-8666-666666666666"));
 
 function resetGenerationCounter() {
   const { generationCounter } = require("../src/middleware/limiters");

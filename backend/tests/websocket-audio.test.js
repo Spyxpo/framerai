@@ -11,10 +11,13 @@ const WebSocket = require("ws");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { mockModel, startServer, createTestWav } = require("./helpers");
+const { mockModel, startServer, holdConversations, createTestWav } = require("./helpers");
 
 // Conversation ids are validated at the WebSocket boundary (#352).
 const AUDIO_CONV_ID = "77777777-7777-4777-8777-777777777777";
+// Since #503 the server refuses a WebSocket turn for a conversation it does not
+// hold, so the conversation these turns join is held before each test.
+test.beforeEach(() => holdConversations(AUDIO_CONV_ID));
 
 // Mock processMessage to return audio responses
 mockModel({

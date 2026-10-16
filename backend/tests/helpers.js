@@ -212,4 +212,20 @@ async function newConversation(app) {
   return res.body.id;
 }
 
-module.exports = { mockModel, loadApp, startServer, newConversation, createTestWav };
+/**
+ * Make sure the store holds a conversation under each id, as POST
+ * /chat/conversations would have made it, so a WebSocket turn can join it: the
+ * server refuses a turn for a conversation it does not hold (Issue #503). An id
+ * the store already holds is left as it is.
+ */
+function holdConversations(...ids) {
+  const store = require("../src/conversationStore");
+  const now = new Date().toISOString();
+  for (const id of ids) {
+    if (!store.has(id)) {
+      store.create({ id, title: "New Chat", messages: [], version: 1, createdAt: now, updatedAt: now });
+    }
+  }
+}
+
+module.exports = { mockModel, loadApp, startServer, newConversation, holdConversations, createTestWav };
