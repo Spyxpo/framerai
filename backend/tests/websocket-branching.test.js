@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 const { randomUUID } = require("node:crypto");
 
-const { mockModel, startServer } = require("./helpers");
+const { mockModel, startServer, holdConversations } = require("./helpers");
 
 mockModel();
 const conversations = require("../src/conversationStore");
@@ -194,6 +194,8 @@ test("5. Error events target the correct conversation ID", async (t) => {
   t.after(() => server.stop());
 
   const branchId = randomUUID();
+  // The turns join a conversation the server holds: since #503 it refuses others.
+  holdConversations(branchId);
   const ws = await connectWebSocket(server.wsUrl);
   t.after(() => ws.close());
 

@@ -58,6 +58,21 @@ export function useChat(settings) {
   const inFlightTurnsByConvRef = useRef(new Map());
   // Track conversations whose generation was interrupted by disconnect (#437)
   const interruptedConversationIdsRef = useRef(new Set());
+  // Conversations the server lost, to a restart or the idle sweep, being restored
+  // from the copy kept here before the turns it refused are sent again (#503):
+  // { turns, refusedReplyIds } by conversation, one restore at a time each.
+  const recoveriesRef = useRef(new Map());
+  // Where each refused message stands, by the id it is sent with: "restoring"
+  // while its conversation is restored, "resent" once sent again. A message is
+  // sent again at most once.
+  const resendStateRef = useRef(new Map());
+  // Conversations that could not be restored: nothing more is sent in them, since
+  // a reply would not know the messages above it.
+  const blockedConversationIdsRef = useRef(new Set());
+  const [blockedConversationIds, setBlockedConversationIds] = useState(() => new Set());
+  // The WebSocket handlers are wired once, so they reach these through refs.
+  const recoverConversationRef = useRef(null);
+  const sendMessageRef = useRef(null);
 
   const addActiveAssistantId = (convId, msgId) => {
     if (!convId || !msgId) return;
@@ -229,6 +244,197 @@ export function useChat(settings) {
   // being rebuilt every time a slider moves.
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+
+  // ── A conversation the server lost (Issue #503) ─────────────────────────
+  //
+  // The server keeps conversations in memory, so a restart empties it and the
+  // idle sweep drops one left past its TTL, while every conversation is still
+  // kept here. A turn sent for one it lost is refused: over the WebSocket with a
+  // CONVERSATION_NOT_FOUND frame naming the message, over REST with 404. The
+  // conversation is then restored from the copy kept here, under its own id, and
+  // only once that has succeeded is the refused message sent again, once. If it
+  // cannot be restored, nothing more is sent in it.
+
+  const localMessagesOf = (convId) =>
+    convId === activeConversationRef.current && messagesConversationIdRef.current === convId
+      ? messagesRef.current
+      : conversationsRef.current.find((c) => c.id === convId)?.messages || [];
+
+  const updateConversationMessages = (convId, update) => {
+    if (convId === activeConversationRef.current && messagesConversationIdRef.current === convId) {
+      setMessages(update);
+    }
+    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, messages: update(c.messages || []) } : c)));
+  };
+
+  // The send a CONVERSATION_NOT_FOUND frame refused, as it can be sent again, or
+  // null when the frame names none here (an edit or a regeneration names none).
+  const refusedSend = (convId, clientMessageId) => {
+    if (!clientMessageId) return null;
+    const local = localMessagesOf(convId);
+    const idx = local.findIndex((m) => m.id === clientMessageId && m.role === "user");
+    if (idx === -1) return null;
+    const message = local[idx];
+    const inFlight = (inFlightTurnsByConvRef.current.get(convId) || []).find((t) => t.userMsgId === clientMessageId);
+    const next = local[idx + 1];
+    return {
+      clientMessageId,
+      assistantId: inFlight?.assistantId || (next?.role === "assistant" ? next.id : null),
+      content: message.content,
+      type: message.type || "text",
+      attachments: message.attachments || [],
+    };
+  };
+
+  // What the restore sends for one message: the fields /sync reads, and a reply
+  // that is history here (finished, not an error bubble) marked completed.
+  const restorable = (m) => ({
+    id: m.id,
+    role: m.role,
+    content: typeof m.content === "string" ? m.content : "",
+    type: m.type || "text",
+    ...(Array.isArray(m.attachments) && m.attachments.length ? { attachments: m.attachments } : {}),
+    ...(m.clientId && m.clientId !== m.id ? { clientId: m.clientId } : {}),
+    ...(m.timestamp ? { timestamp: m.timestamp } : {}),
+    ...(m.role === "assistant" ? { completed: true } : {}),
+  });
+
+  // The restore failed: the history stays, each refused reply says the message
+  // was not sent, and the conversation takes nothing more.
+  const failRecovery = (convId, recovery) => {
+    blockedConversationIdsRef.current.add(convId);
+    setBlockedConversationIds(new Set(blockedConversationIdsRef.current));
+    const replies = new Set([...recovery.turns.map((t) => t.assistantId), ...recovery.refusedReplyIds].filter(Boolean));
+    updateConversationMessages(convId, (msgs) =>
+      msgs.map((m) =>
+        replies.has(m.id) || replies.has(m.clientId)
+          ? {
+              ...m,
+              content: "Not sent: the server no longer had this conversation, and restoring it failed.",
+              type: "error",
+              completed: true,
+            }
+          : m
+      )
+    );
+    for (const id of replies) {
+      completedMessageIdsRef.current.add(id);
+      removeActiveAssistantId(convId, id);
+    }
+    recoveriesRef.current.delete(convId);
+    markStreamingEnd(convId);
+  };
+
+  const restoreAndResend = async (convId, recovery) => {
+    // The history as it stands now, without the refused turns (sent again below)
+    // or any turn still unanswered, replies that did not finish, or error bubbles.
+    const conv = conversationsRef.current.find((c) => c.id === convId);
+    const refused = new Set(recovery.turns.flatMap((t) => [t.clientMessageId, t.assistantId]).filter(Boolean));
+    const history = buildSyncPayload(convId, conv, localMessagesOf(convId), 0)
+      .messages.filter((m) => !refused.has(m.id) && !refused.has(m.clientId))
+      .map(restorable);
+    const title = typeof conv?.title === "string" && conv.title.trim() ? conv.title.slice(0, 200) : undefined;
+
+    let restored = null;
+    try {
+      restored = await api.restoreConversation(convId, { ...(title ? { title } : {}), messages: history });
+    } catch (err) {
+      // 409: restored already, by another tab or by an attempt whose answer was lost.
+      if (err?.status === 409) restored = await api.getConversation(convId).catch(() => null);
+    }
+    if (deletedConversationIdsRef.current.has(convId)) {
+      recoveriesRef.current.delete(convId);
+      markStreamingEnd(convId);
+      return;
+    }
+    if (!restored) {
+      failRecovery(convId, recovery);
+      return;
+    }
+
+    // The server counts versions afresh from the restore, and the next turn has
+    // to name its count: the one kept here may be ahead of it.
+    const version = Number.isInteger(restored.version) && restored.version > 0 ? restored.version : 1;
+    conversationsRef.current = conversationsRef.current.map((c) => (c.id === convId ? { ...c, version } : c));
+    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, version } : c)));
+
+    // Each refused send is taken off and sent again below, as it was. An edit or
+    // a regeneration cannot be, so its reply asks for it again.
+    const replies = new Set(recovery.refusedReplyIds);
+    updateConversationMessages(convId, (msgs) =>
+      msgs
+        .filter((m) => !refused.has(m.id) && !refused.has(m.clientId))
+        .map((m) =>
+          replies.has(m.id) || replies.has(m.clientId)
+            ? {
+                ...m,
+                content: "The server no longer had this conversation. It has been restored from this browser; send this again.",
+                type: "error",
+                completed: true,
+              }
+            : m
+        )
+    );
+    for (const t of recovery.turns) removeActiveAssistantId(convId, t.assistantId);
+    for (const id of replies) {
+      completedMessageIdsRef.current.add(id);
+      removeActiveAssistantId(convId, id);
+    }
+    recoveriesRef.current.delete(convId);
+    markStreamingEnd(convId);
+
+    let first = true;
+    for (const t of recovery.turns) {
+      resendStateRef.current.set(t.clientMessageId, "resent");
+      await sendMessageRef.current?.(t.content, t.type, t.attachments, {
+        conversationId: convId,
+        clientMessageId: t.clientMessageId,
+        ...(first ? { expectedVersion: version } : {}),
+      });
+      first = false;
+    }
+  };
+
+  // The server refused a turn because it does not hold the conversation. `turn`
+  // is the refused send, when this side can send it again.
+  const recoverConversation = (convId, { clientMessageId = null, turn = null } = {}) => {
+    if (!convId) return;
+    if (deletedConversationIdsRef.current.has(convId)) {
+      markStreamingEnd(convId);
+      return;
+    }
+    const send = turn || refusedSend(convId, clientMessageId);
+    if (send) {
+      const state = resendStateRef.current.get(send.clientMessageId);
+      // Already waiting on the restore under way, which sends it again.
+      if (state === "restoring") return;
+      // Restored, sent again, and refused again: it is not sent a third time.
+      if (state === "resent" || blockedConversationIdsRef.current.has(convId)) {
+        failRecovery(convId, { turns: [send], refusedReplyIds: [] });
+        return;
+      }
+      resendStateRef.current.set(send.clientMessageId, "restoring");
+    }
+
+    let recovery = recoveriesRef.current.get(convId);
+    const starting = !recovery;
+    if (starting) {
+      recovery = { turns: [], refusedReplyIds: [] };
+      recoveriesRef.current.set(convId, recovery);
+    }
+    if (send) {
+      recovery.turns.push(send);
+    } else {
+      const replyId = getFirstActiveAssistantId(convId);
+      if (replyId && !recovery.refusedReplyIds.includes(replyId)) recovery.refusedReplyIds.push(replyId);
+    }
+    if (starting) {
+      // Busy until the restore is decided, so nothing else is sent meanwhile.
+      markStreamingStart(convId);
+      restoreAndResend(convId, recovery);
+    }
+  };
+  recoverConversationRef.current = recoverConversation;
 
   // Keep active conversation's messages updated in conversations list
   useEffect(() => {
@@ -599,6 +805,13 @@ export function useChat(settings) {
     // Server-side error frame, for example a rate limit rejection. Without
     // this the placeholder bubble would sit there empty with no explanation.
     ws.on("error", (data) => {
+      // The server no longer holds the conversation (#503): restore it from the
+      // copy kept here and send the refused message again, rather than showing
+      // the refusal as the reply.
+      if (data?.code === "CONVERSATION_NOT_FOUND" && data.conversationId) {
+        recoverConversationRef.current?.(data.conversationId, { clientMessageId: data.clientMessageId || null });
+        return;
+      }
       const inFlightConvId = streamingConversationIdsRef.current.size === 1
         ? Array.from(streamingConversationIdsRef.current)[0]
         : null;
@@ -940,6 +1153,10 @@ export function useChat(settings) {
       operationSeqRef.current.delete(id);
       titleUpdatedAtByConvRef.current.delete(id);
       interruptedConversationIdsRef.current.delete(id);
+      recoveriesRef.current.delete(id);
+      if (blockedConversationIdsRef.current.delete(id)) {
+        setBlockedConversationIds(new Set(blockedConversationIdsRef.current));
+      }
 
       // Clean up in-flight generation / streaming / loading states immediately
       markStreamingEnd(id);
@@ -1440,11 +1657,20 @@ export function useChat(settings) {
   const dismissError = useCallback(() => setError(null), []);
 
   const sendMessage = useCallback(
-    async (content, type = "text", attachments = []) => {
+    // `resend` is internal: a message the server refused because it had lost the
+    // conversation, sent again into that conversation, under the id it had (#503).
+    async (content, type = "text", attachments = [], resend = null) => {
       if (!content.trim()) return;
       setError(null);
 
-      let convId = activeConversationRef.current || activeConversation;
+      let convId = resend?.conversationId || activeConversationRef.current || activeConversation;
+      // A conversation the server lost and that could not be restored takes no
+      // more messages: a reply would not know the ones above it (#503).
+      if (convId && blockedConversationIdsRef.current.has(convId)) return;
+      if (convId && !resend && recoveriesRef.current.has(convId)) {
+        setError("This conversation is being restored on the server. Send your message again in a moment.");
+        return;
+      }
       if (!convId) {
         try {
           const conv = await api.createConversation();
@@ -1484,7 +1710,8 @@ export function useChat(settings) {
       operationSeqRef.current.set(convId, opSeq);
 
       const userMsg = {
-        id: crypto.randomUUID(),
+        // A message sent again keeps its id, so the server knows it by one id only.
+        id: resend?.clientMessageId || crypto.randomUUID(),
         role: "user",
         content,
         type,
@@ -1511,7 +1738,8 @@ export function useChat(settings) {
       }
 
       const currentConv = conversationsRef.current.find((c) => c.id === convId);
-      const currentVersion = currentConv?.version || 1;
+      // Sent again after a restore: the version the restored conversation started at.
+      const currentVersion = resend?.expectedVersion || currentConv?.version || 1;
       const nextVersion = currentVersion + 1;
 
       setConversations((prev) =>
@@ -1608,6 +1836,15 @@ export function useChat(settings) {
         }
       } catch (err) {
         if (deletedConversationIdsRef.current.has(convId)) return;
+        // A plain send is answered 404 only when the server no longer holds the
+        // conversation (#503): restore it and send this message again, while
+        // its reply waits.
+        if (err?.status === 404) {
+          recoverConversationRef.current?.(convId, {
+            turn: { clientMessageId: userMsg.id, assistantId: assistantMsg.id, content, type, attachments },
+          });
+          return;
+        }
         const isActiveConv = convId === activeConversationRef.current;
         completedMessageIdsRef.current.add(assistantMsg.id);
         removeActiveAssistantId(convId, assistantMsg.id);
@@ -1690,6 +1927,7 @@ export function useChat(settings) {
     },
     [activeConversation]
   );
+  sendMessageRef.current = sendMessage;
 
   const approveCommand = useCallback((approvalId) => {
     if (wsRef.current) {
@@ -2266,6 +2504,9 @@ export function useChat(settings) {
     messages,
     loading,
     streaming,
+    // The active conversation was lost by the server and could not be restored,
+    // so sending in it is paused (#503).
+    recoveryBlocked: Boolean(activeConversation && blockedConversationIds.has(activeConversation)),
     loadingConversations,
     loadingMessages,
     error,
