@@ -298,7 +298,7 @@ export default function Sidebar({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".json,application/json"
+            accept=".json,.md,.markdown,application/json,text/markdown"
             style={{ display: "none" }}
             onChange={handleFileChange}
             data-testid="sidebar-backup-file-input"
