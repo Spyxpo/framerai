@@ -3,9 +3,11 @@ import { renderHook, act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   BACKUP_VERSION,
+  MAX_IMPORT_FILE_SIZE,
   createBackup,
   exportConversationToMarkdown,
   exportConversationToPlainText,
+  parseMarkdownConversation,
   validateBackup,
   restoreBackup,
 } from "../utils/backup";
@@ -711,4 +713,280 @@ describe("Conversation Backup System (Issue #411)", () => {
       expect(onImportBackup).toHaveBeenCalledWith(testFile);
     });
   });
+
+  // =========================================================================
+  // 6. ISSUE #486: ADVANCED PORTABILITY, MARKDOWN IMPORT, AND ROBUSTNESS
+  // =========================================================================
+  describe("Issue #486 Portability & Validation Enhancements", () => {
+    it("exports Markdown with multiple roles, code blocks, Unicode, attachments, and timestamps", () => {
+      const conv = {
+        id: "conv-complex",
+        title: "Unicode & Code Chat 🚀",
+        parentConversationId: "parent-001",
+        branchedFromMessageId: "branch-msg-002",
+        messages: [
+          {
+            id: "m-user",
+            role: "user",
+            content: "Please write a Python script with # comments and emojis ✨:\n```python\n# This is a comment\ndef greet():\n    return 'Hello, 世界'\n```",
+            timestamp: "2026-08-01T10:00:00.000Z",
+            attachments: ["data.csv", "chart.png"],
+          },
+          {
+            id: "m-assistant",
+            role: "assistant",
+            content: "Here is your script:\n```python\n# Another comment\nprint('🚀 Done')\n```",
+            timestamp: "2026-08-01T10:00:05.000Z",
+          },
+          {
+            id: "m-system",
+            role: "system",
+            content: "System notice: memory updated.",
+          },
+        ],
+      };
+
+      const md = exportConversationToMarkdown(conv);
+      expect(md).toContain("# Unicode & Code Chat 🚀");
+      expect(md).toContain("*Parent Conversation: `parent-001`*");
+      expect(md).toContain("*Branched from Message: `branch-msg-002`*");
+      expect(md).toContain("### User (2026-08-01T10:00:00.000Z)");
+      expect(md).toContain("*Attachments: data.csv, chart.png*");
+      expect(md).toContain("def greet():");
+      expect(md).toContain("### Assistant (2026-08-01T10:00:05.000Z)");
+      expect(md).toContain("### System");
+    });
+
+    it("parses exported Markdown back into structured conversation without breaking on inner code block comments", () => {
+      const sampleMarkdown = [
+        "# Python Architecture",
+        "",
+        "*Parent Conversation: `parent-abc`*",
+        "*Branched from Message: `msg-xyz`*",
+        "",
+        "---",
+        "",
+        "### User (2026-08-01T10:00:00.000Z)",
+        "",
+        "Can you fix this snippet?",
+        "```python",
+        "# This is a python comment",
+        "### This is NOT a header",
+        "def foo():",
+        "    return 42",
+        "```",
+        "",
+        "*Attachments: test.py, notes.md*",
+        "",
+        "---",
+        "",
+        "### Assistant (2026-08-01T10:00:05.000Z)",
+        "",
+        "Sure! The snippet looks solid.",
+        "",
+        "---",
+      ].join("\n");
+
+      const result = parseMarkdownConversation(sampleMarkdown);
+      expect(result.success).toBe(true);
+      expect(result.conversation).toBeDefined();
+
+      const conv = result.conversation;
+      expect(conv.title).toBe("Python Architecture");
+      expect(conv.parentConversationId).toBe("parent-abc");
+      expect(conv.branchedFromMessageId).toBe("msg-xyz");
+      expect(conv.messages).toHaveLength(2);
+
+      // Verify user message
+      expect(conv.messages[0].role).toBe("user");
+      expect(conv.messages[0].timestamp).toBe("2026-08-01T10:00:00.000Z");
+      expect(conv.messages[0].attachments).toEqual(["test.py", "notes.md"]);
+      expect(conv.messages[0].content).toContain("### This is NOT a header");
+      expect(conv.messages[0].content).toContain("# This is a python comment");
+
+      // Verify assistant message
+      expect(conv.messages[1].role).toBe("assistant");
+      expect(conv.messages[1].content).toBe("Sure! The snippet looks solid.");
+    });
+
+    it("parses empty Markdown conversation title with no messages", () => {
+      const md = "# Empty Conversation\n\n*Exported on 2026-08-01T10:00:00.000Z*\n\n---\n";
+      const result = parseMarkdownConversation(md);
+      expect(result.success).toBe(true);
+      expect(result.conversation.title).toBe("Empty Conversation");
+      expect(result.conversation.messages).toHaveLength(0);
+    });
+
+    it("rejects empty or whitespace-only Markdown files", () => {
+      expect(parseMarkdownConversation("").success).toBe(false);
+      expect(parseMarkdownConversation("   \n\t  ").success).toBe(false);
+    });
+
+    it("supports single-conversation JSON import format without top-level conversations array", () => {
+      const singleJson = {
+        id: "single-conv-001",
+        title: "Single Conversation",
+        messages: [
+          { id: "m1", role: "user", content: "Hello single!" },
+          { id: "m2", role: "assistant", content: "Hi there!" },
+        ],
+      };
+
+      const result = validateBackup(singleJson);
+      expect(result.valid).toBe(true);
+      expect(result.backup.conversations).toHaveLength(1);
+      expect(result.backup.conversations[0].id).toBe("single-conv-001");
+      expect(result.backup.conversations[0].messages).toHaveLength(2);
+    });
+
+    it("validates and restores Markdown conversation via validateBackup and restoreBackup", () => {
+      const mdContent = [
+        "# Restored Chat",
+        "",
+        "### User (2026-08-01T12:00:00.000Z)",
+        "Hello from markdown!",
+        "",
+        "---",
+        "",
+        "### Assistant (2026-08-01T12:00:01.000Z)",
+        "Hello! Restored successfully.",
+      ].join("\n");
+
+      const validation = validateBackup(mdContent, { filename: "chat.md" });
+      expect(validation.valid).toBe(true);
+      expect(validation.format).toBe("markdown");
+
+      const restore = restoreBackup(mdContent, [], { filename: "chat.md" });
+      expect(restore.success).toBe(true);
+      expect(restore.count).toBe(1);
+      expect(restore.conversations[0].title).toBe("Restored Chat");
+      expect(restore.conversations[0].messages).toHaveLength(2);
+    });
+
+    it("enforces MAX_IMPORT_FILE_SIZE limit (10MB) for File objects and raw strings", () => {
+      expect(MAX_IMPORT_FILE_SIZE).toBe(10 * 1024 * 1024);
+
+      // Oversized string payload
+      const hugeString = "a".repeat(10 * 1024 * 1024 + 10);
+      const stringResult = validateBackup(hugeString);
+      expect(stringResult.valid).toBe(false);
+      expect(stringResult.error).toMatch(/exceeds maximum allowed size of 10MB/i);
+
+      // Oversized File object
+      const hugeFile = {
+        name: "huge_backup.json",
+        size: 11 * 1024 * 1024,
+      };
+      const fileResult = validateBackup(hugeFile);
+      expect(fileResult.valid).toBe(false);
+      expect(fileResult.error).toMatch(/exceeds maximum allowed size of 10MB/i);
+    });
+
+    it("resolves duplicate message IDs safely and maintains unique IDs during restoration", () => {
+      const backupWithDuplicateMsgIds = {
+        version: BACKUP_VERSION,
+        conversations: [
+          {
+            id: "conv-dup-msg",
+            title: "Duplicate Msg ID Chat",
+            messages: [
+              { id: "duplicate-id", role: "user", content: "First turn" },
+              { id: "duplicate-id", role: "assistant", content: "Second turn" },
+            ],
+          },
+        ],
+      };
+
+      const restored = restoreBackup(backupWithDuplicateMsgIds, []);
+      expect(restored.success).toBe(true);
+      const messages = restored.conversations[0].messages;
+      expect(messages).toHaveLength(2);
+      expect(messages[0].id).not.toBe(messages[1].id);
+      expect(messages[0].content).toBe("First turn");
+      expect(messages[1].content).toBe("Second turn");
+    });
+
+    it("verifies full round-trip: export to Markdown -> restore from Markdown preserves data", () => {
+      const originalConv = {
+        id: "original-001",
+        title: "Full Round Trip",
+        messages: [
+          { id: "m1", role: "user", content: "Step 1: Test export" },
+          { id: "m2", role: "assistant", content: "Step 2: Output received" },
+        ],
+      };
+
+      const exportedMd = exportConversationToMarkdown(originalConv);
+      const restored = restoreBackup(exportedMd, [], { filename: "export.md" });
+
+      expect(restored.success).toBe(true);
+      expect(restored.conversations[0].title).toBe("Full Round Trip");
+      expect(restored.conversations[0].messages[0].role).toBe("user");
+      expect(restored.conversations[0].messages[0].content).toBe("Step 1: Test export");
+      expect(restored.conversations[0].messages[1].role).toBe("assistant");
+      expect(restored.conversations[0].messages[1].content).toBe("Step 2: Output received");
+    });
+
+    it("useChat importBackup rejects oversized file without altering state or storage", async () => {
+      const { result } = renderHook(() => useChat({}));
+
+      await act(async () => {
+        result.current.createConversation();
+      });
+      const initialCount = result.current.conversations.length;
+
+      const oversizedFile = new File(["some content"], "oversized.json", { type: "application/json" });
+      Object.defineProperty(oversizedFile, "size", { value: 12 * 1024 * 1024 });
+
+      let importRes;
+      await act(async () => {
+        importRes = await result.current.importBackup(oversizedFile);
+      });
+
+      expect(importRes.success).toBe(false);
+      expect(importRes.error).toMatch(/exceeds maximum allowed size of 10MB/i);
+      expect(result.current.error).toMatch(/exceeds maximum allowed size of 10MB/i);
+      expect(result.current.conversations).toHaveLength(initialCount);
+    });
+
+    it("useChat importBackup successfully restores a Markdown File object", async () => {
+      const { result } = renderHook(() => useChat({}));
+
+      const mdContent = "# Uploaded Markdown\n\n### User\nHello Vitest\n\n---\n\n### Assistant\nHello Agent";
+      const mdFile = new File([mdContent], "test-chat.md", { type: "text/markdown" });
+
+      let importRes;
+      await act(async () => {
+        importRes = await result.current.importBackup(mdFile);
+      });
+
+      expect(importRes.success).toBe(true);
+      expect(importRes.count).toBe(1);
+      expect(result.current.activeConversation).toBe(importRes.activeId);
+      expect(result.current.messages).toHaveLength(2);
+      expect(result.current.messages[0].content).toBe("Hello Vitest");
+    });
+
+    it("keeps horizontal rules and role-like lines inside message content on Markdown round-trip", () => {
+      const assistantContent = "Part A\n\n---\n\nPart B\n\nUser:\nstill the assistant";
+      const conv = {
+        id: "md-hr",
+        title: "HR Test",
+        messages: [
+          { id: "m1", role: "user", content: "hi", timestamp: "2026-01-01T00:00:00.000Z" },
+          { id: "m2", role: "assistant", content: assistantContent, timestamp: "2026-01-01T00:00:01.000Z" },
+        ],
+      };
+
+      const md = exportConversationToMarkdown(conv);
+      const parsed = parseMarkdownConversation(md);
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.conversation.messages).toHaveLength(2);
+      expect(parsed.conversation.messages[0].content).toBe("hi");
+      expect(parsed.conversation.messages[1].role).toBe("assistant");
+      expect(parsed.conversation.messages[1].content).toBe(assistantContent);
+    });
+  });
 });
+

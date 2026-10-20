@@ -259,7 +259,7 @@ export default function BackupModal({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".json,application/json"
+                  accept=".json,.md,.markdown,application/json,text/markdown"
                   style={{ display: "none" }}
                   onChange={handleFileChange}
                   data-testid="backup-modal-file-input"
@@ -274,7 +274,7 @@ export default function BackupModal({
                   <div className="backup-dropzone-idle">
                     <Upload size={32} className="dropzone-icon" aria-hidden="true" />
                     <p>Click to select or drag and drop a backup file</p>
-                    <span>Supports .json backups created with FramerAI</span>
+                    <span>Supports .json backups and .md exports created with FramerAI</span>
                   </div>
                 )}
               </div>
