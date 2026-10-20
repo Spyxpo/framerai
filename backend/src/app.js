@@ -18,7 +18,7 @@ const healthRoutes = require("./routes/health");
 const pricingRoutes = require("./routes/pricing");
 const { setupWebSocket } = require("./services/websocket");
 const { getOpenApiSpecJson } = require("./openapi");
-const { notFoundHandler, errorHandler } = require("./middleware/errors");
+const { ApiError, notFoundHandler, errorHandler } = require("./middleware/errors");
 const { apiLimiter, generationLimiter } = require("./middleware/limiters");
 const { requestIdMiddleware } = require("./middleware/requestId");
 
@@ -31,6 +31,46 @@ function allowedOrigin() {
   return process.env.CORS_ORIGIN || "http://localhost:5173";
 }
 
+/**
+ * Whether a request from `origin` may act, for `allowed` (CORS_ORIGIN). The
+ * comparison is the one a browser makes against Access-Control-Allow-Origin:
+ * exact, with "*" meaning every origin, so another spelling of the allowed origin
+ * is another origin.
+ *
+ * No Origin header means the client is not a browser. A browser sends one on
+ * every cross-origin request, and on every state-changing request it makes,
+ * so a page on another origin cannot leave it out. CORS lets those clients
+ * through and so does this. A header that is present but empty, or "null"
+ * (an opaque origin: a sandboxed frame, a file: page), is not absent, and is
+ * refused. This decides which browser pages may drive the API. It is not
+ * authentication: any client that can reach the server and sends no Origin
+ * is still served.
+ */
+function originAllowed(origin, allowed) {
+  return origin === undefined || allowed === "*" || origin === allowed;
+}
+
+// Methods that only read. Everything else changes state or runs the model.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Refuse a state-changing API request from a page on another origin (Issue #513).
+ *
+ * CORS only stops a page reading the answer. A request a browser sends without
+ * a preflight (a multipart upload, a text/plain or empty POST) still reached
+ * the routes: any page a user visited could run the model, store files in
+ * uploads/ and create conversations on their backend. The WebSocket has
+ * refused other origins since #425; this applies the same rule to REST. It runs
+ * before the body is parsed or an upload written, so a refused request does
+ * nothing.
+ */
+function refuseForeignOrigins(allowed) {
+  return (req, res, next) => {
+    if (SAFE_METHODS.has(req.method) || originAllowed(req.headers.origin, allowed)) return next();
+    next(new ApiError(403, "Origin not allowed", "ORIGIN_NOT_ALLOWED"));
+  };
+}
+
 function createApp() {
   const app = express();
 
@@ -40,6 +80,9 @@ function createApp() {
 
   // Middleware
   app.use(cors({ origin: allowedOrigin() }));
+  // Ahead of the body parser, the limiters and every route, so a refused
+  // request is neither read, counted nor acted on.
+  app.use("/api", refuseForeignOrigins(allowedOrigin()));
   app.use(express.json({ limit: config.jsonBodyLimit }));
   app.use(requestIdMiddleware);
   // Uploads are user-controlled bytes served from the app's own origin, and an
@@ -99,11 +142,12 @@ function createApp() {
  *
  * No Origin header means the client is not a browser, which always sends one on
  * a WebSocket handshake. CORS lets those clients through and so does this. A
- * header that is present but empty is not absent, and is refused.
+ * header that is present but empty is not absent, and is refused. The rule is
+ * originAllowed's, the one REST requests are held to.
  */
 function verifyWebSocketOrigin(allowed) {
   return ({ origin }, done) => {
-    if (origin === undefined || allowed === "*" || origin === allowed) return done(true);
+    if (originAllowed(origin, allowed)) return done(true);
     done(false, 403, "Origin not allowed");
   };
 }
