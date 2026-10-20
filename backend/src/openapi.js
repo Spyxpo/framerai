@@ -1262,6 +1262,7 @@ function generateOpenApiSpec() {
                 "PAYLOAD_TOO_LARGE",
                 "UPLOAD_ERROR",
                 "RATE_LIMITED",
+                "ORIGIN_NOT_ALLOWED",
                 "CONVERSATION_EXISTS",
                 "INTERNAL_ERROR",
               ],
