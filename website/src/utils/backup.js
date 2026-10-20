@@ -128,6 +128,15 @@ export function exportConversationToPlainText(conversation) {
   return lines.join("\n");
 }
 
+const ROLE_HEADER_RE =
+  /^(#{1,6}\s+|\*\*)?(User|Assistant|System|Human|AI)(?:\*\*)?(?:\s*\(([^)]+)\))?\s*:?\s*$/i;
+
+function matchRoleHeader(line) {
+  const m = line.match(ROLE_HEADER_RE);
+  if (!m) return null;
+  return { role: m[2], timestamp: m[3], bare: !m[1] };
+}
+
 /**
  * Parses a Markdown-formatted conversation into a structured conversation object.
  * Preserves message ordering, roles, timestamps, attachments, code blocks,
@@ -226,14 +235,16 @@ export function parseMarkdownConversation(markdownText) {
     // **User**:
     // **User** (2026-08-01T10:00:00.000Z):
     // User:
-    const roleMatch =
-      line.match(/^(?:#{1,6}\s+|\*\*)?(User|Assistant|System|Human|AI)(?:\*\*)?(?:\s*\(([^)]+)\))?\s*:?\s*$/i);
+    //
+    // The bare "User:" form is only treated as a header at a message boundary,
+    // so a line like "User:" inside a message body stays part of that message.
+    const roleMatch = matchRoleHeader(line);
 
-    if (roleMatch) {
+    if (roleMatch && (!roleMatch.bare || !currentRole)) {
       flushMessage();
-      const rawRole = roleMatch[1].toLowerCase();
+      const rawRole = roleMatch.role.toLowerCase();
       currentRole = rawRole === "human" ? "user" : rawRole === "ai" ? "assistant" : rawRole;
-      const rawTime = roleMatch[2]?.trim();
+      const rawTime = roleMatch.timestamp?.trim();
       if (rawTime) {
         currentTimestamp = rawTime;
       }
@@ -241,10 +252,15 @@ export function parseMarkdownConversation(markdownText) {
     }
 
     if (currentRole) {
-      // Horizontal rule line separating messages
+      // A horizontal rule only separates messages when it is followed by a
+      // role header or the end of the file; otherwise it is message content.
       if (/^---+$/.test(line.trim())) {
-        flushMessage();
-        continue;
+        let next = i + 1;
+        while (next < lines.length && !lines[next].trim()) next++;
+        if (next >= lines.length || matchRoleHeader(lines[next])) {
+          flushMessage();
+          continue;
+        }
       }
 
       // Attachments metadata

@@ -966,6 +966,27 @@ describe("Conversation Backup System (Issue #411)", () => {
       expect(result.current.messages).toHaveLength(2);
       expect(result.current.messages[0].content).toBe("Hello Vitest");
     });
+
+    it("keeps horizontal rules and role-like lines inside message content on Markdown round-trip", () => {
+      const assistantContent = "Part A\n\n---\n\nPart B\n\nUser:\nstill the assistant";
+      const conv = {
+        id: "md-hr",
+        title: "HR Test",
+        messages: [
+          { id: "m1", role: "user", content: "hi", timestamp: "2026-01-01T00:00:00.000Z" },
+          { id: "m2", role: "assistant", content: assistantContent, timestamp: "2026-01-01T00:00:01.000Z" },
+        ],
+      };
+
+      const md = exportConversationToMarkdown(conv);
+      const parsed = parseMarkdownConversation(md);
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.conversation.messages).toHaveLength(2);
+      expect(parsed.conversation.messages[0].content).toBe("hi");
+      expect(parsed.conversation.messages[1].role).toBe("assistant");
+      expect(parsed.conversation.messages[1].content).toBe(assistantContent);
+    });
   });
 });
 
