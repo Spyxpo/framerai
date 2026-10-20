@@ -612,7 +612,7 @@ the model. Every failure returns the same shape:
 
 `error` is a readable message, `code` is stable enough to branch on
 (`VALIDATION_ERROR`, `NOT_FOUND`, `INVALID_JSON`, `PAYLOAD_TOO_LARGE`,
-`UPLOAD_ERROR`, `RATE_LIMITED`, `INTERNAL_ERROR`), and `details` is only
+`UPLOAD_ERROR`, `RATE_LIMITED`, `ORIGIN_NOT_ALLOWED`, `INTERNAL_ERROR`), and `details` is only
 present when one or more fields failed validation.
 
 ### Limits
@@ -641,6 +641,21 @@ cannot be sidestepped by switching transport.
 every request looks like it comes from the proxy and shares a single bucket.
 The bundled compose stack sets `TRUST_PROXY=1`, since the website's nginx is
 the only hop.
+
+### Origin policy
+
+`CORS_ORIGIN` names the one browser origin allowed to use the API, and it is
+enforced, not only advertised. A request that changes state or runs the model
+(any method but `GET`, `HEAD` or `OPTIONS`) carrying any other `Origin`, including
+an empty one or `null`, is refused with `403` and `code: "ORIGIN_NOT_ALLOWED"`
+before its body is read or an upload is written; the WebSocket handshake is held
+to the same rule. CORS alone only stopped another page reading a response, not
+the backend acting on it. A request with no `Origin` header is served, since
+browsers always send one on such requests and scripts and curl send none. This
+decides which web pages may drive the API; it is not authentication, and anyone
+who can reach the backend directly can still use it. Set `CORS_ORIGIN` to the
+origin the website is actually loaded from (the compose stack uses
+`http://localhost:8080`), or `*` to allow every origin.
 
 ## Inference bridge
 
