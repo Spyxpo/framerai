@@ -1,6 +1,6 @@
 torch>=2.13.0
 numpy>=2.5.1
-Pillow>=12.3.0
+Pillow>=13.0.0
 soundfile>=0.14.0
 
 # Optional extras (the core runs without them):
